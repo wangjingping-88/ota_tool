@@ -5,6 +5,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Threading;
 using OtaTool.App.ViewModels;
 
@@ -201,6 +202,35 @@ public partial class MainWindow : Window
     {
         if (!_followMqttMessages) return;
         Dispatcher.BeginInvoke(MqttMessagesScrollViewer.ScrollToEnd, DispatcherPriority.Background);
+    }
+
+    private void OnNodeListPreviewMouseWheel(object sender, MouseWheelEventArgs eventArgs)
+    {
+        if (sender is not ListBox listBox) return;
+
+        var nodeListScrollViewer = FindVisualChild<ScrollViewer>(listBox);
+        var canScrollInDirection = nodeListScrollViewer is not null &&
+                                   nodeListScrollViewer.ScrollableHeight > 0 &&
+                                   (eventArgs.Delta < 0
+                                       ? nodeListScrollViewer.VerticalOffset < nodeListScrollViewer.ScrollableHeight
+                                       : nodeListScrollViewer.VerticalOffset > 0);
+        if (canScrollInDirection) return;
+
+        TaskConfigurationScrollViewer.ScrollToVerticalOffset(
+            TaskConfigurationScrollViewer.VerticalOffset - eventArgs.Delta);
+        eventArgs.Handled = true;
+    }
+
+    private static T? FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is T match) return match;
+            if (FindVisualChild<T>(child) is { } descendant) return descendant;
+        }
+
+        return null;
     }
 
     private static IntPtr WindowProcedure(

@@ -39,7 +39,7 @@
         </Border>
 
         <StackPanel Grid.Row="3" Margin="0,14,0,0">
-            <ProgressBar Height="7" Minimum="0" Maximum="100" Value="{Binding ProgressPercent}" Visibility="{Binding ProgressVisibility}" />
+            <ProgressBar Height="7" Minimum="0" Maximum="100" Value="{Binding ProgressPercent, Mode=OneWay}" Visibility="{Binding ProgressVisibility}" />
             <TextBlock Margin="0,7,0,0" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="{Binding Status}" TextWrapping="Wrap" />
         </StackPanel>
 

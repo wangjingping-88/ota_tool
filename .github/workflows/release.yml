@@ -69,12 +69,19 @@ jobs:
         run: |
           $tag = '${{ steps.version.outputs.tag }}'
           $package = "OtaTool-$tag-win-x64-portable.zip"
-          gh release create $tag `
-            ".\artifacts\$package" `
-            ".\artifacts\$package.sha256.txt" `
-            --draft `
-            --generate-notes `
-            --title $tag
+          $releaseArguments = @(
+            'release', 'create', $tag,
+            ".\artifacts\$package",
+            ".\artifacts\$package.sha256.txt",
+            '--draft', '--title', $tag
+          )
+          $notesFile = ".\docs\releases\$tag.md"
+          if (Test-Path -LiteralPath $notesFile) {
+            $releaseArguments += @('--notes-file', $notesFile)
+          } else {
+            $releaseArguments += '--generate-notes'
+          }
+          gh @releaseArguments
           gh release view $tag --json assets | ConvertFrom-Json | ForEach-Object {
             $names = @($_.assets.name)
             if ($names -notcontains $package -or $names -notcontains "$package.sha256.txt") {

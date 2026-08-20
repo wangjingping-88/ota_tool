@@ -27,6 +27,7 @@ try
     VerifyPatchCenterWorkflow();
     VerifyWindowChromeWorkAreaBounds();
     VerifyStatusPanelLayout();
+    VerifyUpdateWindowBindings();
     VerifyUpgradeQualityAssessment();
     VerifyNodeTypePresentation();
     VerifyGeneratedMetadataPresentation();
@@ -68,6 +69,7 @@ static void VerifyStaticResourceReferences()
     {
         Path.Combine(assetDirectory, "App.xaml"),
         Path.Combine(assetDirectory, "MainWindow.xaml"),
+        Path.Combine(assetDirectory, "UpdateWindow.xaml"),
     };
     var xaml = string.Join(Environment.NewLine, xamlFiles.Select(File.ReadAllText));
     var definedKeys = System.Text.RegularExpressions.Regex.Matches(
@@ -196,7 +198,7 @@ static void VerifyStatusPanelLayout()
     Assert(!xaml.Contains("<ItemsControl Margin=\"0,10,0,0\" ItemsSource=\"{Binding GatewayStages}\"", StringComparison.Ordinal),
         "重复的阶段概览轴应移除。");
     Assert(xaml.Contains("Text=\"{Binding DisplayStage}\"", StringComparison.Ordinal)
-        && xaml.Contains("Value=\"{Binding ProgressPercent}\"", StringComparison.Ordinal),
+        && xaml.Contains("Value=\"{Binding ProgressPercent, Mode=OneWay}\"", StringComparison.Ordinal),
         "阶段时间线应显示中文阶段名称和确定进度。");
     Assert(xaml.Contains("Text=\"升级状态机\"", StringComparison.Ordinal)
         && !xaml.Contains("Text=\"升级状态确认\"", StringComparison.Ordinal),
@@ -231,8 +233,9 @@ static void VerifyStatusPanelLayout()
         "状态机必须明确显示单次/循环升级方式和当前轮次进度。");
     Assert(xaml.Contains("Text=\"{Binding DisplayDuration}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding DisplayElapsed, Mode=OneWay}\"", StringComparison.Ordinal)
-        && viewModel.Contains("$\"{minutes} min {seconds} s {remainderMilliseconds} ms\"", StringComparison.Ordinal),
-        "阶段和子任务耗时应使用 min、s、ms 组合格式。");
+        && viewModel.Contains("$\"{minutes}分{seconds}秒{remainderMilliseconds}毫秒\"", StringComparison.Ordinal)
+        && !viewModel.Contains(" min ", StringComparison.Ordinal),
+        "阶段和子任务耗时应使用无空格的中文分、秒、毫秒组合格式。");
     Assert(viewModel.Contains("PatchDialogAction.CancelTask", StringComparison.Ordinal)
         && viewModel.Contains("\"确认取消任务\"", StringComparison.Ordinal)
         && viewModel.Contains("await CancelActiveTaskAsync();", StringComparison.Ordinal)
@@ -306,6 +309,11 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("public string NodeCountSummary", StringComparison.Ordinal)
         && viewModel.Contains("OnPropertyChanged(nameof(NodeCountSummary));", StringComparison.Ordinal),
         "Node 长列表应保持内部滚动，为节点显示稳定序号，并动态展示筛选数/总数。");
+    Assert(taskLayout.Contains("x:Name=\"TaskConfigurationScrollViewer\"", StringComparison.Ordinal)
+        && taskLayout.Contains("PreviewMouseWheel=\"OnNodeListPreviewMouseWheel\"", StringComparison.Ordinal)
+        && codeBehind.Contains("nodeListScrollViewer.ScrollableHeight > 0", StringComparison.Ordinal)
+        && codeBehind.Contains("TaskConfigurationScrollViewer.ScrollToVerticalOffset(", StringComparison.Ordinal),
+        "Node 列表无法继续内部滚动时，鼠标滚轮应继续驱动升级配置页面滚动。");
     Assert(viewModel.Contains("public bool IsRefreshingExtenders", StringComparison.Ordinal)
         && viewModel.Contains("public bool IsRefreshingNodes", StringComparison.Ordinal)
         && viewModel.Contains("SelectEligibleNodesAfterRefresh();", StringComparison.Ordinal),
@@ -394,6 +402,14 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("ApplyManifestDetails(manifest, updateTaskType: false);", StringComparison.Ordinal)
         && viewModel.Contains("当前没有适用于“{SelectedTaskType}”的 Patch", StringComparison.Ordinal),
         "升级类型应保留用户选择，只展示设备类型匹配的 Patch，并在没有匹配项时明确提示。");
+}
+
+static void VerifyUpdateWindowBindings()
+{
+    var xaml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "UpdateWindow.xaml"));
+    Assert(xaml.Contains("Value=\"{Binding ProgressPercent, Mode=OneWay}\"", StringComparison.Ordinal)
+        && !xaml.Contains("Value=\"{Binding ProgressPercent}\"", StringComparison.Ordinal),
+        "更新窗口的只读进度属性必须使用 OneWay 绑定，避免打开更新界面时触发 TwoWay 写入异常。");
 }
 
 static void VerifyUpgradeQualityAssessment()

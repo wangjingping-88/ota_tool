@@ -5925,9 +5925,7 @@ internal static class DurationDisplay
         var minutes = totalMilliseconds / 60_000;
         var seconds = totalMilliseconds % 60_000 / 1_000;
         var remainderMilliseconds = totalMilliseconds % 1_000;
-        if (minutes > 0) return $"{minutes} min {seconds} s {remainderMilliseconds} ms";
-        if (seconds > 0) return $"{seconds} s {remainderMilliseconds} ms";
-        return $"{remainderMilliseconds} ms";
+        return $"{minutes}分{seconds}秒{remainderMilliseconds}毫秒";
     }
 }
 

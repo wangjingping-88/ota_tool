@@ -360,7 +360,7 @@
                 <!-- 升级任务 -->
                 <Grid Visibility="{Binding TaskPageVisibility}">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="16" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                    <ScrollViewer VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                    <ScrollViewer x:Name="TaskConfigurationScrollViewer" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
                         <Border Style="{StaticResource Card}"><StackPanel>
                             <Grid><StackPanel><TextBlock FontSize="18" FontWeight="SemiBold" Text="升级任务配置" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,4,0,0" Text="同一套目标和版本参数可启动单次升级，也可按正向 → 反向执行循环升级。" TextWrapping="Wrap" /></StackPanel></Grid>
                             <Grid Margin="0,20,0,0">
@@ -435,6 +435,7 @@
                                                          MaxHeight="250"
                                                          ItemsSource="{Binding VisibleNodes}"
                                                          Visibility="{Binding NodeListVisibility}"
+                                                         PreviewMouseWheel="OnNodeListPreviewMouseWheel"
                                                          ScrollViewer.CanContentScroll="True"
                                                          VirtualizingPanel.IsVirtualizing="True"
                                                          VirtualizingPanel.VirtualizationMode="Recycling">
@@ -579,12 +580,12 @@
                                                             <TextBlock Grid.Column="1" Margin="0,0,10,0" Foreground="{Binding StateColor}" Text="{Binding DisplayState}" TextWrapping="Wrap" />
                                                             <TextBlock Grid.Column="2" Margin="0,0,10,0" Text="{Binding LocalStartTime}" TextWrapping="Wrap" />
                                                             <TextBlock Grid.Column="3" Margin="0,0,10,0" Foreground="{StaticResource MutedInkBrush}" Text="{Binding Direction}" TextWrapping="Wrap" />
-                                                            <TextBlock Grid.Column="4" Margin="0,0,10,0" Text="{Binding DisplayDuration}" TextWrapping="Wrap" ToolTip="按 min、s、ms 组合显示" />
+                                                            <TextBlock Grid.Column="4" Margin="0,0,10,0" Text="{Binding DisplayDuration}" TextWrapping="Wrap" ToolTip="按分、秒、毫秒组合显示" />
                                                             <Grid Grid.Column="5" VerticalAlignment="Center">
                                                                 <TextBlock Foreground="{StaticResource MutedInkBrush}" Text="{Binding DisplayReason}" TextWrapping="Wrap" />
                                                                 <Grid Visibility="{Binding ProgressVisibility}">
                                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                                                    <ProgressBar Height="6" VerticalAlignment="Center" Minimum="0" Maximum="100" Value="{Binding ProgressPercent}" />
+                                                                    <ProgressBar Height="6" VerticalAlignment="Center" Minimum="0" Maximum="100" Value="{Binding ProgressPercent, Mode=OneWay}" />
                                                                     <TextBlock Grid.Column="1" Margin="8,0,0,0" Foreground="{Binding StateColor}" Text="{Binding ProgressText}" />
                                                                 </Grid>
                                                                 <ProgressBar Width="64" Height="4" HorizontalAlignment="Left" VerticalAlignment="Center" IsIndeterminate="True" Visibility="{Binding IndeterminateProgressVisibility}" />
