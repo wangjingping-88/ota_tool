@@ -134,7 +134,7 @@ public static class OtaTaskValidator
         if (task.Mode == OtaMode.EcoLink && task.DeviceType == DeviceType.Async
             && task.Target.Scope != TargetScope.SpecifiedIds)
         {
-            return OtaTaskValidationResult.Failure("EcoLink Async 升级必须填写目标 ID，不支持广播。");
+            return OtaTaskValidationResult.Failure("EcoLink 拓展器-异步升级必须填写目标 ID，不支持广播。");
         }
 
         if (task.DeviceType is DeviceType.Sync or DeviceType.Async
@@ -148,7 +148,7 @@ public static class OtaTaskValidator
         {
             if (task.Mode != OtaMode.EcoLink)
             {
-                return OtaTaskValidationResult.Failure("传统模式不支持 Node 升级。");
+                return OtaTaskValidationResult.Failure("传统模式不支持节点升级。");
             }
             if (task.NodeType is not (>= 2 and <= 63))
             {

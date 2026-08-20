@@ -84,7 +84,7 @@ public sealed class ApplicationUpdateViewModel : ObservableObject, IDisposable
 
     public bool HasAvailableUpdate => AvailableRelease is not null;
 
-    public string CheckButtonText => IsChecking ? "正在检查…" : "立即检查更新";
+    public string CheckButtonText => IsChecking ? "正在检查…" : "检查更新";
 
     public string ActionButtonText => HasAvailableUpdate ? "查看更新" : "打开发布页";
 

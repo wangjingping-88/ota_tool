@@ -6,7 +6,7 @@ param(
     [string]$FirmwareDirectory = "D:\serial-log-data\ota\firmware",
     [string]$PackageDirectory = "D:\serial-log-data\ota\packages",
     [string]$WorkDirectory = "",
-    [string]$OtaToolPath = "D:\tools\OTA_TOOL\OTA_TOOL.exe",
+    [string]$OtaToolPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "Tools\OTA_TOOL\OTA_TOOL.exe"),
     [string]$PatchToTest = "",
     [long]$PatchLimitBytes = 0,
     [ValidateRange(0, 1048576)]
@@ -111,13 +111,6 @@ $bmClick = 0x00F5
 $launchedProcess = $null
 
 function Get-OtaToolProcess {
-    $process = Get-Process -Name "OTA_TOOL" -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowHandle -ne 0 } |
-        Select-Object -First 1
-    if ($null -ne $process) {
-        return $process
-    }
-
     $script:launchedProcess = Start-Process -FilePath $OtaToolPath -WindowStyle Minimized -PassThru
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {

@@ -25,12 +25,15 @@ namespace OtaTool.App.ViewModels;
 
 public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 {
+    public event EventHandler? CloseApplicationRequested;
+
     private readonly HttpRangeServer _httpRangeServer = new();
     private readonly EmbeddedMqttBroker _embeddedBroker = new();
     private readonly ReconnectingMqttTransport _mqtt = new(() => new Mqtt311Client());
     private readonly DeviceDiscoveryService _deviceDiscovery;
     private readonly SqliteReportStore _reportStore;
     private readonly JsonSettingsStore _settingsStore;
+    private readonly AppSettings _startupSettings;
     private readonly ISecretStore _secretStore = new WindowsCredentialStore();
     private readonly SemaphoreSlim _settingsSaveLock = new(1, 1);
     private readonly Task _initializationTask;
@@ -39,10 +42,26 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private Task? _disposeTask;
     private bool _settingsLoaded;
     private bool _isEcoLink = true;
+    private const string EcoLinkModeKey = "EcoLink";
+    private const string TraditionalModeKey = "Traditional";
+    private const string GatewayTaskType = "网关升级";
+    private const string SyncTaskType = "拓展器-同步升级";
+    private const string AsyncTaskType = "拓展器-异步升级";
+    private const string NodeTaskType = "节点升级";
+    private readonly Dictionary<string, ModeWorkspaceSettings> _modeWorkspaces = new(StringComparer.OrdinalIgnoreCase)
+    {
+        [EcoLinkModeKey] = new(),
+        [TraditionalModeKey] = new(),
+    };
+    private string _ecoLinkSelectedTaskType = GatewayTaskType;
+    private string _traditionalSelectedTaskType = GatewayTaskType;
+    private readonly UpgradeModeUiState _ecoLinkUpgradeUiState = UpgradeModeUiState.CreateEcoLink();
+    private readonly UpgradeModeUiState _traditionalUpgradeUiState = UpgradeModeUiState.CreateTraditional();
+    private bool _restoringModeWorkspace;
     private bool _isSpecifiedTarget = true;
     private NavigationItem? _selectedPage;
     private string _globalLogText = string.Empty;
-    private string _selectedTaskType = "Gateway 升级";
+    private string _selectedTaskType = GatewayTaskType;
     private string _taskStatusMessage = "当前任务：空闲  · 请选择 Patch 后启动升级";
     private string _patchPath = string.Empty;
     private string _importedPatchPath = string.Empty;
@@ -119,6 +138,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _forwardPatchName = "a-to-b";
     private string _reversePatchName = "b-to-a";
     private int _cycleRounds = 1;
+    private string _cycleIntervalMode = "固定间隔";
+    private int _cycleFixedIntervalSeconds;
+    private int _cycleRandomMinimumSeconds;
+    private int _cycleRandomMaximumSeconds;
     private long _nodePatchLimit = PatchCapacityPolicy.NodePatchLimit;
     private long _asyncPatchLimit = PatchCapacityPolicy.AsyncPatchLimit;
     private long _syncPatchLimit = PatchCapacityPolicy.SyncPatchLimit;
@@ -130,6 +153,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private readonly HashSet<Guid> _autoExportedReportIds = [];
     private readonly SemaphoreSlim _reportWriteLock = new(1, 1);
     private bool _isCycleUpgradeRunning;
+    private CancellationTokenSource? _cycleCancellation;
+    private string _upgradeRunModeText = "尚未启动";
+    private string _upgradeRunModeForeground = "#65758B";
+    private string _upgradeRunModeBackground = "#EEF2F7";
+    private string _upgradeRunProgressText = "启动任务后显示执行方式和进度。";
     private readonly HashSet<string> _observedGatewayIds = new(StringComparer.Ordinal);
     private string _subscribedGatewayTopic = string.Empty;
     private string _gatewaySubscriptionStatus = "填写 Gateway ID 后订阅固定上行主题。";
@@ -154,6 +182,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _logDirectory = string.Empty;
     private string _logAnalysisStatus = "未导入日志";
     private string _logAnalysisResultText = "尚未执行日志分析。";
+    private IReadOnlyList<LogAnalysisLineViewItem> _logAnalysisResultLines =
+        [new("尚未执行日志分析。", false, false)];
     private string _logAnalysisQualityScore = "--";
     private string _logAnalysisQualityGrade = "尚未评估";
     private string _logAnalysisQualitySummary = "分析日志后生成 100 分制质量评估。";
@@ -201,6 +231,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         ToggleMqttConnectionCommand = new AsyncRelayCommand(ToggleMqttConnectionAsync);
         ToggleLocalMqttConnectionCommand = new AsyncRelayCommand(ToggleLocalMqttConnectionAsync);
         TogglePublicMqttConnectionCommand = new AsyncRelayCommand(TogglePublicMqttConnectionAsync);
+        SelectMqttConfigurationCommand = new RelayCommand(SelectMqttConfiguration);
         StartEmbeddedBrokerCommand = new AsyncRelayCommand(StartEmbeddedBrokerAsync);
         StopEmbeddedBrokerCommand = new AsyncRelayCommand(StopEmbeddedBrokerAsync);
         ToggleEmbeddedBrokerCommand = new AsyncRelayCommand(ToggleEmbeddedBrokerAsync);
@@ -208,10 +239,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         CancelTaskCommand = new AsyncRelayCommand(CancelTaskAsync);
         SubscribeGatewayTopicCommand = new AsyncRelayCommand(SubscribeGatewayTopicAsync);
         ClearMqttMessagesCommand = new RelayCommand(_ => ClearMqttMessages());
+        ClearGlobalLogCommand = new RelayCommand(_ => GlobalLogText = string.Empty);
         PublishPatchCommand = new AsyncRelayCommand(PublishPatchAsync);
         TestPublishConnectionCommand = new AsyncRelayCommand(TestPublishConnectionAsync);
         AnalyzeLogsCommand = new AsyncRelayCommand(AnalyzeLogsAsync);
         BrowseLogDirectoryCommand = new RelayCommand(BrowseLogDirectory);
+        RemoveImportedLogFileCommand = new RelayCommand(RemoveImportedLogFile);
         LoadReportsCommand = new AsyncRelayCommand(() => LoadReportsAsync());
         OpenReportCommand = new AsyncRelayCommand(OpenSelectedReportAsync);
         ToggleReportArchiveCommand = new AsyncRelayCommand(ToggleSelectedReportArchiveAsync);
@@ -229,6 +262,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         AddNodeTypeCommand = new AsyncRelayCommand(AddNodeTypeAsync);
         _reportStore = new SqliteReportStore(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtaTool", "ota-tool.db"));
         _settingsStore = new JsonSettingsStore(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtaTool", "settings.json"));
+        _startupSettings = LoadStartupSettings();
+        ApplyStartupShellSettings(_startupSettings);
         _mqtt.ConnectionStateChanged += (_, status) => RunOnUi(() => MqttStatus = status);
         _mqtt.MessageReceived += OnMqttMessageReceived;
         ApplyMode();
@@ -254,6 +289,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public ObservableCollection<string> PatchRestoreDirections { get; } = ["A → B", "B → A"];
 
     public IReadOnlyList<PatchSelection> PatchCatalog => _patchCatalog.Values
+        .Where(item => IsInCurrentPatchWorkspace(item.FilePath))
         .OrderBy(item => item.FileName, StringComparer.OrdinalIgnoreCase)
         .ToArray();
 
@@ -504,6 +540,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public ICommand TogglePublicMqttConnectionCommand { get; }
 
+    public ICommand SelectMqttConfigurationCommand { get; }
+
     public ICommand StartEmbeddedBrokerCommand { get; }
 
     public ICommand StopEmbeddedBrokerCommand { get; }
@@ -518,6 +556,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public ICommand ClearMqttMessagesCommand { get; }
 
+    public ICommand ClearGlobalLogCommand { get; }
+
     public ICommand PublishPatchCommand { get; }
 
     public ICommand TestPublishConnectionCommand { get; }
@@ -525,6 +565,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public ICommand AnalyzeLogsCommand { get; }
 
     public ICommand BrowseLogDirectoryCommand { get; }
+
+    public ICommand RemoveImportedLogFileCommand { get; }
 
     public ICommand LoadReportsCommand { get; }
 
@@ -560,6 +602,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 return;
             }
 
+            if (!_restoringModeWorkspace)
+            {
+                GetCurrentModeWorkspace().SelectedPageName = value.Name;
+            }
+
             OnPropertyChanged(nameof(CurrentPageTitle));
             OnPropertyChanged(nameof(CurrentPageSubtitle));
             OnPropertyChanged(nameof(EnvironmentPageVisibility));
@@ -578,6 +625,23 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         get => _isEcoLink;
         set
         {
+            if (_isEcoLink == value) return;
+            if (IsUpgradeInProgress)
+            {
+                TaskStatusMessage = "升级任务进行中，不能切换协议模式。";
+                OnPropertyChanged(nameof(IsEcoLink));
+                OnPropertyChanged(nameof(IsTraditional));
+                return;
+            }
+            if (_mqtt.IsConnected || _httpRangeServer.IsRunning || _embeddedBroker.IsRunning || IsPublishing || IsPatchDialogOpen)
+            {
+                TaskStatusMessage = "请先关闭当前确认框、断开 MQTT、停止本地服务并等待发布结束，再切换协议模式。";
+                OnPropertyChanged(nameof(IsEcoLink));
+                OnPropertyChanged(nameof(IsTraditional));
+                return;
+            }
+
+            SaveCurrentModeUiState();
             if (!SetProperty(ref _isEcoLink, value))
             {
                 return;
@@ -585,13 +649,18 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
             OnPropertyChanged(nameof(IsTraditional));
             ApplyMode();
+            ApplyCurrentModeWorkspace();
             RefreshUpgradePatchChoices();
+            RestoreCurrentModeUpgradeUiState();
+            _ = RestoreCurrentModePatchCatalogAsync();
+            _ = LoadReportsAsync(updateStatus: false);
             OnPropertyChanged(nameof(TargetScopeVisibility));
             OnPropertyChanged(nameof(SpecifiedTargetVisibility));
             OnPropertyChanged(nameof(BroadcastTargetVisibility));
             OnPropertyChanged(nameof(ExtenderSelectionVisibility));
             OnPropertyChanged(nameof(EcoLinkStatusDetailsVisibility));
             OnPropertyChanged(nameof(TraditionalStatusVisibility));
+            ScheduleSettingsAutoSave();
         }
     }
 
@@ -603,10 +672,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             if (value)
             {
                 IsEcoLink = false;
-            }
-            else if (!_isEcoLink)
-            {
-                IsEcoLink = true;
             }
         }
     }
@@ -636,10 +701,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             {
                 IsSpecifiedTarget = false;
             }
-            else if (!_isSpecifiedTarget)
-            {
-                IsSpecifiedTarget = true;
-            }
         }
     }
 
@@ -650,6 +711,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             if (SetProperty(ref _selectedTaskType, value))
             {
+                if (IsEcoLink) _ecoLinkSelectedTaskType = value;
+                else _traditionalSelectedTaskType = value;
                 if (RequiresSpecifiedTarget)
                 {
                     IsSpecifiedTarget = true;
@@ -800,18 +863,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(MqttClientEndpoint));
             OnPropertyChanged(nameof(MqttExternalConfigurationVisibility));
             OnPropertyChanged(nameof(MqttLocalConfigurationVisibility));
+            ScheduleSettingsAutoSave();
         }
     }
 
-    public bool MqttClientUsesExternalBroker
-    {
-        get => !_mqttClientUsesLocalBroker;
-        set
-        {
-            if (value) MqttClientUsesLocalBroker = false;
-            else if (!_mqttClientUsesLocalBroker) MqttClientUsesLocalBroker = true;
-        }
-    }
+    public bool MqttClientUsesExternalBroker => !_mqttClientUsesLocalBroker;
 
     public int LocalBrokerPort
     {
@@ -865,6 +921,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(SelectedHttpPatchUrl));
             OnPropertyChanged(nameof(HttpLocalConfigurationVisibility));
             OnPropertyChanged(nameof(HttpPublicConfigurationVisibility));
+            ScheduleSettingsAutoSave();
         }
     }
 
@@ -874,7 +931,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         set
         {
             if (value) HttpUsesLocalServer = false;
-            else if (!_httpUsesLocalServer) HttpUsesLocalServer = true;
         }
     }
 
@@ -924,6 +980,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             if (!SetProperty(ref _mqttStatus, value)) return;
             OnPropertyChanged(nameof(IsMqttConnected));
+            OnPropertyChanged(nameof(CanRefreshDiscovery));
             OnPropertyChanged(nameof(MqttConnectionToggleText));
             OnPropertyChanged(nameof(LocalMqttConnectionToggleText));
             OnPropertyChanged(nameof(PublicMqttConnectionToggleText));
@@ -962,26 +1019,26 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public Visibility SettingsPageVisibility => IsSelectedPage("系统设置") ? Visibility.Visible : Visibility.Collapsed;
 
-    public bool RequiresSpecifiedTarget => IsEcoLink && SelectedTaskType is "Async 升级" or "Node 升级";
+    public bool RequiresSpecifiedTarget => IsEcoLink && SelectedTaskType is AsyncTaskType or NodeTaskType;
 
-    public Visibility TargetScopeVisibility => SelectedTaskType is "Gateway 升级" or "Node 升级"
-        || (IsEcoLink && SelectedTaskType == "Async 升级")
+    public Visibility TargetScopeVisibility => SelectedTaskType is GatewayTaskType or NodeTaskType
+        || (IsEcoLink && SelectedTaskType == AsyncTaskType)
         ? Visibility.Collapsed
         : Visibility.Visible;
 
-    public Visibility SpecifiedTargetVisibility => IsSpecifiedTarget && SelectedTaskType is not "Node 升级" and not "Gateway 升级"
+    public Visibility SpecifiedTargetVisibility => IsSpecifiedTarget && SelectedTaskType is not NodeTaskType and not GatewayTaskType
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    public Visibility NodeTaskVisibility => IsEcoLink && SelectedTaskType == "Node 升级" ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility NodeTaskVisibility => IsEcoLink && SelectedTaskType == NodeTaskType ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility ExtenderSelectionVisibility => IsEcoLink &&
-        (SelectedTaskType is "Async 升级" or "Node 升级" ||
-         (SelectedTaskType == "Sync 升级" && IsSpecifiedTarget))
+        (SelectedTaskType is AsyncTaskType or NodeTaskType ||
+         (SelectedTaskType == SyncTaskType && IsSpecifiedTarget))
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    public Visibility NodeDiscoveryVisibility => IsEcoLink && SelectedTaskType == "Node 升级"
+    public Visibility NodeDiscoveryVisibility => IsEcoLink && SelectedTaskType == NodeTaskType
         ? Visibility.Visible
         : Visibility.Collapsed;
 
@@ -1001,7 +1058,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public bool CanControlPolling => _runner?.HasActiveTask == true;
 
-    public bool CanCancelTask => _runner?.HasActiveTask == true;
+    public bool CanCancelTask => _runner?.HasActiveTask == true || _isCycleUpgradeRunning;
 
     public string GatewaySubscriptionTopic => $"ucchip/up/sgw/{GatewayId}/#";
 
@@ -1041,7 +1098,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             if (!SetProperty(ref _patchOutputDirectory, value)) return;
             _patchCatalog.Clear();
-            _ = LoadPatchCatalogFromOutputDirectoryAsync();
+            if (!_restoringModeWorkspace)
+            {
+                _ = LoadPatchCatalogFromOutputDirectoryAsync();
+            }
         }
     }
 
@@ -1102,6 +1162,75 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public int CycleRounds { get => _cycleRounds; set => SetProperty(ref _cycleRounds, value); }
+
+    public IReadOnlyList<string> CycleIntervalModes { get; } = ["固定间隔", "随机间隔"];
+
+    public string CycleIntervalMode
+    {
+        get => _cycleIntervalMode;
+        set
+        {
+            var normalized = CycleIntervalModes.Contains(value) ? value : CycleIntervalModes[0];
+            if (!SetProperty(ref _cycleIntervalMode, normalized)) return;
+            OnPropertyChanged(nameof(FixedCycleIntervalVisibility));
+            OnPropertyChanged(nameof(RandomCycleIntervalVisibility));
+            OnPropertyChanged(nameof(CycleIntervalSummary));
+        }
+    }
+
+    public int CycleFixedIntervalSeconds
+    {
+        get => _cycleFixedIntervalSeconds;
+        set
+        {
+            if (SetProperty(ref _cycleFixedIntervalSeconds, Math.Clamp(value, 0, 86400)))
+            {
+                OnPropertyChanged(nameof(CycleIntervalSummary));
+            }
+        }
+    }
+
+    public int CycleRandomMinimumSeconds
+    {
+        get => _cycleRandomMinimumSeconds;
+        set
+        {
+            if (SetProperty(ref _cycleRandomMinimumSeconds, Math.Clamp(value, 0, 86400)))
+            {
+                OnPropertyChanged(nameof(CycleIntervalSummary));
+            }
+        }
+    }
+
+    public int CycleRandomMaximumSeconds
+    {
+        get => _cycleRandomMaximumSeconds;
+        set
+        {
+            if (SetProperty(ref _cycleRandomMaximumSeconds, Math.Clamp(value, 0, 86400)))
+            {
+                OnPropertyChanged(nameof(CycleIntervalSummary));
+            }
+        }
+    }
+
+    public Visibility FixedCycleIntervalVisibility => CycleIntervalMode == "固定间隔"
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public Visibility RandomCycleIntervalVisibility => CycleIntervalMode == "随机间隔"
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+
+    public string CycleIntervalSummary => CycleIntervalMode == "固定间隔"
+        ? CycleFixedIntervalSeconds == 0
+            ? "间隔为 0 秒，正反向升级连续执行。"
+            : $"每次单次升级完成后固定等待 {CycleFixedIntervalSeconds} 秒。"
+        : CycleRandomMinimumSeconds > CycleRandomMaximumSeconds
+            ? "随机间隔无效：起始秒数不能大于结束秒数。"
+        : CycleRandomMinimumSeconds == 0 && CycleRandomMaximumSeconds == 0
+            ? "随机区间为 0 到 0 秒，正反向升级连续执行。"
+            : $"每次单次升级完成后随机等待 {CycleRandomMinimumSeconds} 到 {CycleRandomMaximumSeconds} 秒。";
 
     public long NodePatchLimit { get => _nodePatchLimit; set => SetProperty(ref _nodePatchLimit, Math.Max(1, value)); }
 
@@ -1235,9 +1364,31 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public string LogDirectory { get => _logDirectory; set => SetProperty(ref _logDirectory, value); }
 
+    public ObservableCollection<ImportedLogFileItem> ImportedLogFiles { get; } = [];
+
+    public bool HasImportedLogFiles => ImportedLogFiles.Count > 0;
+
+    public string ImportedLogFilesSummary => ImportedLogFiles.Count == 0
+        ? "尚未导入 .log 文件"
+        : $"本次分析包含 {ImportedLogFiles.Count} 个 .log 文件";
+
     public string LogAnalysisStatus { get => _logAnalysisStatus; private set => SetProperty(ref _logAnalysisStatus, value); }
 
-    public string LogAnalysisResultText { get => _logAnalysisResultText; private set => SetProperty(ref _logAnalysisResultText, value); }
+    public string LogAnalysisResultText
+    {
+        get => _logAnalysisResultText;
+        private set
+        {
+            if (!SetProperty(ref _logAnalysisResultText, value)) return;
+            LogAnalysisResultLines = BuildLogAnalysisResultLines(value);
+        }
+    }
+
+    public IReadOnlyList<LogAnalysisLineViewItem> LogAnalysisResultLines
+    {
+        get => _logAnalysisResultLines;
+        private set => SetProperty(ref _logAnalysisResultLines, value);
+    }
 
     public string LogAnalysisQualityScore { get => _logAnalysisQualityScore; private set => SetProperty(ref _logAnalysisQualityScore, value); }
 
@@ -1291,7 +1442,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public bool IsDiscoveringDevices => IsRefreshingExtenders || IsRefreshingNodes;
 
-    public bool CanRefreshDiscovery => !IsDiscoveringDevices;
+    private bool IsUpgradeInProgress => _isUpgradeStartInProgress || _isCycleUpgradeRunning || _runner?.HasActiveTask == true;
+
+    public bool CanRefreshDiscovery => IsEcoLink && IsMqttConnected && !IsDiscoveringDevices && !IsUpgradeInProgress;
 
     public string DeviceDiscoveryButtonText => IsRefreshingExtenders ? "刷新中…" : "刷新 Extender";
 
@@ -1323,6 +1476,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         get => _gatewayStageColor;
         private set => SetProperty(ref _gatewayStageColor, value);
+    }
+
+    public string UpgradeRunModeText
+    {
+        get => _upgradeRunModeText;
+        private set => SetProperty(ref _upgradeRunModeText, value);
+    }
+
+    public string UpgradeRunModeForeground
+    {
+        get => _upgradeRunModeForeground;
+        private set => SetProperty(ref _upgradeRunModeForeground, value);
+    }
+
+    public string UpgradeRunModeBackground
+    {
+        get => _upgradeRunModeBackground;
+        private set => SetProperty(ref _upgradeRunModeBackground, value);
+    }
+
+    public string UpgradeRunProgressText
+    {
+        get => _upgradeRunProgressText;
+        private set => SetProperty(ref _upgradeRunProgressText, value);
     }
 
     public string MqttMessageFilter
@@ -1381,6 +1558,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             UpdatePaths.DefaultUpdateRoot,
             out error);
 
+    public bool RequestCloseApplicationConfirmation()
+    {
+        if (!IsUpgradeInProgress) return false;
+        if (_patchDialogAction == PatchDialogAction.CloseApplication && IsPatchDialogOpen) return true;
+
+        OpenPatchDialog(
+            PatchDialogAction.CloseApplication,
+            "升级任务仍在进行",
+            "当前仍有正在进行的升级任务。\n\n关闭软件将停止工具端状态跟踪；如果正在执行循环升级，后续步骤不会继续。确定关闭吗？",
+            "仍然关闭");
+        return true;
+    }
+
     public ValueTask DisposeAsync()
     {
         _disposeTask ??= DisposeCoreAsync();
@@ -1401,6 +1591,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         await SaveSettingsAsync();
         _settingsAutoSaveCancellation?.Dispose();
+        _cycleCancellation?.Cancel();
         if (_runner is not null) await _runner.DisposeAsync();
         await _httpRangeServer.DisposeAsync();
         await _embeddedBroker.DisposeAsync();
@@ -1411,12 +1602,453 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private async Task InitializeAsync()
     {
         await _reportStore.InitializeAsync();
-        await LoadSettingsAsync();
+        await LoadSettingsAsync(_startupSettings);
     }
 
-    private void ApplyMode()
+    private AppSettings LoadStartupSettings()
     {
-        var previousPageName = SelectedPage?.Name;
+        try
+        {
+            return _settingsStore.Load();
+        }
+        catch
+        {
+            return new AppSettings();
+        }
+    }
+
+    private void ApplyStartupShellSettings(AppSettings settings)
+    {
+        var modeKey = string.Equals(settings.ActiveMode, TraditionalModeKey, StringComparison.OrdinalIgnoreCase)
+            ? TraditionalModeKey
+            : EcoLinkModeKey;
+        _isEcoLink = modeKey == EcoLinkModeKey;
+        var workspace = settings.ModeWorkspaces?
+            .FirstOrDefault(pair => string.Equals(pair.Key, modeKey, StringComparison.OrdinalIgnoreCase))
+            .Value;
+        _mqttClientUsesLocalBroker = workspace?.MqttClientUsesLocalBroker
+            ?? settings.MqttClientUsesLocalBroker;
+    }
+
+    private static string NormalizeTaskType(string? taskType) => taskType switch
+    {
+        "Gateway 升级" or GatewayTaskType => GatewayTaskType,
+        "Sync 升级" or SyncTaskType => SyncTaskType,
+        "Async 升级" or AsyncTaskType => AsyncTaskType,
+        "Node 升级" or NodeTaskType => NodeTaskType,
+        _ => GatewayTaskType,
+    };
+
+    private string CurrentModeKey => IsEcoLink ? EcoLinkModeKey : TraditionalModeKey;
+
+    private ModeWorkspaceSettings GetCurrentModeWorkspace()
+    {
+        if (_modeWorkspaces.TryGetValue(CurrentModeKey, out var workspace))
+        {
+            return workspace;
+        }
+
+        workspace = new ModeWorkspaceSettings();
+        _modeWorkspaces[CurrentModeKey] = workspace;
+        return workspace;
+    }
+
+    private void SaveCurrentModeUiState()
+    {
+        _modeWorkspaces[CurrentModeKey] = CaptureCurrentModeWorkspace();
+        SaveCurrentModeSecrets();
+
+        var state = IsEcoLink ? _ecoLinkUpgradeUiState : _traditionalUpgradeUiState;
+        state.TaskStatusMessage = TaskStatusMessage;
+        state.GlobalLogText = GlobalLogText;
+        state.GatewayStageSummary = GatewayStageSummary;
+        state.GatewayStageColor = GatewayStageColor;
+        state.LastGatewayStatus = _lastGatewayStatus;
+        state.GatewayTaskSequence = _gatewayTaskSequence;
+        state.GatewayTaskStartedAt = _gatewayTaskStartedAt;
+        state.UpgradeRunModeText = UpgradeRunModeText;
+        state.UpgradeRunModeForeground = UpgradeRunModeForeground;
+        state.UpgradeRunModeBackground = UpgradeRunModeBackground;
+        state.UpgradeRunProgressText = UpgradeRunProgressText;
+        state.DeviceDiscoveryStatus = DeviceDiscoveryStatus;
+        state.NodeDiscoveryStatus = NodeDiscoveryStatus;
+        state.LogAnalysisStatus = LogAnalysisStatus;
+        state.LogAnalysisResultText = LogAnalysisResultText;
+        state.LogAnalysisQualityScore = LogAnalysisQualityScore;
+        state.LogAnalysisQualityGrade = LogAnalysisQualityGrade;
+        state.LogAnalysisQualitySummary = LogAnalysisQualitySummary;
+        state.LogAnalysisQualityColor = LogAnalysisQualityColor;
+        state.SettingsStatus = SettingsStatus;
+        state.MqttMessages = MqttMessages.ToArray();
+        state.MqttMessageFilter = MqttMessageFilter;
+        state.GatewaySubscriptionStatus = GatewaySubscriptionStatus;
+        state.SubscribedGatewayTopic = _subscribedGatewayTopic;
+        state.ObservedGatewayIds = _observedGatewayIds.ToArray();
+        state.SelectedReportId = SelectedReport?.Id;
+        state.ImportedPatchPath = _importedPatchPath;
+        state.ImportedPatchLength = _importedPatchLength;
+        state.ImportedPatchMd5 = _importedPatchMd5;
+        state.ImportedPatchSha256 = _importedPatchSha256;
+        state.OldImagePath = _oldImagePath;
+        state.NewImagePath = _newImagePath;
+        state.OldImageSha256 = _oldImageSha256;
+        state.NewImageSha256 = _newImageSha256;
+        state.OldFirmwareIdentity = _oldFirmwareIdentity;
+        state.NewFirmwareIdentity = _newFirmwareIdentity;
+        state.AreFirmwareImagesCompatible = _areFirmwareImagesCompatible;
+        state.PatchPath = _patchPath;
+        state.PatchUrl = _patchUrl;
+        state.PatchMd5 = _patchMd5;
+        state.PatchSha256 = _patchSha256;
+        state.PatchLength = _patchLength;
+        state.PatchManifestVerified = _patchManifestVerified;
+        state.ReversePatchPath = _reversePatchPath;
+        state.ReversePatchUrl = _reversePatchUrl;
+        state.ReversePatchMd5 = _reversePatchMd5;
+        state.ReversePatchSha256 = _reversePatchSha256;
+        state.ReversePatchLength = _reversePatchLength;
+        state.SelectedPatchManifest = _selectedPatchManifest;
+        state.SelectedRestorePatchPath = SelectedRestorePatch?.FilePath ?? string.Empty;
+        state.SelectedPatchRestoreDirection = SelectedPatchRestoreDirection;
+        state.PatchStatus = PatchStatus;
+        state.PatchRestoreTestStatus = PatchRestoreTestStatus;
+        state.PublishStatus = PublishStatus;
+        state.PublishConnectionTestStatus = PublishConnectionTestStatus;
+        state.HasPublishedPatches = HasPublishedPatches;
+    }
+
+    private void RestoreCurrentModeUpgradeUiState()
+    {
+        var state = IsEcoLink ? _ecoLinkUpgradeUiState : _traditionalUpgradeUiState;
+        _taskStatusMessage = state.TaskStatusMessage;
+        OnPropertyChanged(nameof(TaskStatusMessage));
+        _globalLogText = state.GlobalLogText;
+        OnPropertyChanged(nameof(GlobalLogText));
+        GatewayStageSummary = state.GatewayStageSummary;
+        GatewayStageColor = state.GatewayStageColor;
+        _lastGatewayStatus = state.LastGatewayStatus;
+        _gatewayTaskSequence = state.GatewayTaskSequence;
+        _gatewayTaskStartedAt = state.GatewayTaskStartedAt;
+        UpgradeRunModeText = state.UpgradeRunModeText;
+        UpgradeRunModeForeground = state.UpgradeRunModeForeground;
+        UpgradeRunModeBackground = state.UpgradeRunModeBackground;
+        UpgradeRunProgressText = state.UpgradeRunProgressText;
+        DeviceDiscoveryStatus = state.DeviceDiscoveryStatus;
+        NodeDiscoveryStatus = state.NodeDiscoveryStatus;
+        LogAnalysisStatus = state.LogAnalysisStatus;
+        LogAnalysisResultText = state.LogAnalysisResultText;
+        LogAnalysisQualityScore = state.LogAnalysisQualityScore;
+        LogAnalysisQualityGrade = state.LogAnalysisQualityGrade;
+        LogAnalysisQualitySummary = state.LogAnalysisQualitySummary;
+        LogAnalysisQualityColor = state.LogAnalysisQualityColor;
+        SettingsStatus = state.SettingsStatus;
+        MqttMessages.Clear();
+        foreach (var message in state.MqttMessages)
+        {
+            MqttMessages.Add(message);
+        }
+        MqttMessageFilter = state.MqttMessageFilter;
+        GatewaySubscriptionStatus = state.GatewaySubscriptionStatus;
+        _subscribedGatewayTopic = state.SubscribedGatewayTopic;
+        _observedGatewayIds.Clear();
+        foreach (var gatewayId in state.ObservedGatewayIds)
+        {
+            _observedGatewayIds.Add(gatewayId);
+        }
+        OnPropertyChanged(nameof(VisibleMqttMessages));
+        OnPropertyChanged(nameof(GatewayOnlineStatus));
+        OnPropertyChanged(nameof(IsGatewayTopicSubscribed));
+        OnPropertyChanged(nameof(GatewaySubscriptionBadgeText));
+        OnPropertyChanged(nameof(GatewaySubscriptionBadgeBackground));
+        OnPropertyChanged(nameof(GatewaySubscriptionBadgeForeground));
+
+        _importedPatchPath = state.ImportedPatchPath;
+        _importedPatchLength = state.ImportedPatchLength;
+        _importedPatchMd5 = state.ImportedPatchMd5;
+        _importedPatchSha256 = state.ImportedPatchSha256;
+        _oldImagePath = state.OldImagePath;
+        _newImagePath = state.NewImagePath;
+        _oldImageSha256 = state.OldImageSha256;
+        _newImageSha256 = state.NewImageSha256;
+        _oldFirmwareIdentity = state.OldFirmwareIdentity;
+        _newFirmwareIdentity = state.NewFirmwareIdentity;
+        _areFirmwareImagesCompatible = state.AreFirmwareImagesCompatible;
+        _patchPath = state.PatchPath;
+        _patchUrl = state.PatchUrl;
+        _patchMd5 = state.PatchMd5;
+        _patchSha256 = state.PatchSha256;
+        _patchLength = state.PatchLength;
+        _patchManifestVerified = state.PatchManifestVerified;
+        _reversePatchPath = state.ReversePatchPath;
+        _reversePatchUrl = state.ReversePatchUrl;
+        _reversePatchMd5 = state.ReversePatchMd5;
+        _reversePatchSha256 = state.ReversePatchSha256;
+        _reversePatchLength = state.ReversePatchLength;
+        _selectedPatchManifest = state.SelectedPatchManifest;
+        _selectedPatchRestoreDirection = state.SelectedPatchRestoreDirection;
+        PatchStatus = state.PatchStatus;
+        PatchRestoreTestStatus = state.PatchRestoreTestStatus;
+        _publishStatus = state.PublishStatus;
+        _publishConnectionTestStatus = state.PublishConnectionTestStatus;
+        _hasPublishedPatches = state.HasPublishedPatches;
+        SelectedRestorePatch = _patchCatalog.Values.FirstOrDefault(item =>
+            string.Equals(item.FilePath, state.SelectedRestorePatchPath, StringComparison.OrdinalIgnoreCase));
+        NotifyPatchWorkspaceChanged();
+
+        GatewayStages.Clear();
+        GatewaySubtasks.Clear();
+        if (_lastGatewayStatus is not null)
+        {
+            UpdateGatewayStatus(_lastGatewayStatus);
+        }
+    }
+
+    private void NotifyPatchWorkspaceChanged()
+    {
+        OnPropertyChanged(nameof(ImportedPatchFileName));
+        OnPropertyChanged(nameof(ImportedPatchMetadataDetail));
+        OnPropertyChanged(nameof(OldImageFileName));
+        OnPropertyChanged(nameof(NewImageFileName));
+        OnPropertyChanged(nameof(OldImageIdentityDetail));
+        OnPropertyChanged(nameof(NewImageIdentityDetail));
+        OnPropertyChanged(nameof(CanGeneratePatch));
+        OnPropertyChanged(nameof(PatchFileName));
+        OnPropertyChanged(nameof(PatchDetail));
+        OnPropertyChanged(nameof(PatchMetadataDetail));
+        OnPropertyChanged(nameof(PatchUrl));
+        OnPropertyChanged(nameof(SelectedHttpPatchUrl));
+        OnPropertyChanged(nameof(ReversePatchFileName));
+        OnPropertyChanged(nameof(ReversePatchStatus));
+        OnPropertyChanged(nameof(ReversePatchMetadataDetail));
+        OnPropertyChanged(nameof(SelectedPatchRestoreDirection));
+        OnPropertyChanged(nameof(PublishStatus));
+        OnPropertyChanged(nameof(PublishConnectionTestStatus));
+        OnPropertyChanged(nameof(HasPublishedPatches));
+        OnPropertyChanged(nameof(PublishSuccessVisibility));
+    }
+
+    private ModeWorkspaceSettings CaptureCurrentModeWorkspace() => new()
+    {
+        SelectedPageName = SelectedPage?.Name ?? "MQTT 配置",
+        MqttHost = MqttHost,
+        MqttPort = MqttPort,
+        MqttClientUsesLocalBroker = MqttClientUsesLocalBroker,
+        LocalBrokerPort = LocalBrokerPort,
+        LocalBrokerUserName = LocalBrokerUserName,
+        HttpRootDirectory = GetPatchOutputDirectory(),
+        HttpPort = HttpPort,
+        HttpUsesLocalServer = HttpUsesLocalServer,
+        PublicHttpBaseUrl = PublicHttpBaseUrl,
+        MqttUseTls = MqttUseTls,
+        MqttAcceptAnyServerCertificate = MqttAcceptAnyServerCertificate,
+        MqttUserName = MqttUserName,
+        SftpHost = SftpHost,
+        SftpPort = SftpPort,
+        SftpUserName = SftpUserName,
+        SftpPrivateKeyPath = SftpPrivateKeyPath,
+        SftpRemoteDirectory = SftpRemoteDirectory,
+        SftpPublicBaseUrl = SftpPublicBaseUrl,
+        SftpHostKeySha256 = SftpHostKeySha256,
+        LogAnalyzerExecutablePath = LogAnalyzerExecutablePath,
+        LogDirectory = LogDirectory,
+        SelectedTaskType = SelectedTaskType,
+        OldVersion = OldVersion,
+        NewVersion = NewVersion,
+        ForwardPatchName = ForwardPatchName,
+        ReversePatchName = ReversePatchName,
+        IsSpecifiedTarget = IsSpecifiedTarget,
+        TargetIdList = TargetIdList,
+        NodeType = NodeType,
+        CustomNodeTypes = NodeTypeCatalog.CustomOptions
+            .Select(item => new NodeTypeDefinitionSettings(item.Value, item.Name))
+            .ToArray(),
+        NodeTargetsText = NodeTargetsText,
+        GatewayId = GatewayId,
+        CycleRounds = CycleRounds,
+        CycleIntervalMode = CycleIntervalMode,
+        CycleFixedIntervalSeconds = CycleFixedIntervalSeconds,
+        CycleRandomMinimumSeconds = CycleRandomMinimumSeconds,
+        CycleRandomMaximumSeconds = CycleRandomMaximumSeconds,
+        NodePatchLimit = NodePatchLimit,
+        AsyncPatchLimit = AsyncPatchLimit,
+        SyncPatchLimit = SyncPatchLimit,
+        GatewayPatchLimit = GatewayPatchLimit,
+        DiscoveryFreshnessMinutes = DiscoveryFreshnessMinutes,
+        MinimumNodeRssi = MinimumNodeRssi,
+        SelectedUpgradePatchPath = SelectedUpgradePatch?.FilePath ?? string.Empty,
+        SelectedReverseUpgradePatchPath = SelectedReverseUpgradePatch?.FilePath ?? string.Empty,
+        DiscoveredExtenders = DiscoveredExtenders.Select(extender => new DiscoveredExtenderSettings(
+            extender.ExtenderId,
+            extender.Detail,
+            extender.DeviceType,
+            extender.SoftwareVersion,
+            extender.IsSelected)).ToArray(),
+        DiscoveredNodeGroups = DiscoveredNodeGroups.Select(group => new DiscoveredNodeGroupSettings(
+            group.ExtenderId,
+            group.Nodes.Select(node => new DiscoveredNodeSettings(
+                node.NodeId,
+                node.NodeType,
+                node.SoftwareVersion,
+                node.Rssi,
+                node.IsSelected)).ToArray(),
+            group.Error)).ToArray(),
+        NodeDiscoveryCompletedAt = _nodeDiscoveryCompletedAt,
+        ShowArchivedReports = _showArchivedReports,
+    };
+
+    private void ApplyCurrentModeWorkspace()
+    {
+        var workspace = GetCurrentModeWorkspace();
+        _restoringModeWorkspace = true;
+        try
+        {
+            MqttHost = workspace.MqttHost;
+            MqttPort = workspace.MqttPort;
+            MqttClientUsesLocalBroker = workspace.MqttClientUsesLocalBroker;
+            LocalBrokerPort = workspace.LocalBrokerPort;
+            LocalBrokerUserName = workspace.LocalBrokerUserName;
+            if (!string.IsNullOrWhiteSpace(workspace.HttpRootDirectory)) PatchOutputDirectory = workspace.HttpRootDirectory;
+            HttpPort = workspace.HttpPort;
+            HttpUsesLocalServer = workspace.HttpUsesLocalServer;
+            PublicHttpBaseUrl = string.IsNullOrWhiteSpace(workspace.PublicHttpBaseUrl)
+                ? "http://117.172.29.2:36109/download/"
+                : workspace.PublicHttpBaseUrl;
+            MqttUseTls = workspace.MqttUseTls;
+            MqttAcceptAnyServerCertificate = workspace.MqttAcceptAnyServerCertificate;
+            MqttUserName = workspace.MqttUserName;
+            SftpHost = string.IsNullOrWhiteSpace(workspace.SftpHost) ? "117.172.29.2" : workspace.SftpHost;
+            SftpPort = workspace.SftpPort is <= 0 or 22 ? 36112 : workspace.SftpPort;
+            SftpUserName = string.IsNullOrWhiteSpace(workspace.SftpUserName) ? "root" : workspace.SftpUserName;
+            SftpPrivateKeyPath = workspace.SftpPrivateKeyPath;
+            SftpRemoteDirectory = string.Equals(workspace.SftpRemoteDirectory?.Trim(), "/ota", StringComparison.OrdinalIgnoreCase)
+                ? "/opt/www/static/download/"
+                : string.IsNullOrWhiteSpace(workspace.SftpRemoteDirectory) ? "/opt/www/static/download/" : workspace.SftpRemoteDirectory;
+            SftpPublicBaseUrl = workspace.SftpPublicBaseUrl;
+            SftpHostKeySha256 = workspace.SftpHostKeySha256;
+            LogAnalyzerExecutablePath = File.Exists(workspace.LogAnalyzerExecutablePath)
+                ? workspace.LogAnalyzerExecutablePath
+                : GetDefaultLogAnalyzerPath();
+            LogDirectory = workspace.LogDirectory;
+            LoadImportedLogFiles();
+            SelectedTaskType = TaskTypes.Contains(workspace.SelectedTaskType) ? workspace.SelectedTaskType : TaskTypes[0];
+            OldVersion = workspace.OldVersion;
+            NewVersion = workspace.NewVersion;
+            ForwardPatchName = string.IsNullOrWhiteSpace(workspace.ForwardPatchName) ? "a-to-b" : workspace.ForwardPatchName;
+            ReversePatchName = string.IsNullOrWhiteSpace(workspace.ReversePatchName) ? "b-to-a" : workspace.ReversePatchName;
+            IsSpecifiedTarget = workspace.IsSpecifiedTarget;
+            TargetIdList = workspace.TargetIdList;
+            NodeTypeCatalog.ReplaceCustom(workspace.CustomNodeTypes ?? []);
+            NodeType = NodeTypeCatalog.IsSelectable(workspace.NodeType) ? workspace.NodeType : 5;
+            NodeTargetsText = workspace.NodeTargetsText;
+            GatewayId = workspace.GatewayId;
+            CycleRounds = workspace.CycleRounds > 0 ? workspace.CycleRounds : 1;
+            CycleIntervalMode = CycleIntervalModes.Contains(workspace.CycleIntervalMode) ? workspace.CycleIntervalMode : CycleIntervalModes[0];
+            CycleFixedIntervalSeconds = workspace.CycleFixedIntervalSeconds;
+            CycleRandomMinimumSeconds = workspace.CycleRandomMinimumSeconds;
+            CycleRandomMaximumSeconds = workspace.CycleRandomMaximumSeconds;
+            NodePatchLimit = workspace.NodePatchLimit > 0 ? workspace.NodePatchLimit : PatchCapacityPolicy.NodePatchLimit;
+            AsyncPatchLimit = workspace.AsyncPatchLimit > 0 ? workspace.AsyncPatchLimit : PatchCapacityPolicy.AsyncPatchLimit;
+            SyncPatchLimit = workspace.SyncPatchLimit is > 0 and < long.MaxValue ? workspace.SyncPatchLimit : PatchCapacityPolicy.SyncPatchLimit;
+            GatewayPatchLimit = workspace.GatewayPatchLimit is > 0 and < long.MaxValue ? workspace.GatewayPatchLimit : PatchCapacityPolicy.GatewayPatchLimit;
+            DiscoveryFreshnessMinutes = workspace.DiscoveryFreshnessMinutes > 0 ? workspace.DiscoveryFreshnessMinutes : 30;
+            MinimumNodeRssi = workspace.MinimumNodeRssi is >= -127 and <= 0 ? workspace.MinimumNodeRssi : -100;
+            _nodeDiscoveryCompletedAt = workspace.NodeDiscoveryCompletedAt;
+            RestoreDiscoveryCollections(workspace);
+            _showArchivedReports = workspace.ShowArchivedReports;
+            OnPropertyChanged(nameof(ActiveReportsHeader));
+            OnPropertyChanged(nameof(ReportScopeDescription));
+            LoadCurrentModeSecrets();
+        }
+        finally
+        {
+            _restoringModeWorkspace = false;
+        }
+    }
+
+    private void RestoreDiscoveryCollections(ModeWorkspaceSettings workspace)
+    {
+        _suppressSelectionSync = true;
+        try
+        {
+            DiscoveredExtenders.Clear();
+            foreach (var extender in workspace.DiscoveredExtenders ?? [])
+            {
+                DiscoveredExtenders.Add(new SelectableExtenderItem(
+                    extender.ExtenderId, extender.Detail, extender.DeviceType, extender.SoftwareVersion,
+                    extender.IsSelected, OnExtenderSelectionChanged));
+            }
+            DiscoveredNodeGroups.Clear();
+            foreach (var group in workspace.DiscoveredNodeGroups ?? [])
+            {
+                var nodes = group.Nodes ?? [];
+                DiscoveredNodeGroups.Add(new NodeGroupItem(
+                    group.ExtenderId,
+                    nodes.Select(node => new GatewayNodeInfo(node.NodeId, node.NodeType, node.SoftwareVersion, node.Rssi)).ToArray(),
+                    nodes.Where(node => node.IsSelected).Select(node => node.NodeId).ToHashSet(),
+                    group.Error,
+                    OnNodeSelectionChanged));
+            }
+            RefreshNodeTypeOptions();
+        }
+        finally
+        {
+            _suppressSelectionSync = false;
+        }
+        OnPropertyChanged(nameof(ExtenderSelectionToggleText));
+        OnPropertyChanged(nameof(NodeSelectionToggleText));
+        RefreshNodeEligibility();
+        if (_selectedNodeTypeValue > 0 && DiscoveredNodeGroups.Count > 0)
+        {
+            SelectNodesByType(_selectedNodeTypeValue);
+        }
+    }
+
+    private async Task RestoreCurrentModePatchCatalogAsync()
+    {
+        var modeKey = CurrentModeKey;
+        var workspace = GetCurrentModeWorkspace();
+        await LoadPatchCatalogFromOutputDirectoryAsync();
+        if (!string.Equals(modeKey, CurrentModeKey, StringComparison.Ordinal)) return;
+        SelectedUpgradePatch = UpgradePatchChoices.FirstOrDefault(item =>
+            string.Equals(item.FilePath, workspace.SelectedUpgradePatchPath, StringComparison.OrdinalIgnoreCase));
+        SelectedReverseUpgradePatch = UpgradePatchChoices.FirstOrDefault(item =>
+            string.Equals(item.FilePath, workspace.SelectedReverseUpgradePatchPath, StringComparison.OrdinalIgnoreCase));
+        var state = IsEcoLink ? _ecoLinkUpgradeUiState : _traditionalUpgradeUiState;
+        SelectedRestorePatch = _patchCatalog.Values.FirstOrDefault(item =>
+            string.Equals(item.FilePath, state.SelectedRestorePatchPath, StringComparison.OrdinalIgnoreCase));
+        _selectedPatchRestoreDirection = state.SelectedPatchRestoreDirection;
+        OnPropertyChanged(nameof(SelectedPatchRestoreDirection));
+        _taskStatusMessage = state.TaskStatusMessage;
+        OnPropertyChanged(nameof(TaskStatusMessage));
+    }
+
+    private string ModeSecretName(string suffix) => $"OtaTool/{CurrentModeKey}/{suffix}";
+
+    private void LoadCurrentModeSecrets()
+    {
+        MqttPassword = ReadModeSecret("MqttPassword", "OtaTool/MqttPassword");
+        LocalBrokerPassword = ReadModeSecret("LocalBrokerPassword", "OtaTool/LocalBrokerPassword");
+        SftpPassword = ReadModeSecret("SftpPassword", "OtaTool/SftpPassword");
+        SftpPrivateKeyPassphrase = ReadModeSecret("SftpPrivateKeyPassphrase", "OtaTool/SftpPrivateKeyPassphrase");
+    }
+
+    private string ReadModeSecret(string suffix, string legacyName)
+    {
+        if (_secretStore.TryGet(ModeSecretName(suffix), out var value)) return value ?? string.Empty;
+        return _secretStore.TryGet(legacyName, out value) ? value ?? string.Empty : string.Empty;
+    }
+
+    private void SaveCurrentModeSecrets()
+    {
+        if (!string.IsNullOrEmpty(MqttPassword)) _secretStore.Save(ModeSecretName("MqttPassword"), MqttPassword);
+        if (!string.IsNullOrEmpty(LocalBrokerPassword)) _secretStore.Save(ModeSecretName("LocalBrokerPassword"), LocalBrokerPassword);
+        if (!string.IsNullOrEmpty(SftpPassword)) _secretStore.Save(ModeSecretName("SftpPassword"), SftpPassword);
+        if (!string.IsNullOrEmpty(SftpPrivateKeyPassphrase)) _secretStore.Save(ModeSecretName("SftpPrivateKeyPassphrase"), SftpPrivateKeyPassphrase);
+    }
+
+    private void ApplyMode(bool restoreSelectedPage = true)
+    {
+        var workspace = GetCurrentModeWorkspace();
         NavigationItems.Clear();
         AddNavigation("01", "MQTT 配置");
         AddNavigation("02", "PATCH 中心");
@@ -1429,25 +2061,25 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         AddNavigation(IsEcoLink ? "06" : "05", "系统设置");
 
         TaskTypes.Clear();
-        TaskTypes.Add("Gateway 升级");
-        TaskTypes.Add("Sync 升级");
+        TaskTypes.Add(GatewayTaskType);
+        TaskTypes.Add(SyncTaskType);
         if (IsEcoLink)
         {
-            TaskTypes.Add("Async 升级");
-            TaskTypes.Add("Node 升级");
+            TaskTypes.Add(AsyncTaskType);
+            TaskTypes.Add(NodeTaskType);
         }
 
-        if (!TaskTypes.Contains(SelectedTaskType))
-        {
-            SelectedTaskType = TaskTypes[0];
-        }
+        var modeTaskType = IsEcoLink ? _ecoLinkSelectedTaskType : _traditionalSelectedTaskType;
+        SelectedTaskType = TaskTypes.Contains(modeTaskType) ? modeTaskType : TaskTypes[0];
         if (RequiresSpecifiedTarget)
         {
             IsSpecifiedTarget = true;
         }
 
-        SelectedPage = NavigationItems.FirstOrDefault(item => item.Name == previousPageName)
-            ?? NavigationItems.FirstOrDefault(item => item.Name == "MQTT 配置");
+        SelectedPage = restoreSelectedPage
+            ? NavigationItems.FirstOrDefault(item => item.Name == workspace.SelectedPageName)
+                ?? NavigationItems.FirstOrDefault(item => item.Name == "MQTT 配置")
+            : NavigationItems.FirstOrDefault(item => item.Name == "MQTT 配置");
         OnPropertyChanged(nameof(CurrentPageSubtitle));
         OnPropertyChanged(nameof(ModeBadge));
         OnPropertyChanged(nameof(EcoLinkVisibility));
@@ -1471,6 +2103,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         OnPropertyChanged(nameof(CanStartUpgrade));
         OnPropertyChanged(nameof(CanStartCycleUpgrade));
+        OnPropertyChanged(nameof(CanRefreshDiscovery));
+        OnPropertyChanged(nameof(CanCancelTask));
     }
 
     private void ToggleExtenderSelection(object? _)
@@ -1602,8 +2236,39 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (dialog.ShowDialog() == true)
         {
             LogDirectory = dialog.FolderName;
-            LogAnalysisStatus = "已选择日志目录，点击“分析已导入日志”开始分析。";
+            LoadImportedLogFiles();
+            LogAnalysisStatus = ImportedLogFiles.Count == 0
+                ? "所选目录中没有 .log 文件。"
+                : $"已导入 {ImportedLogFiles.Count} 个 .log 文件，可删除不参与本次分析的文件。";
         }
+    }
+
+    private void LoadImportedLogFiles()
+    {
+        ImportedLogFiles.Clear();
+        if (Directory.Exists(LogDirectory))
+        {
+            foreach (var path in Directory.EnumerateFiles(LogDirectory, "*.log", SearchOption.TopDirectoryOnly)
+                         .OrderBy(path => Path.GetFileName(path), StringComparer.OrdinalIgnoreCase))
+            {
+                var file = new FileInfo(path);
+                ImportedLogFiles.Add(new ImportedLogFileItem(file.FullName, file.Length, file.LastWriteTime));
+            }
+        }
+        NotifyImportedLogFilesChanged();
+    }
+
+    private void RemoveImportedLogFile(object? parameter)
+    {
+        if (parameter is not ImportedLogFileItem item || !ImportedLogFiles.Remove(item)) return;
+        NotifyImportedLogFilesChanged();
+        LogAnalysisStatus = $"已从本次分析列表删除 {item.FileName}，磁盘源文件未删除。";
+    }
+
+    private void NotifyImportedLogFilesChanged()
+    {
+        OnPropertyChanged(nameof(HasImportedLogFiles));
+        OnPropertyChanged(nameof(ImportedLogFilesSummary));
     }
 
     private void OpenPatchOutputDirectory(object? _)
@@ -1715,10 +2380,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _areFirmwareImagesCompatible = true;
             SelectedTaskType = _oldFirmwareIdentity.OtaDeviceType switch
             {
-                DeviceType.Gateway => "Gateway 升级",
-                DeviceType.Sync => "Sync 升级",
-                DeviceType.Async => "Async 升级",
-                DeviceType.Node => "Node 升级",
+                DeviceType.Gateway => GatewayTaskType,
+                DeviceType.Sync => SyncTaskType,
+                DeviceType.Async => AsyncTaskType,
+                DeviceType.Node => NodeTaskType,
                 _ => SelectedTaskType,
             };
             if (_oldFirmwareIdentity.IsNode)
@@ -1967,9 +2632,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         long patchLimitBytes)
     {
         var scriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts", "TestPatchWithOtaTool.ps1");
-        var otaToolPath = @"D:\tools\OTA_TOOL\OTA_TOOL.exe";
+        var otaToolPath = Path.Combine(AppContext.BaseDirectory, "Tools", "OTA_TOOL", "OTA_TOOL.exe");
         if (!File.Exists(scriptPath)) throw new FileNotFoundException("缺少 PatchTest 脚本，请重新安装桌面工具。", scriptPath);
-        if (!File.Exists(otaToolPath)) throw new FileNotFoundException("找不到 OTA_TOOL，请确认已安装在 D:\\tools\\OTA_TOOL。", otaToolPath);
+        if (!File.Exists(otaToolPath)) throw new FileNotFoundException("发布包缺少内置 Patch 还原工具，请重新安装 OTA 测试平台。", otaToolPath);
 
         var testRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtaTool", "patch-restore-tests", Guid.NewGuid().ToString("N"));
         var firmwareDirectory = Path.Combine(testRoot, "firmware");
@@ -2171,10 +2836,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         IOtaProtocolProfile profile = mode == OtaMode.EcoLink ? new EcoLinkProtocolProfile() : new TraditionalProtocolProfile();
         var deviceType = SelectedTaskType switch
         {
-            "Gateway 升级" => DeviceType.Gateway,
-            "Sync 升级" => DeviceType.Sync,
-            "Async 升级" => DeviceType.Async,
-            "Node 升级" => DeviceType.Node,
+            GatewayTaskType => DeviceType.Gateway,
+            SyncTaskType => DeviceType.Sync,
+            AsyncTaskType => DeviceType.Async,
+            NodeTaskType => DeviceType.Node,
             _ => throw new InvalidOperationException("未知升级类型。"),
         };
         var deviceIds = TargetIdList.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -2222,7 +2887,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         if (selectedPatch.IsFullImage && deviceType != DeviceType.Gateway)
         {
-            TaskStatusMessage = "任务未启动：完整 .bin 镜像仅支持 Gateway 升级。";
+            TaskStatusMessage = "任务未启动：完整 .bin 镜像仅支持网关升级。";
             return;
         }
         if (IsEcoLink && !selectedPatch.IsFullImage && selectedManifest is not null &&
@@ -2354,6 +3019,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         GatewayStageSummary = task.Mode == OtaMode.EcoLink
             ? "等待 Gateway 阶段状态…"
             : "等待 Gateway 最终升级结果上报…";
+        UpgradeRunModeText = $"单次 {task.OldVersion} to {task.NewVersion}";
+        UpgradeRunModeForeground = "#2570E8";
+        UpgradeRunModeBackground = "#E9F0FF";
+        UpgradeRunProgressText = $"{SelectedTaskType} · 正在发送升级请求";
         _activeReport = new OtaReport { Task = task, LogAnalysisConclusion = task.Mode == OtaMode.Traditional ? "日志解析不支持" : null };
         _reportTaskIds.Clear();
         _reportTaskIds.Add(task.Id);
@@ -2363,6 +3032,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             TaskStatusMessage = result.State == OtaTaskState.Running
                 ? $"{SelectedTaskType} 已发送升级请求。"
                 : $"任务未启动：{result.Message}";
+            UpgradeRunProgressText = result.State == OtaTaskState.Running
+                ? $"{SelectedTaskType} · 升级请求已发送"
+                : $"启动失败 · {result.Message}";
             if (result.State != OtaTaskState.Running)
             {
                 _activeReport = null;
@@ -2381,7 +3053,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         var target = task.DeviceType switch
         {
-            DeviceType.Gateway => "Gateway 升级（无需指定目标 ID）",
+            DeviceType.Gateway => "网关升级（无需指定目标 ID）",
             DeviceType.Node => $"Node 类型：{NodeTypeCatalog.Format(task.NodeType)}；目标：{string.Join("；", task.ExtenderTargets.Select(item => $"{item.ExtenderId}: {string.Join(',', item.NodeIds)}"))}",
             _ when task.Target.Scope == TargetScope.Broadcast => "目标范围：广播",
             _ => $"目标 ID：{string.Join("、", task.Target.DeviceIds)}",
@@ -2588,6 +3260,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await ConnectMqttAsync();
     }
 
+    private void SelectMqttConfiguration(object? parameter)
+    {
+        if (parameter is not string selection) return;
+        MqttClientUsesLocalBroker = string.Equals(selection, "Local", StringComparison.Ordinal);
+    }
+
     private async Task StartEmbeddedBrokerAsync()
     {
         try
@@ -2637,6 +3315,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             return;
         }
+        if (IsUpgradeInProgress)
+        {
+            DeviceDiscoveryStatus = "升级过程中不能刷新 Extender。";
+            return;
+        }
         if (!_mqtt.IsConnected)
         {
             DeviceDiscoveryStatus = "MQTT 尚未连接，无法刷新在线 Extender。";
@@ -2655,11 +3338,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             var selectedIds = DiscoveredExtenders.Where(item => item.IsSelected)
                 .Select(item => item.ExtenderId)
                 .ToHashSet();
-            if (SelectedTaskType is "Sync 升级" or "Async 升级")
+            if (SelectedTaskType is SyncTaskType or AsyncTaskType)
             {
                 foreach (var value in ParsePositiveUIntLines(TargetIdList)) selectedIds.Add(value);
             }
-            else if (SelectedTaskType == "Node 升级")
+            else if (SelectedTaskType == NodeTaskType)
             {
                 foreach (var target in TryParseNodeTargets(NodeTargetsText))
                 {
@@ -2680,7 +3363,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     selectedIds.Contains(extender.ExtenderId),
                     OnExtenderSelectionChanged));
             }
-            if (SelectedTaskType == "Node 升级" &&
+            if (SelectedTaskType == NodeTaskType &&
                 DiscoveredExtenders.Count > 0 &&
                 DiscoveredExtenders.All(item => !item.IsSelected))
             {
@@ -2708,8 +3391,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private async Task RefreshNodesAsync()
     {
-        if (!IsEcoLink || SelectedTaskType != "Node 升级" || IsDiscoveringDevices)
+        if (!IsEcoLink || IsDiscoveringDevices)
         {
+            return;
+        }
+        if (IsUpgradeInProgress)
+        {
+            NodeDiscoveryStatus = "升级过程中不能刷新 Node。";
             return;
         }
         if (!_mqtt.IsConnected)
@@ -2796,7 +3484,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             return;
         }
-        if (SelectedTaskType is "Sync 升级" or "Async 升级")
+        if (SelectedTaskType is SyncTaskType or AsyncTaskType)
         {
             TargetIdList = string.Join(
                 Environment.NewLine,
@@ -2920,7 +3608,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             : isNodePrepareTimeout
                 ? $" · Extender {activeSubtask.ExtenderId}"
                 : $" · Extender {activeSubtask.ExtenderId}：成功 {activeSubtask.SuccessCount}/{activeSubtask.TargetCount}";
-        GatewayStageSummary = $"{OtaStatusDisplay.State(displayState)} · {OtaStatusDisplay.StageSummary(displayStage, activeSubtask)}{progressText}{subtaskText} · 已用时 {status.TaskElapsedMs ?? 0:N0} ms";
+        GatewayStageSummary = $"{OtaStatusDisplay.State(displayState)} · {OtaStatusDisplay.StageSummary(displayStage, activeSubtask)}{progressText}{subtaskText} · 已用时 {DurationDisplay.Format(status.TaskElapsedMs ?? 0)}";
         GatewayStageColor = StatusColor.For(displayState);
         if (_gatewayTaskSequence != status.TaskSequence)
         {
@@ -3003,6 +3691,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
         TaskStatusMessage = update.Message;
+        if (!_isCycleUpgradeRunning)
+        {
+            UpgradeRunProgressText = $"单次升级 · {update.Message}";
+        }
         UpdateGatewayStatus(update.GatewayStatus);
         UpdateTerminalSummary(update);
         OnPropertyChanged(nameof(PollingToggleText));
@@ -3091,15 +3783,41 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private async Task CancelTaskAsync()
+    private Task CancelTaskAsync()
     {
-        if (_runner is null || !_runner.HasActiveTask)
+        if (!CanCancelTask)
         {
             TaskStatusMessage = "当前没有可取消的 OTA 任务。";
-            return;
+            return Task.CompletedTask;
         }
 
-        await _runner.CancelAndNotifyGatewayAsync();
+        OpenPatchDialog(
+            PatchDialogAction.CancelTask,
+            "确认取消任务",
+            _runner?.HasActiveTask == true
+                ? "确定要取消当前升级任务吗？\n\n取消后，工具将停止状态跟踪，并通知 Gateway 终止升级。"
+                : "确定要取消当前循环升级吗？\n\n取消后，等待立即结束，后续单次升级不会启动。",
+            "确认取消");
+        return Task.CompletedTask;
+    }
+
+    private async Task CancelActiveTaskAsync()
+    {
+        if (!CanCancelTask)
+        {
+            TaskStatusMessage = "当前任务已经结束，无需取消。";
+            return;
+        }
+        var hadActiveTask = _runner?.HasActiveTask == true;
+        if (hadActiveTask)
+        {
+            await _runner!.CancelAndNotifyGatewayAsync();
+        }
+        else
+        {
+            TaskStatusMessage = "已取消循环升级等待，后续单次升级不会启动。";
+        }
+        _cycleCancellation?.Cancel();
         OnPropertyChanged(nameof(PollingToggleText));
         NotifyUpgradeActionAvailability();
         OnPropertyChanged(nameof(CanControlPolling));
@@ -3117,6 +3835,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (CycleRounds <= 0)
         {
             TaskStatusMessage = "循环轮数必须大于 0。";
+            return;
+        }
+        var cycleInterval = CycleIntervalMode == "随机间隔"
+            ? new OtaCycleIntervalOptions(
+                OtaCycleIntervalMode.Random,
+                RandomMinimumSeconds: CycleRandomMinimumSeconds,
+                RandomMaximumSeconds: CycleRandomMaximumSeconds)
+            : new OtaCycleIntervalOptions(
+                OtaCycleIntervalMode.Fixed,
+                FixedSeconds: CycleFixedIntervalSeconds);
+        if (cycleInterval.Validate() is { } cycleIntervalError)
+        {
+            TaskStatusMessage = $"循环任务未启动：{cycleIntervalError}";
             return;
         }
         var selectedForwardPatch = SelectedUpgradePatch;
@@ -3148,10 +3879,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         IOtaProtocolProfile profile = mode == OtaMode.EcoLink ? new EcoLinkProtocolProfile() : new TraditionalProtocolProfile();
         var deviceType = SelectedTaskType switch
         {
-            "Gateway 升级" => DeviceType.Gateway,
-            "Sync 升级" => DeviceType.Sync,
-            "Async 升级" => DeviceType.Async,
-            "Node 升级" => DeviceType.Node,
+            GatewayTaskType => DeviceType.Gateway,
+            SyncTaskType => DeviceType.Sync,
+            AsyncTaskType => DeviceType.Async,
+            NodeTaskType => DeviceType.Node,
             _ => throw new InvalidOperationException("未知升级类型。"),
         };
         IReadOnlyList<OtaExtenderTarget> extenderTargets;
@@ -3172,7 +3903,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var target = BuildTaskTarget(deviceType, ids, extenderTargets);
         if ((selectedForwardPatch.IsFullImage || selectedReversePatch.IsFullImage) && deviceType != DeviceType.Gateway)
         {
-            TaskStatusMessage = "循环任务未启动：完整 .bin 镜像仅支持 Gateway 升级。";
+            TaskStatusMessage = "循环任务未启动：完整 .bin 镜像仅支持网关升级。";
             return;
         }
         if (selectedForwardPatch.IsFullImage != selectedReversePatch.IsFullImage)
@@ -3265,17 +3996,50 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var startedAt = DateTimeOffset.Now;
         var completedSteps = 0;
         var successfulSteps = 0;
+        cycle.StepStarting += (_, update) => RunOnUi(() =>
+        {
+            var task = update.IsForward ? forward : reverse;
+            UpgradeRunModeText = $"循环 {update.Round}/{CycleRounds} {task.OldVersion} to {task.NewVersion}";
+            UpgradeRunProgressText = $"第 {update.Round}/{CycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")}升级正在执行";
+        });
+        cycle.Waiting += (_, update) => RunOnUi(() =>
+        {
+            var task = update.NextIsForward ? forward : reverse;
+            UpgradeRunModeText = $"循环 {update.NextRound}/{CycleRounds} 间隔 {update.DelaySeconds} s";
+            UpgradeRunProgressText = $"等待 {update.DelaySeconds} s 后执行 {task.OldVersion} to {task.NewVersion}";
+        });
         cycle.Updated += (_, update) =>
         {
             completedSteps++;
             if (update.Result.State == OtaTaskState.Succeeded) successfulSteps++;
-            RunOnUi(() => TaskStatusMessage = $"第 {update.Round} 轮{(update.IsForward ? "正向" : "反向")}：{update.Result.Message}");
+            RunOnUi(() =>
+            {
+                TaskStatusMessage = $"第 {update.Round} 轮{(update.IsForward ? "正向" : "反向")}：{update.Result.Message}";
+                UpgradeRunProgressText = $"第 {update.Round}/{CycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")} · {update.Result.Message}";
+                UpgradeRunModeText = update.Result.State != OtaTaskState.Succeeded
+                    ? $"循环 {update.Round}/{CycleRounds} {(update.IsForward ? $"{forward.OldVersion} to {forward.NewVersion}" : $"{reverse.OldVersion} to {reverse.NewVersion}")}"
+                    : update.IsForward
+                        ? $"循环 {update.Round}/{CycleRounds} {reverse.OldVersion} to {reverse.NewVersion}"
+                        : update.Round < CycleRounds
+                            ? $"循环 {update.Round + 1}/{CycleRounds} {forward.OldVersion} to {forward.NewVersion}"
+                            : $"循环 {CycleRounds}/{CycleRounds} 已完成";
+            });
         };
+        UpgradeRunModeText = $"循环 1/{CycleRounds} {forward.OldVersion} to {forward.NewVersion}";
+        UpgradeRunModeForeground = "#7A4CC2";
+        UpgradeRunModeBackground = "#F1EAFE";
+        UpgradeRunProgressText = $"共 {CycleRounds} 轮 · 准备执行第 1 轮正向升级";
         _isCycleUpgradeRunning = true;
+        _cycleCancellation = new CancellationTokenSource();
+        NotifyUpgradeActionAvailability();
         try
         {
-            var result = await cycle.RunAsync(new OtaCycleDefinition(forward, reverse, CycleRounds), _runner);
+            var result = await cycle.RunAsync(
+                new OtaCycleDefinition(forward, reverse, CycleRounds, cycleInterval),
+                _runner,
+                _cycleCancellation.Token);
             TaskStatusMessage = result.Message;
+            UpgradeRunProgressText = $"循环升级结束 · {result.Message}";
             if (_activeReport is not null)
             {
                 if (!IsTerminalState(_activeReport.FinalState))
@@ -3302,9 +4066,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 }
             }
         }
+        catch (OperationCanceledException)
+        {
+            TaskStatusMessage = "循环升级已取消。";
+            UpgradeRunProgressText = "循环升级已取消，后续单次升级不会启动。";
+        }
         finally
         {
             _isCycleUpgradeRunning = false;
+            _cycleCancellation?.Dispose();
+            _cycleCancellation = null;
+            NotifyUpgradeActionAvailability();
         }
     }
 
@@ -3498,9 +4270,33 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             LogAnalysisStatus = "传统模式不支持日志解析。";
             return;
         }
+        var selectedLogFiles = ImportedLogFiles.ToArray();
+        if (selectedLogFiles.Length == 0)
+        {
+            LogAnalysisStatus = "请先导入至少一个 .log 文件。";
+            return;
+        }
+
+        string? analysisInputDirectory = null;
         try
         {
-            LogAnalysisStatus = "正在调用日志分析器…";
+            analysisInputDirectory = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "OtaTool",
+                "log-analysis",
+                "inputs",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(analysisInputDirectory);
+            foreach (var item in selectedLogFiles)
+            {
+                if (!File.Exists(item.FilePath))
+                {
+                    throw new FileNotFoundException($"日志文件已不存在：{item.FileName}", item.FilePath);
+                }
+                File.Copy(item.FilePath, Path.Combine(analysisInputDirectory, item.FileName));
+            }
+
+            LogAnalysisStatus = $"正在分析列表中的 {selectedLogFiles.Length} 个日志文件…";
             LogAnalysisResultText = "正在分析日志，请稍候…";
             LogAnalysisQualityScore = "…";
             LogAnalysisQualityGrade = "分析中";
@@ -3508,8 +4304,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             LogAnalysisQualityColor = "#2570E8";
             var outputDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtaTool", "log-analysis");
             using var result = await new ExternalEcoLinkLogAnalyzer().AnalyzeAsync(
-                new LogAnalysisRequest(OtaMode.EcoLink, LogAnalyzerExecutablePath, LogDirectory, outputDirectory));
-            LogAnalysisStatus = result.Message;
+                new LogAnalysisRequest(OtaMode.EcoLink, LogAnalyzerExecutablePath, analysisInputDirectory, outputDirectory));
+            LogAnalysisStatus = $"{result.Message}（已分析 {selectedLogFiles.Length} 个日志文件）";
             if (result.Data is not null)
             {
                 var quality = OtaUpgradeQualityEvaluator.Evaluate(result.Data.RootElement);
@@ -3551,13 +4347,32 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             LogAnalysisQualityColor = "#C53333";
             LogAnalysisResultText = LogAnalysisStatus;
         }
+        finally
+        {
+            if (!string.IsNullOrWhiteSpace(analysisInputDirectory))
+            {
+                try
+                {
+                    if (Directory.Exists(analysisInputDirectory))
+                    {
+                        Directory.Delete(analysisInputDirectory, recursive: true);
+                    }
+                }
+                catch
+                {
+                    // 临时快照将在后续系统清理中移除，不影响分析结果。
+                }
+            }
+        }
     }
 
     private async Task LoadReportsAsync(bool updateStatus = true)
     {
-        var selectedId = SelectedReport?.Id;
+        var modeState = IsEcoLink ? _ecoLinkUpgradeUiState : _traditionalUpgradeUiState;
+        var selectedId = modeState.SelectedReportId ?? SelectedReport?.Id;
         RecentReports.Clear();
         foreach (var report in (await _reportStore.LoadRecentAsync(200))
+                     .Where(report => report.Task.Mode == (IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional))
                      .Where(report => report.IsArchived == _showArchivedReports)
                      .Take(100))
         {
@@ -3565,6 +4380,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         SelectedReport = RecentReports.FirstOrDefault(item => item.Id == selectedId)
             ?? RecentReports.FirstOrDefault();
+        modeState.SelectedReportId = SelectedReport?.Id;
         if (updateStatus)
         {
             TaskStatusMessage = RecentReports.Count == 0
@@ -3654,119 +4470,44 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await LoadReportsAsync(updateStatus: false);
     }
 
-    private async Task LoadSettingsAsync()
+    private async Task LoadSettingsAsync(AppSettings settings)
     {
         try
         {
-            var settings = await _settingsStore.LoadAsync();
-            MqttHost = settings.MqttHost;
-            MqttPort = settings.MqttPort;
-            MqttClientUsesLocalBroker = settings.MqttClientUsesLocalBroker;
-            LocalBrokerPort = settings.LocalBrokerPort;
-            LocalBrokerUserName = settings.LocalBrokerUserName;
-            if (!string.IsNullOrWhiteSpace(settings.HttpRootDirectory)) PatchOutputDirectory = settings.HttpRootDirectory;
-            HttpPort = settings.HttpPort;
-            HttpUsesLocalServer = settings.HttpUsesLocalServer;
-            PublicHttpBaseUrl = settings.PublicHttpBaseUrl;
-            MqttUseTls = settings.MqttUseTls;
-            MqttAcceptAnyServerCertificate = settings.MqttAcceptAnyServerCertificate;
-            MqttUserName = settings.MqttUserName;
-            SftpHost = settings.SftpHost;
-            SftpPort = settings.SftpPort;
-            SftpUserName = settings.SftpUserName;
-            SftpPrivateKeyPath = settings.SftpPrivateKeyPath;
-            SftpRemoteDirectory = string.Equals(settings.SftpRemoteDirectory?.Trim(), "/ota", StringComparison.OrdinalIgnoreCase)
-                ? "/opt/www/static/download/"
-                : settings.SftpRemoteDirectory ?? string.Empty;
-            SftpPublicBaseUrl = settings.SftpPublicBaseUrl;
-            SftpHostKeySha256 = settings.SftpHostKeySha256;
-            LogAnalyzerExecutablePath = File.Exists(settings.LogAnalyzerExecutablePath)
-                ? settings.LogAnalyzerExecutablePath
-                : GetDefaultLogAnalyzerPath();
-            LogDirectory = settings.LogDirectory;
-            SelectedTaskType = TaskTypes.Contains(settings.SelectedTaskType) ? settings.SelectedTaskType : TaskTypes[0];
-            OldVersion = settings.OldVersion;
-            NewVersion = settings.NewVersion;
-            ForwardPatchName = string.IsNullOrWhiteSpace(settings.ForwardPatchName)
-                ? "a-to-b"
-                : settings.ForwardPatchName;
-            ReversePatchName = string.IsNullOrWhiteSpace(settings.ReversePatchName)
-                ? "b-to-a"
-                : settings.ReversePatchName;
-            IsSpecifiedTarget = settings.IsSpecifiedTarget;
-            TargetIdList = settings.TargetIdList;
-            NodeTypeCatalog.ReplaceCustom(settings.CustomNodeTypes ?? []);
-            NodeType = NodeTypeCatalog.IsSelectable(settings.NodeType) ? settings.NodeType : 5;
-            NodeTargetsText = settings.NodeTargetsText;
-            GatewayId = settings.GatewayId;
-            CycleRounds = settings.CycleRounds > 0 ? settings.CycleRounds : 1;
-            NodePatchLimit = settings.NodePatchLimit > 0 ? settings.NodePatchLimit : PatchCapacityPolicy.NodePatchLimit;
-            AsyncPatchLimit = settings.AsyncPatchLimit > 0 ? settings.AsyncPatchLimit : PatchCapacityPolicy.AsyncPatchLimit;
-            SyncPatchLimit = settings.SyncPatchLimit is > 0 and < long.MaxValue
-                ? settings.SyncPatchLimit
-                : PatchCapacityPolicy.SyncPatchLimit;
-            GatewayPatchLimit = settings.GatewayPatchLimit is > 0 and < long.MaxValue
-                ? settings.GatewayPatchLimit
-                : PatchCapacityPolicy.GatewayPatchLimit;
-            DiscoveryFreshnessMinutes = settings.DiscoveryFreshnessMinutes > 0 ? settings.DiscoveryFreshnessMinutes : 30;
-            MinimumNodeRssi = settings.MinimumNodeRssi is >= -127 and <= 0 ? settings.MinimumNodeRssi : -100;
-            _nodeDiscoveryCompletedAt = settings.NodeDiscoveryCompletedAt;
-            _suppressSelectionSync = true;
-            try
+            _modeWorkspaces.Clear();
+            if (settings.ModeWorkspaces is { Count: > 0 })
             {
-                DiscoveredExtenders.Clear();
-                foreach (var extender in settings.DiscoveredExtenders ?? [])
+                foreach (var pair in settings.ModeWorkspaces)
                 {
-                    DiscoveredExtenders.Add(new SelectableExtenderItem(
-                        extender.ExtenderId,
-                        extender.Detail,
-                        extender.DeviceType,
-                        extender.SoftwareVersion,
-                        extender.IsSelected,
-                        OnExtenderSelectionChanged));
+                    var workspace = pair.Value.Copy();
+                    workspace.SelectedTaskType = NormalizeTaskType(workspace.SelectedTaskType);
+                    _modeWorkspaces[pair.Key] = workspace;
                 }
-                DiscoveredNodeGroups.Clear();
-                foreach (var group in settings.DiscoveredNodeGroups ?? [])
+            }
+            else
+            {
+                var legacy = ModeWorkspaceSettings.FromLegacy(settings);
+                legacy.SelectedTaskType = NormalizeTaskType(legacy.SelectedTaskType);
+                _modeWorkspaces[EcoLinkModeKey] = legacy;
+                var traditional = legacy.Copy();
+                if (traditional.SelectedTaskType is AsyncTaskType or NodeTaskType)
                 {
-                    var nodes = group.Nodes ?? [];
-                    DiscoveredNodeGroups.Add(new NodeGroupItem(
-                        group.ExtenderId,
-                        nodes.Select(node => new GatewayNodeInfo(node.NodeId, node.NodeType, node.SoftwareVersion, node.Rssi)).ToArray(),
-                        nodes.Where(node => node.IsSelected).Select(node => node.NodeId).ToHashSet(),
-                        group.Error,
-                        OnNodeSelectionChanged));
+                    traditional.SelectedTaskType = GatewayTaskType;
                 }
-                RefreshNodeTypeOptions();
+                _modeWorkspaces[TraditionalModeKey] = traditional;
             }
-            finally
-            {
-                _suppressSelectionSync = false;
-            }
-            OnPropertyChanged(nameof(ExtenderSelectionToggleText));
-            OnPropertyChanged(nameof(NodeSelectionToggleText));
-            RefreshNodeEligibility();
-            if (DiscoveredExtenders.Count > 0)
-            {
-                DeviceDiscoveryStatus = "已恢复上次发现结果；需要更新时请手动刷新。";
-            }
-            if (DiscoveredNodeGroups.Count > 0)
-            {
-                NodeDiscoveryStatus = "已恢复上次 Node 发现结果；需要更新时请手动刷新。";
-            }
-            if (_secretStore.TryGet("OtaTool/MqttPassword", out var mqttPassword)) MqttPassword = mqttPassword ?? string.Empty;
-            if (_secretStore.TryGet("OtaTool/LocalBrokerPassword", out var localBrokerPassword)) LocalBrokerPassword = localBrokerPassword ?? string.Empty;
-            if (_secretStore.TryGet("OtaTool/SftpPassword", out var sftpPassword)) SftpPassword = sftpPassword ?? string.Empty;
-            if (_secretStore.TryGet("OtaTool/SftpPrivateKeyPassphrase", out var keyPassphrase)) SftpPrivateKeyPassphrase = keyPassphrase ?? string.Empty;
-            if (string.IsNullOrWhiteSpace(SftpHost)) SftpHost = "117.172.29.2";
-            if (SftpPort is <= 0 or 22) SftpPort = 36112;
-            if (string.IsNullOrWhiteSpace(SftpUserName)) SftpUserName = "root";
-            if (string.IsNullOrWhiteSpace(SftpRemoteDirectory)) SftpRemoteDirectory = "/opt/www/static/download/";
-            if (string.IsNullOrWhiteSpace(PublicHttpBaseUrl)) PublicHttpBaseUrl = "http://117.172.29.2:36109/download/";
-            await LoadPatchCatalogFromOutputDirectoryAsync();
-            SelectedUpgradePatch = UpgradePatchChoices.FirstOrDefault(item => string.Equals(item.FilePath, settings.SelectedUpgradePatchPath, StringComparison.OrdinalIgnoreCase))
-                ?? SelectedUpgradePatch;
-            SelectedReverseUpgradePatch = UpgradePatchChoices.FirstOrDefault(item => string.Equals(item.FilePath, settings.SelectedReverseUpgradePatchPath, StringComparison.OrdinalIgnoreCase));
-            SettingsStatus = "已加载本机设置和 Windows 凭据。";
+            _modeWorkspaces.TryAdd(EcoLinkModeKey, new ModeWorkspaceSettings());
+            _modeWorkspaces.TryAdd(TraditionalModeKey, new ModeWorkspaceSettings());
+
+            _isEcoLink = !string.Equals(settings.ActiveMode, TraditionalModeKey, StringComparison.OrdinalIgnoreCase);
+            _ecoLinkSelectedTaskType = _modeWorkspaces[EcoLinkModeKey].SelectedTaskType;
+            _traditionalSelectedTaskType = _modeWorkspaces[TraditionalModeKey].SelectedTaskType;
+            ApplyMode(restoreSelectedPage: false);
+            ApplyCurrentModeWorkspace();
+            RestoreCurrentModeUpgradeUiState();
+            await RestoreCurrentModePatchCatalogAsync();
+            await LoadReportsAsync(updateStatus: false);
+            SettingsStatus = "已按协议模式加载独立工作区和 Windows 凭据。";
         }
         catch (Exception exception)
         {
@@ -3785,7 +4526,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void ScheduleSettingsAutoSave()
     {
-        if (!_settingsLoaded) return;
+        if (!_settingsLoaded || _restoringModeWorkspace) return;
 
         _settingsAutoSaveCancellation?.Cancel();
         _settingsAutoSaveCancellation?.Dispose();
@@ -3814,8 +4555,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await _settingsSaveLock.WaitAsync(cancellationToken);
         try
         {
+            _modeWorkspaces[CurrentModeKey] = CaptureCurrentModeWorkspace();
             var settings = new AppSettings
             {
+                ActiveMode = CurrentModeKey,
+                ModeWorkspaces = _modeWorkspaces.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value.Copy(),
+                    StringComparer.OrdinalIgnoreCase),
                 MqttHost = MqttHost,
                 MqttPort = MqttPort,
                 MqttClientUsesLocalBroker = MqttClientUsesLocalBroker,
@@ -3851,6 +4598,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 NodeTargetsText = NodeTargetsText,
                 GatewayId = GatewayId,
                 CycleRounds = CycleRounds,
+                CycleIntervalMode = CycleIntervalMode,
+                CycleFixedIntervalSeconds = CycleFixedIntervalSeconds,
+                CycleRandomMinimumSeconds = CycleRandomMinimumSeconds,
+                CycleRandomMaximumSeconds = CycleRandomMaximumSeconds,
                 NodePatchLimit = NodePatchLimit,
                 AsyncPatchLimit = AsyncPatchLimit,
                 SyncPatchLimit = SyncPatchLimit,
@@ -3881,11 +4632,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 NodeDiscoveryCompletedAt = _nodeDiscoveryCompletedAt,
             };
             await _settingsStore.SaveAsync(settings, cancellationToken);
-            if (!string.IsNullOrEmpty(MqttPassword)) _secretStore.Save("OtaTool/MqttPassword", MqttPassword);
-            if (!string.IsNullOrEmpty(LocalBrokerPassword)) _secretStore.Save("OtaTool/LocalBrokerPassword", LocalBrokerPassword);
-            if (!string.IsNullOrEmpty(SftpPassword)) _secretStore.Save("OtaTool/SftpPassword", SftpPassword);
-            if (!string.IsNullOrEmpty(SftpPrivateKeyPassphrase)) _secretStore.Save("OtaTool/SftpPrivateKeyPassphrase", SftpPrivateKeyPassphrase);
-            SettingsStatus = "设置已保存；密码与私钥口令仅保存在 Windows Credential Manager。";
+            SaveCurrentModeSecrets();
+            SettingsStatus = "当前模式设置已保存到独立工作区；密码与私钥口令仅保存在 Windows Credential Manager。";
         }
         catch (OperationCanceledException)
         {
@@ -3906,6 +4654,131 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private static string GetDefaultLogAnalyzerPath()
     {
         return Path.Combine(AppContext.BaseDirectory, "analyze_ota_logs.py");
+    }
+
+    private static IReadOnlyList<LogAnalysisLineViewItem> BuildLogAnalysisResultLines(string text)
+    {
+        var inAnalyzerSummary = false;
+        return text.Split(["\r\n", "\n", "\r"], StringSplitOptions.None)
+            .Select(line =>
+            {
+                var normalized = line.Trim().TrimStart('•').Trim();
+                if (normalized == "日志分析摘要") inAnalyzerSummary = true;
+                var isHeader = normalized is "评分明细" or "主要观察" or "改进建议" or "日志分析摘要";
+                return new LogAnalysisLineViewItem(
+                    line,
+                    !isHeader && IsLogAnalysisProblemLine(normalized, inAnalyzerSummary),
+                    isHeader);
+            })
+            .ToArray();
+    }
+
+    private static bool IsLogAnalysisProblemLine(string line, bool inAnalyzerSummary)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return false;
+
+        if (!inAnalyzerSummary)
+        {
+            if (line.StartsWith("闭环完整性", StringComparison.Ordinal)
+                || line.StartsWith("目标完成度", StringComparison.Ordinal)
+                || line.StartsWith("传输可靠性", StringComparison.Ordinal)
+                || line.StartsWith("时延表现", StringComparison.Ordinal)
+                || line.StartsWith("目标完成度：", StringComparison.Ordinal))
+            {
+                return HasIncompleteRatio(line);
+            }
+            if (line.StartsWith("维护响应时延 P95", StringComparison.Ordinal))
+            {
+                return TryGetValueAfter(line, "P95 为", out var p95) && p95 > 300;
+            }
+            return line.Contains("未形成完整闭环", StringComparison.Ordinal)
+                   || line.Contains("发送失败", StringComparison.Ordinal)
+                   || line.Contains("推断漏帧", StringComparison.Ordinal)
+                   || line.Contains("重试/重复", StringComparison.Ordinal)
+                   || line.Contains("弱链路", StringComparison.Ordinal)
+                   || line.StartsWith("先解决", StringComparison.Ordinal)
+                   || line.StartsWith("检查 Sync", StringComparison.Ordinal)
+                   || line.StartsWith("重点分析", StringComparison.Ordinal)
+                   || line.StartsWith("复测弱链路", StringComparison.Ordinal);
+        }
+
+        if (line.StartsWith("OTA 日志判定：", StringComparison.Ordinal)) return !line.EndsWith("成功", StringComparison.Ordinal);
+        if (line.StartsWith("计数：", StringComparison.Ordinal)) return HasIncompleteRatio(line);
+        if (line.StartsWith("设备升级：", StringComparison.Ordinal))
+            return line.Contains("未确认", StringComparison.Ordinal) || line.Contains("未完成", StringComparison.Ordinal);
+        if (line.StartsWith("Stage：", StringComparison.Ordinal)) return HasPositiveValueAfter(line, "首轮缺");
+        if (line.StartsWith("维护：", StringComparison.Ordinal))
+        {
+            var latencyMatch = System.Text.RegularExpressions.Regex.Match(
+                line,
+                @"P50/P95/MAX=[^/]+/(?<p95>\d+)/",
+                System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+            var latencyTooHigh = latencyMatch.Success
+                                 && int.TryParse(latencyMatch.Groups["p95"].Value, out var p95)
+                                 && p95 > 300;
+            return line.Contains("None", StringComparison.OrdinalIgnoreCase)
+                   || line.Contains("null", StringComparison.OrdinalIgnoreCase)
+                   || latencyTooHigh
+                   || HasPositiveValueAfter(line, "重复");
+        }
+        if (line.StartsWith("分片诊断：", StringComparison.Ordinal))
+            return HasAnyPositiveValueAfter(line, ["首片缺失", "尾片缺失", "两片全缺", "CRC 失败", "越窗前", "越窗后", "非法", "重复"]);
+        if (line.StartsWith("接收路径首检：", StringComparison.Ordinal))
+            return HasAnyPositiveValueAfter(line, ["底层无效", "帧头非法", "DATA 拒绝", "识别后未分发"]);
+        if (line.StartsWith("Async 分片：", StringComparison.Ordinal))
+            return HasTrailingFailureInTriplet(line, "首片提交/成功/失败")
+                   || HasTrailingFailureInTriplet(line, "尾片")
+                   || HasPositiveValueAfter(line, "入帧失败");
+        if (line.StartsWith("逐帧对齐：", StringComparison.Ordinal))
+            return HasFailureInSuccessFailurePair(line, "Async 成功/失败")
+                   || HasAnyPositiveValueAfter(line, ["拒", "缺"]);
+        if (line.StartsWith("发送保护：", StringComparison.Ordinal))
+            return HasAnyPositiveValueAfter(line, ["双遍窗口", "额外块"]);
+        if (line.StartsWith("同步节拍：", StringComparison.Ordinal))
+            return HasAnyPositiveValueAfter(line, ["发送失败", "提交节拍异常", "帧头拒绝", "推断漏帧"]);
+        if (line.StartsWith("分 Node：", StringComparison.Ordinal))
+            return HasAnyPositiveValueAfter(line, ["缺", "瞬态", "SYNC_LOST"]);
+        return line.StartsWith("弱链路提示：", StringComparison.Ordinal)
+               || line.StartsWith("阻断原因：", StringComparison.Ordinal)
+               || line.StartsWith("日志分析失败：", StringComparison.Ordinal);
+    }
+
+    private static bool HasIncompleteRatio(string line)
+        => System.Text.RegularExpressions.Regex.Matches(line, @"(?<value>\d+)\s*/\s*(?<total>\d+)")
+            .Cast<System.Text.RegularExpressions.Match>()
+            .Any(match => int.Parse(match.Groups["value"].Value) < int.Parse(match.Groups["total"].Value));
+
+    private static bool HasAnyPositiveValueAfter(string line, IReadOnlyList<string> labels)
+        => labels.Any(label => HasPositiveValueAfter(line, label));
+
+    private static bool HasPositiveValueAfter(string line, string label)
+        => TryGetValueAfter(line, label, out var value) && value > 0;
+
+    private static bool TryGetValueAfter(string line, string label, out int value)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            line,
+            $@"{System.Text.RegularExpressions.Regex.Escape(label)}\s*[=:]?\s*(?<value>\d+)",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return int.TryParse(match.Groups["value"].Value, out value);
+    }
+
+    private static bool HasTrailingFailureInTriplet(string line, string label)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            line,
+            $@"{System.Text.RegularExpressions.Regex.Escape(label)}\s*\d+/\d+/(?<failure>\d+)",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return int.TryParse(match.Groups["failure"].Value, out var failure) && failure > 0;
+    }
+
+    private static bool HasFailureInSuccessFailurePair(string line, string label)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            line,
+            $@"{System.Text.RegularExpressions.Regex.Escape(label)}\s*\d+/(?<failure>\d+)",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        return int.TryParse(match.Groups["failure"].Value, out var failure) && failure > 0;
     }
 
     private string GetPatchOutputDirectory()
@@ -4112,6 +4985,18 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        if (action == PatchDialogAction.CancelTask)
+        {
+            await CancelActiveTaskAsync();
+            return;
+        }
+
+        if (action == PatchDialogAction.CloseApplication)
+        {
+            CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
         if (action == PatchDialogAction.Publish && publication.Count > 0)
         {
             await PublishPatchesAsync(publication);
@@ -4191,7 +5076,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var selectedDeviceType = GetSelectedTaskDeviceType();
         UpgradePatchChoices.Clear();
         foreach (var patch in _patchCatalog.Values
-                     .Where(item => File.Exists(item.FilePath) &&
+                     .Where(item => IsInCurrentPatchWorkspace(item.FilePath) &&
+                                    File.Exists(item.FilePath) &&
                                     (item.IsFullImage
                                         ? selectedDeviceType == DeviceType.Gateway
                                         : (!IsEcoLink || item.ManifestVerified) &&
@@ -4218,12 +5104,22 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private DeviceType GetSelectedTaskDeviceType() => SelectedTaskType switch
     {
-        "Gateway 升级" => DeviceType.Gateway,
-        "Sync 升级" => DeviceType.Sync,
-        "Async 升级" => DeviceType.Async,
-        "Node 升级" => DeviceType.Node,
+        GatewayTaskType => DeviceType.Gateway,
+        SyncTaskType => DeviceType.Sync,
+        AsyncTaskType => DeviceType.Async,
+        NodeTaskType => DeviceType.Node,
         _ => throw new InvalidOperationException($"未知升级类型：{SelectedTaskType}"),
     };
+
+    private bool IsInCurrentPatchWorkspace(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) return false;
+        var fileDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath));
+        return string.Equals(
+            fileDirectory?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            GetPatchOutputDirectory().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
+    }
 
     private static string InferPatchRestoreDirection(PatchSelection patch)
     {
@@ -4506,10 +5402,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             SelectedTaskType = deviceType switch
             {
-                DeviceType.Gateway => "Gateway 升级",
-                DeviceType.Sync => "Sync 升级",
-                DeviceType.Async => "Async 升级",
-                DeviceType.Node => "Node 升级",
+                DeviceType.Gateway => GatewayTaskType,
+                DeviceType.Sync => SyncTaskType,
+                DeviceType.Async => AsyncTaskType,
+                DeviceType.Node => NodeTaskType,
                 _ => SelectedTaskType,
             };
         }
@@ -4527,7 +5423,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         var requiredType = _selectedPatchManifest?.OtaDeviceType == DeviceType.Node
             ? _selectedPatchManifest.DeviceTypeCode
-            : (int?)NodeType;
+            : (int?)null;
         var requiredVersion = _selectedPatchManifest?.OtaDeviceType == DeviceType.Node
             ? _selectedPatchManifest.OldVersion
             : (byte?)null;
@@ -4559,6 +5455,8 @@ public enum PatchDialogAction
     Information,
     Publish,
     StartUpgrade,
+    CancelTask,
+    CloseApplication,
 }
 
 public sealed record PatchSelection(
@@ -4662,7 +5560,7 @@ public sealed class ReportListItem
             var startTime = !stage.State.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
                 ? report.StartedAt.AddMilliseconds(stage.StartOffsetMs).ToString("HH:mm:ss.fff")
                 : "未开始";
-            var duration = stage.DurationMs > 0 ? $"{stage.DurationMs:N0} ms" : "0 ms";
+            var duration = DurationDisplay.Format(stage.DurationMs);
             var direction = StageDirections.GetValueOrDefault(stage.Stage, "—");
             var directionOrReason = string.IsNullOrWhiteSpace(stage.Reason)
                 ? direction
@@ -4737,6 +5635,17 @@ public sealed class SelectableExtenderItem : ObservableObject
             if (SetProperty(ref _isSelected, value)) _selectionChanged();
         }
     }
+}
+
+public sealed record LogAnalysisLineViewItem(string Text, bool IsProblem, bool IsHeader);
+
+public sealed record ImportedLogFileItem(string FilePath, long Length, DateTime LastWriteTime)
+{
+    public string FileName => Path.GetFileName(FilePath);
+
+    public string Detail => Length >= 1024 * 1024
+        ? $"{Length / 1024d / 1024d:N1} MB · {LastWriteTime:yyyy-MM-dd HH:mm:ss}"
+        : $"{Math.Max(1, Length / 1024d):N1} KB · {LastWriteTime:yyyy-MM-dd HH:mm:ss}";
 }
 
 public sealed class SelectableNodeItem : ObservableObject
@@ -4939,6 +5848,89 @@ public static class NodeTypeCatalog
     }
 }
 
+internal sealed class UpgradeModeUiState
+{
+    public string TaskStatusMessage { get; set; } = "当前任务：空闲  · 请选择 Patch 后启动升级";
+    public string GlobalLogText { get; set; } = string.Empty;
+    public string GatewayStageSummary { get; set; } = "尚未收到 Gateway 阶段状态。";
+    public string GatewayStageColor { get; set; } = "#65758B";
+    public GatewayOtaStatus? LastGatewayStatus { get; set; }
+    public int? GatewayTaskSequence { get; set; }
+    public DateTimeOffset? GatewayTaskStartedAt { get; set; }
+    public string UpgradeRunModeText { get; set; } = "尚未启动";
+    public string UpgradeRunModeForeground { get; set; } = "#65758B";
+    public string UpgradeRunModeBackground { get; set; } = "#EEF2F7";
+    public string UpgradeRunProgressText { get; set; } = "启动任务后显示执行方式和进度。";
+    public string DeviceDiscoveryStatus { get; set; } = "尚未刷新在线 Extender。";
+    public string NodeDiscoveryStatus { get; set; } = "尚未刷新 Node。";
+    public string LogAnalysisStatus { get; set; } = "未导入日志";
+    public string LogAnalysisResultText { get; set; } = "尚未执行日志分析。";
+    public string LogAnalysisQualityScore { get; set; } = "--";
+    public string LogAnalysisQualityGrade { get; set; } = "尚未评估";
+    public string LogAnalysisQualitySummary { get; set; } = "分析日志后生成 100 分制质量评估。";
+    public string LogAnalysisQualityColor { get; set; } = "#65758B";
+    public string SettingsStatus { get; set; } = "设置尚未保存";
+    public IReadOnlyList<MqttMessageListItem> MqttMessages { get; set; } = [];
+    public string MqttMessageFilter { get; set; } = string.Empty;
+    public string GatewaySubscriptionStatus { get; set; } = "填写 Gateway ID 后订阅固定上行主题。";
+    public string SubscribedGatewayTopic { get; set; } = string.Empty;
+    public IReadOnlyList<string> ObservedGatewayIds { get; set; } = [];
+    public Guid? SelectedReportId { get; set; }
+    public string ImportedPatchPath { get; set; } = string.Empty;
+    public long ImportedPatchLength { get; set; }
+    public string ImportedPatchMd5 { get; set; } = string.Empty;
+    public string ImportedPatchSha256 { get; set; } = string.Empty;
+    public string OldImagePath { get; set; } = string.Empty;
+    public string NewImagePath { get; set; } = string.Empty;
+    public string OldImageSha256 { get; set; } = string.Empty;
+    public string NewImageSha256 { get; set; } = string.Empty;
+    public FirmwareIdentity? OldFirmwareIdentity { get; set; }
+    public FirmwareIdentity? NewFirmwareIdentity { get; set; }
+    public bool AreFirmwareImagesCompatible { get; set; }
+    public string PatchPath { get; set; } = string.Empty;
+    public string PatchUrl { get; set; } = string.Empty;
+    public string PatchMd5 { get; set; } = string.Empty;
+    public string PatchSha256 { get; set; } = string.Empty;
+    public long PatchLength { get; set; }
+    public bool? PatchManifestVerified { get; set; }
+    public string ReversePatchPath { get; set; } = string.Empty;
+    public string ReversePatchUrl { get; set; } = string.Empty;
+    public string ReversePatchMd5 { get; set; } = string.Empty;
+    public string ReversePatchSha256 { get; set; } = string.Empty;
+    public long ReversePatchLength { get; set; }
+    public PackageManifest? SelectedPatchManifest { get; set; }
+    public string SelectedRestorePatchPath { get; set; } = string.Empty;
+    public string SelectedPatchRestoreDirection { get; set; } = "A → B";
+    public string PatchStatus { get; set; } = "请先导入 A 版本和 B 版本固件。";
+    public string PatchRestoreTestStatus { get; set; } = "请选择尚未验证的外部 Patch。工具自产 Patch 已自动完成双向还原验证。";
+    public string PublishStatus { get; set; } = "未发布";
+    public string PublishConnectionTestStatus { get; set; } = "尚未测试 SFTP 和 HTTP 连接。";
+    public bool HasPublishedPatches { get; set; }
+
+    public static UpgradeModeUiState CreateEcoLink() => new();
+
+    public static UpgradeModeUiState CreateTraditional() => new()
+    {
+        GatewayStageSummary = "尚未收到 Gateway 最终升级结果。",
+        DeviceDiscoveryStatus = "传统模式不使用 Extender 发现。",
+        NodeDiscoveryStatus = "传统模式不使用 Node 发现。",
+    };
+}
+
+internal static class DurationDisplay
+{
+    public static string Format(long milliseconds)
+    {
+        var totalMilliseconds = Math.Max(0, milliseconds);
+        var minutes = totalMilliseconds / 60_000;
+        var seconds = totalMilliseconds % 60_000 / 1_000;
+        var remainderMilliseconds = totalMilliseconds % 1_000;
+        if (minutes > 0) return $"{minutes} min {seconds} s {remainderMilliseconds} ms";
+        if (seconds > 0) return $"{seconds} s {remainderMilliseconds} ms";
+        return $"{remainderMilliseconds} ms";
+    }
+}
+
 public sealed record GatewayStageViewItem(
     string Stage,
     string State,
@@ -4950,6 +5942,8 @@ public sealed record GatewayStageViewItem(
     bool FreezeRunningAnimation)
 {
     public string StateColor => StatusColor.For(State);
+
+    public string DisplayDuration => DurationDisplay.Format(DurationMs);
 
     public string DisplayStage => Stage.ToUpperInvariant() switch
     {
@@ -5007,6 +6001,8 @@ public sealed record GatewaySubtaskViewItem(
     string Reason)
 {
     public string StateColor => StatusColor.For(Result);
+
+    public string DisplayElapsed => DurationDisplay.Format(ElapsedMs);
 
     public string DisplayStage => OtaStatusDisplay.IsNodePrepareTimeout(
         Result,

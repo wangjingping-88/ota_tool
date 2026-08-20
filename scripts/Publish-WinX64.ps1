@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\win-x64'),
-    [string]$Version = '0.1.0',
+    [string]$Version = '0.1.1',
     [string]$SourceRevisionId = ''
 )
 
@@ -60,6 +60,9 @@ $requiredFiles = @(
     'OtaTool.App.exe',
     'OtaTool.Updater.exe',
     'bsdiff_cmd.exe',
+    'Tools\OTA_TOOL\OTA_TOOL.exe',
+    'Tools\OTA_TOOL\Qt5Core.dll',
+    'Tools\OTA_TOOL\platforms\qwindows.dll',
     'Scripts\TestPatchWithOtaTool.ps1',
     'analyze_ota_logs.py'
 )

@@ -31,6 +31,7 @@ try
     VerifyNodeTypePresentation();
     VerifyGeneratedMetadataPresentation();
     VerifyPatchCenterTitleCapitalization();
+    VerifyMqttConfigurationTabs();
     await VerifyPatchAndTaskRulesAsync(workspace);
     await VerifySettingsPersistenceAsync(workspace);
     await VerifyHttpRangeServerAsync(workspace);
@@ -108,7 +109,7 @@ static void VerifyPatchCenterWorkflow()
         "Patch generation must stay disabled until valid A/B firmware is imported and must expose operation feedback.");
     Assert(
         viewModel.Contains("Gateway 完整镜像|*.bin", StringComparison.Ordinal)
-        && viewModel.Contains("完整 .bin 镜像仅支持 Gateway 升级", StringComparison.Ordinal),
+        && viewModel.Contains("完整 .bin 镜像仅支持网关升级", StringComparison.Ordinal),
         "Existing upgrade-file import must accept Gateway full images in both protocol modes.");
     Assert(
         viewModel.Contains("裸 Patch 或元数据不完整时仍应出现在详情列表中", StringComparison.Ordinal)
@@ -126,16 +127,29 @@ static void VerifyPatchCenterWorkflow()
         restoreScript.Contains("function Get-FileDigest", StringComparison.Ordinal)
         && !restoreScript.Contains("Get-FileHash", StringComparison.Ordinal),
         "Patch restore verification must calculate hashes without relying on the optional Get-FileHash cmdlet.");
+    Assert(
+        restoreScript.Contains("Tools\\OTA_TOOL\\OTA_TOOL.exe", StringComparison.Ordinal)
+        && !restoreScript.Contains("D:\\tools\\OTA_TOOL", StringComparison.Ordinal)
+        && viewModel.Contains("Path.Combine(AppContext.BaseDirectory, \"Tools\", \"OTA_TOOL\", \"OTA_TOOL.exe\")", StringComparison.Ordinal),
+        "Patch restore verification must use the tool bundled with the desktop application instead of a machine-local installation.");
 }
 
 static void VerifyWindowChromeWorkAreaBounds()
 {
     var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml.cs"));
+    var viewModel = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindowViewModel.cs"));
     Assert(
         source.Contains("WmGetMinMaxInfo", StringComparison.Ordinal)
         && source.Contains("MonitorFromWindow", StringComparison.Ordinal)
         && source.Contains("monitorInfo.WorkArea", StringComparison.Ordinal),
         "Custom window maximize handling must constrain the window to the current monitor work area.");
+    Assert(source.Contains("protected override void OnClosing(CancelEventArgs eventArgs)", StringComparison.Ordinal)
+        && source.Contains("viewModel.RequestCloseApplicationConfirmation()", StringComparison.Ordinal)
+        && source.Contains("viewModel.CloseApplicationRequested += OnCloseApplicationRequested;", StringComparison.Ordinal)
+        && viewModel.Contains("PatchDialogAction.CloseApplication", StringComparison.Ordinal)
+        && viewModel.Contains("\"升级任务仍在进行\"", StringComparison.Ordinal)
+        && viewModel.Contains("\"仍然关闭\"", StringComparison.Ordinal),
+        "存在活动升级或循环等待时，关闭窗口必须使用应用内统一样式确认弹框。 ");
 }
 
 static void VerifyDefaultExternalMqttSettings()
@@ -164,6 +178,17 @@ static void VerifyStatusPanelLayout()
 {
     var xamlPath = Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml");
     var xaml = File.ReadAllText(xamlPath);
+    var viewModel = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindowViewModel.cs"));
+    var codeBehind = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml.cs"));
+    Assert(!xaml.Contains("Opacity=\"0\"", StringComparison.Ordinal)
+        && codeBehind.Contains("await viewModel.Initialization;", StringComparison.Ordinal)
+        && !codeBehind.Contains("Opacity = 1;", StringComparison.Ordinal)
+        && viewModel.Contains("ApplyMode(restoreSelectedPage: false);", StringComparison.Ordinal)
+        && viewModel.Contains("private void ApplyMode(bool restoreSelectedPage = true)", StringComparison.Ordinal)
+        && viewModel.Contains("_startupSettings = LoadStartupSettings();", StringComparison.Ordinal)
+        && viewModel.Contains("ApplyStartupShellSettings(_startupSettings);", StringComparison.Ordinal)
+        && viewModel.Contains("await LoadSettingsAsync(_startupSettings);", StringComparison.Ordinal),
+        "主窗口应立即显示，并在每次启动时固定进入 MQTT 配置页面。");
     Assert(xaml.Contains("Header=\"阶段时间线\" IsExpanded=\"True\"", StringComparison.Ordinal),
         "阶段时间线应默认展开。");
     Assert(xaml.Contains("Header=\"Extender 子任务\" IsExpanded=\"True\"", StringComparison.Ordinal),
@@ -199,6 +224,20 @@ static void VerifyStatusPanelLayout()
     Assert(xaml.Contains("Content=\"取消任务\"", StringComparison.Ordinal)
         && xaml.Contains("Visibility=\"{Binding PausedProgressVisibility}\"", StringComparison.Ordinal),
         "状态机应提供取消任务按钮，并在暂停查询时显示静态提示。");
+    Assert(xaml.Contains("Text=\"{Binding UpgradeRunModeText}\"", StringComparison.Ordinal)
+        && xaml.Contains("Text=\"{Binding UpgradeRunProgressText}\"", StringComparison.Ordinal)
+        && viewModel.Contains("UpgradeRunModeText = $\"单次 {task.OldVersion} to {task.NewVersion}\"", StringComparison.Ordinal)
+        && viewModel.Contains("UpgradeRunModeText = $\"循环 1/{CycleRounds} {forward.OldVersion} to {forward.NewVersion}\"", StringComparison.Ordinal),
+        "状态机必须明确显示单次/循环升级方式和当前轮次进度。");
+    Assert(xaml.Contains("Text=\"{Binding DisplayDuration}\"", StringComparison.Ordinal)
+        && xaml.Contains("Text=\"{Binding DisplayElapsed, Mode=OneWay}\"", StringComparison.Ordinal)
+        && viewModel.Contains("$\"{minutes} min {seconds} s {remainderMilliseconds} ms\"", StringComparison.Ordinal),
+        "阶段和子任务耗时应使用 min、s、ms 组合格式。");
+    Assert(viewModel.Contains("PatchDialogAction.CancelTask", StringComparison.Ordinal)
+        && viewModel.Contains("\"确认取消任务\"", StringComparison.Ordinal)
+        && viewModel.Contains("await CancelActiveTaskAsync();", StringComparison.Ordinal)
+        && viewModel.Contains("public bool CanCancelTask => _runner?.HasActiveTask == true || _isCycleUpgradeRunning;", StringComparison.Ordinal),
+        "取消升级任务前必须使用应用内统一样式确认弹框。");
     Assert(!xaml.Contains("Command=\"{Binding SelectAllCommand}\"", StringComparison.Ordinal)
         && !xaml.Contains("Command=\"{Binding ClearCommand}\"", StringComparison.Ordinal),
         "Node 分组内不应保留重复的全选和取消按钮。");
@@ -206,7 +245,6 @@ static void VerifyStatusPanelLayout()
     var taskEnd = xaml.IndexOf("<!-- 日志分析 -->", taskStart, StringComparison.Ordinal);
     Assert(taskStart >= 0 && taskEnd > taskStart, "未找到升级任务页面布局。");
     var taskLayout = xaml[taskStart..taskEnd];
-    var viewModel = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindowViewModel.cs"));
     Assert(taskLayout.Contains("<Grid Visibility=\"{Binding TaskPageVisibility}\">", StringComparison.Ordinal)
         && System.Text.RegularExpressions.Regex.Matches(
             taskLayout,
@@ -216,6 +254,14 @@ static void VerifyStatusPanelLayout()
         "升级配置和升级状态机应使用等宽双栏布局。");
     Assert(taskLayout.Contains("IsEnabled=\"{Binding CanStartCycleUpgrade}\"", StringComparison.Ordinal),
         "循环升级按钮应根据反向 Patch 前置条件更新可用状态。");
+    Assert(taskLayout.Contains("Text=\"循环升级间隔\"", StringComparison.Ordinal)
+        && taskLayout.Contains("ItemsSource=\"{Binding CycleIntervalModes}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding CycleFixedIntervalSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding CycleRandomMinimumSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding CycleRandomMaximumSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
+        && viewModel.Contains("new OtaCycleDefinition(forward, reverse, CycleRounds, cycleInterval)", StringComparison.Ordinal)
+        && viewModel.Contains("cycle.Waiting +=", StringComparison.Ordinal),
+        "循环升级应支持固定或自定义范围的随机秒级间隔，并在等待时更新状态机。");
     Assert(!taskLayout.Contains("Content=\"导出报告\"", StringComparison.Ordinal)
         && !taskLayout.Contains("ExportReportCommand", StringComparison.Ordinal),
         "升级任务页不应保留手动导出报告入口。");
@@ -223,10 +269,19 @@ static void VerifyStatusPanelLayout()
         && taskLayout.Contains("Command=\"{Binding RefreshExtendersCommand}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Content=\"{Binding NodeDiscoveryButtonText}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Command=\"{Binding RefreshNodesCommand}\"", StringComparison.Ordinal)
+        && System.Text.RegularExpressions.Regex.Matches(taskLayout, "IsEnabled=\"\\{Binding CanRefreshDiscovery\\}\"").Count == 2
         && taskLayout.Contains("MinWidth=\"112\"", StringComparison.Ordinal)
         && taskLayout.Contains("Content=\"{Binding ExtenderSelectionToggleText}\" Command=\"{Binding ToggleExtenderSelectionCommand}\"", StringComparison.Ordinal)
         && !taskLayout.Contains("Text=\"在线 Extender\"", StringComparison.Ordinal),
         "Extender 与 Node 应使用独立且宽度稳定的刷新按钮，Extender 区域应保留全选/取消切换按钮。");
+    Assert(viewModel.Contains("public bool CanRefreshDiscovery => IsEcoLink && IsMqttConnected && !IsDiscoveringDevices && !IsUpgradeInProgress;", StringComparison.Ordinal)
+        && viewModel.Contains("OnPropertyChanged(nameof(CanRefreshDiscovery));", StringComparison.Ordinal)
+        && viewModel.Contains("升级过程中不能刷新 Extender。", StringComparison.Ordinal)
+        && viewModel.Contains("升级过程中不能刷新 Node。", StringComparison.Ordinal)
+        && viewModel.Contains("if (!IsEcoLink || IsDiscoveringDevices)", StringComparison.Ordinal)
+        && !viewModel.Contains("SelectedTaskType != NodeTaskType || IsDiscoveringDevices", StringComparison.Ordinal)
+        && viewModel.Contains(": (int?)null;", StringComparison.Ordinal),
+        "设备刷新应只依赖 EcoLink、MQTT 连接和无活动升级；Node 查询不得依赖 Patch 或升级类型。");
     Assert(taskLayout.Contains("Margin=\"0,8,0,0\" Text=\"{Binding GatewayIdTaskHint}\"", StringComparison.Ordinal)
         && taskLayout.Contains("<Border Margin=\"0,10,0,0\" Padding=\"10\"", StringComparison.Ordinal),
         "反向 Patch 下方留白应保持紧凑。");
@@ -269,6 +324,13 @@ static void VerifyStatusPanelLayout()
         && logNavigation < settingsNavigation
         && viewModel.Contains("item.Name == \"MQTT 配置\"", StringComparison.Ordinal),
         "EcoLink 导航顺序应为 MQTT、PATCH、升级任务、历史报告、日志分析、系统设置。");
+    Assert(viewModel.Contains("Dictionary<string, ModeWorkspaceSettings> _modeWorkspaces", StringComparison.Ordinal)
+        && viewModel.Contains("SaveCurrentModeUiState();", StringComparison.Ordinal)
+        && viewModel.Contains("ApplyCurrentModeWorkspace();", StringComparison.Ordinal)
+        && viewModel.Contains("RestoreCurrentModeUpgradeUiState();", StringComparison.Ordinal)
+        && viewModel.Contains("report.Task.Mode == (IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional)", StringComparison.Ordinal)
+        && viewModel.Contains("OtaTool/{CurrentModeKey}/{suffix}", StringComparison.Ordinal),
+        "两种协议模式必须使用独立工作区、运行状态、报告视图和 Credential Manager 凭据键。");
     Assert(viewModel.Contains("autoExport: IsTerminalState(update.State) && !_isCycleUpgradeRunning", StringComparison.Ordinal)
         && viewModel.Contains("测试完成，报告已导出到", StringComparison.Ordinal)
         && !viewModel.Contains("ExportActiveReportAsync", StringComparison.Ordinal),
@@ -301,12 +363,29 @@ static void VerifyStatusPanelLayout()
         "历史报告应显示去重后的阶段时间线，并支持查看、归档、删除与应用内确认弹框。");
     Assert(xaml.Contains("Text=\"{Binding LogAnalysisQualityScore}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding LogAnalysisQualityGrade}\"", StringComparison.Ordinal)
-        && xaml.Contains("FontSize=\"14\" LineHeight=\"24\"", StringComparison.Ordinal)
+        && xaml.Contains("ItemsSource=\"{Binding LogAnalysisResultLines, Mode=OneWay}\"", StringComparison.Ordinal)
+        && xaml.Contains("Value=\"#C53333\"", StringComparison.Ordinal)
         && xaml.Contains("<Grid Visibility=\"{Binding LogPageVisibility}\">", StringComparison.Ordinal)
-        && xaml.Contains("<ScrollViewer Grid.Column=\"0\" VerticalScrollBarVisibility=\"Auto\"", StringComparison.Ordinal)
+        && xaml.Contains("<Border Grid.Column=\"0\" Style=\"{StaticResource Card}\">", StringComparison.Ordinal)
+        && xaml.Contains("<Border Grid.Row=\"2\" MinHeight=\"58\"", StringComparison.Ordinal)
+        && xaml.Contains("<StackPanel Grid.Row=\"3\" Margin=\"0,10,0,0\">", StringComparison.Ordinal)
+        && !xaml.Contains("MaxHeight=\"270\"", StringComparison.Ordinal)
         && xaml.Contains("<ScrollViewer Grid.Column=\"2\" VerticalScrollBarVisibility=\"Auto\"", StringComparison.Ordinal)
         && !xaml.Contains("<ScrollViewer VerticalScrollBarVisibility=\"Auto\" HorizontalScrollBarVisibility=\"Disabled\">\n                                        <TextBlock Padding=\"18\"", StringComparison.Ordinal),
         "日志分析页应显示 100 分制质量评估、使用舒展排版，并仅在内容溢出时允许左右面板独立滚动。");
+    Assert(xaml.Contains("ItemsSource=\"{Binding ImportedLogFiles}\"", StringComparison.Ordinal)
+        && xaml.Contains("Content=\"删除\" Command=\"{Binding DataContext.RemoveImportedLogFileCommand", StringComparison.Ordinal)
+        && xaml.Contains("Content=\"分析列表日志\"", StringComparison.Ordinal)
+        && xaml.Contains("IsEnabled=\"{Binding HasImportedLogFiles}\"", StringComparison.Ordinal)
+        && xaml.Contains("当前分析器默认分析最新 SID", StringComparison.Ordinal)
+        && viewModel.Contains("Directory.EnumerateFiles(LogDirectory, \"*.log\", SearchOption.TopDirectoryOnly)", StringComparison.Ordinal)
+        && viewModel.Contains("File.Copy(item.FilePath, Path.Combine(analysisInputDirectory, item.FileName));", StringComparison.Ordinal)
+        && viewModel.Contains("new LogAnalysisRequest(OtaMode.EcoLink, LogAnalyzerExecutablePath, analysisInputDirectory, outputDirectory)", StringComparison.Ordinal),
+        "日志目录导入后应显示可删除清单，分析器必须仅处理清单快照，并明确循环日志只分析最新 SID。");
+    Assert(xaml.Contains("Content=\"清空\" Command=\"{Binding ClearGlobalLogCommand}\"", StringComparison.Ordinal)
+        && xaml.Contains("仅保留本次运行最近 300 行", StringComparison.Ordinal)
+        && viewModel.Contains("ClearGlobalLogCommand = new RelayCommand(_ => GlobalLogText = string.Empty);", StringComparison.Ordinal),
+        "全局日志应明确仅为运行时缓存，并提供紧凑的清空入口。");
     Assert(viewModel.Contains("if (SetProperty(ref _forwardPatchName, value)) ScheduleSettingsAutoSave();", StringComparison.Ordinal)
         && viewModel.Contains("if (SetProperty(ref _reversePatchName, value)) ScheduleSettingsAutoSave();", StringComparison.Ordinal),
         "正反向 Patch 名称修改后应自动持久化。");
@@ -371,6 +450,37 @@ static void VerifyPatchCenterTitleCapitalization()
         "所有双栏页面应使用相同的等宽列和 16 像素间距。");
 }
 
+static void VerifyMqttConfigurationTabs()
+{
+    var assetDirectory = Path.Combine(AppContext.BaseDirectory, "TestAssets");
+    var mainWindow = File.ReadAllText(Path.Combine(assetDirectory, "MainWindow.xaml"));
+    var mainViewModel = File.ReadAllText(Path.Combine(assetDirectory, "MainWindowViewModel.cs"));
+    Assert(mainWindow.Contains("GroupName=\"MqttConfigurationTabs\"", StringComparison.Ordinal)
+        && mainWindow.Contains("IsChecked=\"{Binding MqttClientUsesExternalBroker, Mode=OneWay}\"", StringComparison.Ordinal)
+        && mainWindow.Contains("IsChecked=\"{Binding MqttClientUsesLocalBroker, Mode=OneWay}\"", StringComparison.Ordinal)
+        && System.Text.RegularExpressions.Regex.Matches(mainWindow, "Command=\"{Binding SelectMqttConfigurationCommand}\"").Count == 2
+        && mainWindow.Contains("Visibility=\"{Binding MqttExternalConfigurationVisibility}\"", StringComparison.Ordinal)
+        && mainWindow.Contains("Visibility=\"{Binding MqttLocalConfigurationVisibility}\"", StringComparison.Ordinal)
+        && mainWindow.Contains("<Grid MinHeight=\"440\">", StringComparison.Ordinal)
+        && mainWindow.Contains("Margin=\"16,8,16,16\" Padding=\"12\"", StringComparison.Ordinal)
+        && !mainWindow.Contains("<TabItem Header=\"公网 MQTT 配置\">", StringComparison.Ordinal),
+        "MQTT 本地/公网配置应使用统一的分段 Tab 样式。");
+    Assert(mainViewModel.Contains("SelectMqttConfigurationCommand = new RelayCommand(SelectMqttConfiguration);", StringComparison.Ordinal)
+        && mainViewModel.Contains("MqttClientUsesLocalBroker = string.Equals(selection, \"Local\", StringComparison.Ordinal);", StringComparison.Ordinal)
+        && mainViewModel.Contains("public bool MqttClientUsesExternalBroker => !_mqttClientUsesLocalBroker;", StringComparison.Ordinal)
+        && !mainViewModel.Contains("else if (!_mqttClientUsesLocalBroker)", StringComparison.Ordinal)
+        && !mainViewModel.Contains("else if (!_httpUsesLocalServer)", StringComparison.Ordinal)
+        && !mainViewModel.Contains("else if (!_isEcoLink)", StringComparison.Ordinal)
+        && !mainViewModel.Contains("else if (!_isSpecifiedTarget)", StringComparison.Ordinal),
+        "MQTT 分段 RadioButton 必须使用单向状态绑定和显式命令，避免启动时反向写入并覆盖持久化状态。");
+    Assert(mainViewModel.Contains("private const string GatewayTaskType = \"网关升级\";", StringComparison.Ordinal)
+        && mainViewModel.Contains("private const string SyncTaskType = \"拓展器-同步升级\";", StringComparison.Ordinal)
+        && mainViewModel.Contains("private const string AsyncTaskType = \"拓展器-异步升级\";", StringComparison.Ordinal)
+        && mainViewModel.Contains("private const string NodeTaskType = \"节点升级\";", StringComparison.Ordinal)
+        && mainViewModel.Contains("NormalizeTaskType", StringComparison.Ordinal),
+        "升级类型应显示统一中文名称，并兼容旧设置中的类型名称。");
+}
+
 static void VerifyNodeTypePresentation()
 {
     var xaml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml"));
@@ -389,13 +499,15 @@ static void VerifyNodeTypePresentation()
         && viewModel.Contains("ClearNodeSelection();", StringComparison.Ordinal)
         && viewModel.Contains("node.IsSelected = node.NodeType == nodeType && node.CanSelect;", StringComparison.Ordinal),
         "Node 类型选择应批量标记同类型节点，并提供不选择项用于取消全部选择。");
-    var restoredNodeGroups = viewModel.IndexOf("foreach (var group in settings.DiscoveredNodeGroups ?? [])", StringComparison.Ordinal);
+    var restoredNodeGroups = viewModel.IndexOf("foreach (var group in workspace.DiscoveredNodeGroups ?? [])", StringComparison.Ordinal);
     var restoredNodeTypeOptions = viewModel.IndexOf("RefreshNodeTypeOptions();", restoredNodeGroups, StringComparison.Ordinal);
     var restoredNodeEligibility = viewModel.IndexOf("RefreshNodeEligibility();", restoredNodeGroups, StringComparison.Ordinal);
+    var restoredNodeSelection = viewModel.IndexOf("SelectNodesByType(_selectedNodeTypeValue);", restoredNodeEligibility, StringComparison.Ordinal);
     Assert(restoredNodeGroups >= 0
         && restoredNodeTypeOptions > restoredNodeGroups
-        && restoredNodeEligibility > restoredNodeTypeOptions,
-        "恢复持久化 Node 列表后必须先重建类型筛选项，再刷新节点资格。");
+        && restoredNodeEligibility > restoredNodeTypeOptions
+        && restoredNodeSelection > restoredNodeEligibility,
+        "恢复持久化 Node 列表后必须先重建类型筛选项、刷新节点资格，再恢复所选类型的勾选状态。");
 }
 
 static void VerifyGeneratedMetadataPresentation()
@@ -510,6 +622,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         HttpUsesLocalServer = false, PublicHttpBaseUrl = "https://files.example/ota/", SftpHost = "sftp.example", SftpPort = 2222,
         SftpPrivateKeyPath = "D:\\keys\\ota", LogDirectory = "D:\\logs",
         ForwardPatchName = "node-v1-to-v2.patch", ReversePatchName = "node-v2-to-v1.patch",
+        CycleIntervalMode = "随机间隔", CycleRandomMinimumSeconds = 3, CycleRandomMaximumSeconds = 9,
         CustomNodeTypes = [new NodeTypeDefinitionSettings(9, "烟感")],
         DiscoveredExtenders = [new DiscoveredExtenderSettings(1821385, "0x8000011c", 2, 1, true)],
         DiscoveredNodeGroups =
@@ -519,23 +632,60 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
                 [new DiscoveredNodeSettings(53936, 4, 1, -58, true)],
                 string.Empty),
         ],
+        ActiveMode = "Traditional",
+        ModeWorkspaces = new Dictionary<string, ModeWorkspaceSettings>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["EcoLink"] = new()
+            {
+                SelectedPageName = "升级任务",
+                SelectedTaskType = "节点升级",
+                MqttClientUsesLocalBroker = false,
+                GatewayId = "eco-gateway",
+                NodeType = 9,
+            },
+            ["Traditional"] = new()
+            {
+                SelectedPageName = "PATCH 中心",
+                SelectedTaskType = "拓展器-同步升级",
+                GatewayId = "traditional-gateway",
+            },
+        },
     };
     await store.SaveAsync(expected);
     var actual = await store.LoadAsync();
+    var synchronous = store.Load();
     Assert(actual.MqttHost == expected.MqttHost && actual.MqttPort == expected.MqttPort && actual.HttpPort == expected.HttpPort
         && actual.MqttUseTls && actual.MqttUserName == expected.MqttUserName && !actual.MqttClientUsesLocalBroker
         && actual.LocalBrokerPort == expected.LocalBrokerPort && actual.LocalBrokerUserName == expected.LocalBrokerUserName
         && !actual.HttpUsesLocalServer && actual.PublicHttpBaseUrl == expected.PublicHttpBaseUrl && actual.SftpPort == expected.SftpPort
         && actual.SftpPrivateKeyPath == expected.SftpPrivateKeyPath && actual.LogDirectory == expected.LogDirectory
         && actual.ForwardPatchName == expected.ForwardPatchName && actual.ReversePatchName == expected.ReversePatchName
+        && actual.CycleIntervalMode == expected.CycleIntervalMode
+        && actual.CycleRandomMinimumSeconds == expected.CycleRandomMinimumSeconds
+        && actual.CycleRandomMaximumSeconds == expected.CycleRandomMaximumSeconds
         && actual.CustomNodeTypes.Count == 1 && actual.CustomNodeTypes[0] == new NodeTypeDefinitionSettings(9, "烟感")
         && actual.DiscoveredExtenders.Count == 1 && actual.DiscoveredExtenders[0].ExtenderId == 1821385
         && actual.DiscoveredExtenders[0].IsSelected
         && actual.DiscoveredNodeGroups.Count == 1 && actual.DiscoveredNodeGroups[0].Nodes.Count == 1
         && actual.DiscoveredNodeGroups[0].Nodes[0].NodeId == 53936
         && actual.DiscoveredNodeGroups[0].Nodes[0].NodeType == 4
-        && actual.DiscoveredNodeGroups[0].Nodes[0].IsSelected,
+        && actual.DiscoveredNodeGroups[0].Nodes[0].IsSelected
+        && actual.ActiveMode == "Traditional"
+        && actual.ModeWorkspaces.Count == 2
+        && actual.ModeWorkspaces["EcoLink"].SelectedPageName == "升级任务"
+        && actual.ModeWorkspaces["EcoLink"].SelectedTaskType == "节点升级"
+        && actual.ModeWorkspaces["EcoLink"].NodeType == 9
+        && actual.ModeWorkspaces["Traditional"].GatewayId == "traditional-gateway",
         "JSON 设置或设备发现结果持久化错误。");
+    Assert(synchronous.ActiveMode == expected.ActiveMode
+        && !synchronous.ModeWorkspaces["EcoLink"].MqttClientUsesLocalBroker,
+        "启动窗口同步预载设置失败。");
+    var migrated = ModeWorkspaceSettings.FromLegacy(expected);
+    Assert(migrated.MqttHost == expected.MqttHost
+        && migrated.SelectedTaskType == expected.SelectedTaskType
+        && migrated.CustomNodeTypes.Count == 1
+        && migrated.DiscoveredNodeGroups.Count == 1,
+        "旧版顶层设置迁移到模式工作区失败。");
 }
 
 static async Task VerifyHttpRangeServerAsync(string workspace)
@@ -997,8 +1147,79 @@ static async Task VerifyCycleRunnerAsync(string workspace)
     var forward = new OtaTask { Mode = OtaMode.Traditional, DeviceType = DeviceType.Gateway, OldVersion = "1", NewVersion = "2", PatchPath = patch };
     var reverse = new OtaTask { Mode = OtaMode.Traditional, DeviceType = DeviceType.Gateway, OldVersion = "2", NewVersion = "1", PatchPath = patch };
     var launcher = new StaticTaskLauncher(OtaTaskState.Succeeded);
-    var result = await new OtaCycleRunner().RunAsync(new OtaCycleDefinition(forward, reverse, 2), launcher);
+    var fixedDelays = new List<TimeSpan>();
+    var fixedRunner = new OtaCycleRunner((delay, _) =>
+    {
+        fixedDelays.Add(delay);
+        return Task.CompletedTask;
+    });
+    var result = await fixedRunner.RunAsync(
+        new OtaCycleDefinition(
+            forward,
+            reverse,
+            2,
+            new OtaCycleIntervalOptions(OtaCycleIntervalMode.Fixed, FixedSeconds: 3)),
+        launcher);
     Assert(result.State == OtaTaskState.Succeeded && launcher.CallCount == 4, "双向循环升级未按预期执行。 ");
+    Assert(fixedDelays.Count == 3 && fixedDelays.All(delay => delay == TimeSpan.FromSeconds(3)),
+        "固定循环间隔应只出现在相邻单次升级之间。");
+
+    var randomDelays = new List<TimeSpan>();
+    var randomRunner = new OtaCycleRunner((delay, _) =>
+    {
+        randomDelays.Add(delay);
+        return Task.CompletedTask;
+    }, new Random(20260820));
+    await randomRunner.RunAsync(
+        new OtaCycleDefinition(
+            forward,
+            reverse,
+            2,
+            new OtaCycleIntervalOptions(OtaCycleIntervalMode.Random, RandomMinimumSeconds: 2, RandomMaximumSeconds: 5)),
+        new StaticTaskLauncher(OtaTaskState.Succeeded));
+    Assert(randomDelays.Count == 3 && randomDelays.All(delay => delay >= TimeSpan.FromSeconds(2) && delay <= TimeSpan.FromSeconds(5)),
+        "随机循环间隔必须落在用户配置的闭区间内。");
+
+    var zeroDelayCalls = 0;
+    var zeroRunner = new OtaCycleRunner((_, _) =>
+    {
+        zeroDelayCalls++;
+        return Task.CompletedTask;
+    });
+    await zeroRunner.RunAsync(
+        new OtaCycleDefinition(
+            forward,
+            reverse,
+            1,
+            new OtaCycleIntervalOptions(OtaCycleIntervalMode.Fixed, FixedSeconds: 0)),
+        new StaticTaskLauncher(OtaTaskState.Succeeded));
+    Assert(zeroDelayCalls == 0, "循环间隔为 0 秒时必须保持原有连续执行逻辑。");
+
+    var waitStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var cancellableRunner = new OtaCycleRunner(async (_, cancellationToken) =>
+    {
+        waitStarted.TrySetResult(true);
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+    });
+    using var cancellation = new CancellationTokenSource();
+    var cancellableRun = cancellableRunner.RunAsync(
+        new OtaCycleDefinition(
+            forward,
+            reverse,
+            1,
+            new OtaCycleIntervalOptions(OtaCycleIntervalMode.Fixed, FixedSeconds: 10)),
+        new StaticTaskLauncher(OtaTaskState.Succeeded),
+        cancellation.Token);
+    await waitStarted.Task;
+    cancellation.Cancel();
+    try
+    {
+        await cancellableRun;
+        Assert(false, "循环升级间隔等待应支持取消。");
+    }
+    catch (OperationCanceledException)
+    {
+    }
 }
 
 static async Task VerifyDiffManifestGateAsync(string workspace)

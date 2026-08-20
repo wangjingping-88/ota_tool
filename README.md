@@ -11,7 +11,7 @@
 - `tests/OtaTool.Core.SmokeTests`：核心冒烟测试。
 - `tests/OtaTool.Update.Tests`：在线升级安全与回滚测试。
 - `scripts`：Patch 还原验证与 OTA 日志分析脚本。
-- `assets/native`：随应用发布的原生差分工具。
+- `assets/native`：随应用发布的原生差分工具和 Patch 还原验证运行时；桌面端不依赖机器预装的 `OTA_TOOL`。
 - `docs`：设计、迁移与测试文档。
 
 ## 本地构建
@@ -33,4 +33,4 @@ dotnet run --project .\tests\OtaTool.Update.Tests\OtaTool.Update.Tests.csproj -c
 
 ## 迁移状态
 
-当前已完成独立仓库迁移，以及在线检查、双重校验、安全解压、独立更新器、启动确认和失败回滚实现。推送 `vMAJOR.MINOR.PATCH` 标签后，Release 工作流会生成便携 ZIP 与 SHA-256 文件。首次真实在线升级仍需在 GitHub 发布 `v0.1.0`、`v0.1.1` 后完成闭环验收。
+当前已完成独立仓库迁移，以及在线检查、双重校验、安全解压、独立更新器、启动确认和失败回滚实现。`v0.1.0` 已作为在线升级基线发布；`v0.1.1` 集成了升级任务、模式隔离、日志分析和内置 Patch 验证工具等改进，用于完成首次真实在线升级闭环。

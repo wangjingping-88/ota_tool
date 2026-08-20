@@ -9,7 +9,7 @@
 - **传统模式**：仅支持 Gateway 与 Sync 升级；可指定 ID 定向升级，或选择广播升级而不填写 ID；不包含 Gateway OTA 状态轮询协议，也不发送广播时间参数；不支持日志解析。
 - **EcoLink 模式**：支持 Gateway、Sync、Async、Node 升级，并启用本方案第 8 章定义的 Gateway OTA 状态轮询协议。
 
-两种模式共用 MQTT/HTTP 环境、Patch 管理、文件发布、任务编排、循环测试、日志导入、报告与基础校验能力；模式差异只能封装在协议适配器和任务参数模型中，不得复制整套界面或业务流程。
+两种模式复用同一套 MQTT/HTTP、Patch 管理、文件发布、任务编排、循环测试、报告与基础校验实现，但界面工作区和持久化数据按模式隔离；模式差异只能封装在协议适配器、任务参数模型和模式工作区中，不得复制整套界面或业务流程。
 
 EcoLink Gateway 当前固件的 `ota.dev_type` 采用协议字符串而非桌面显示名称：Gateway 为
 `gateway`、Sync 为 `iote`、Async 为 `ex_mcu`、Node 为 `node`。界面必须继续显示通用设备
@@ -55,7 +55,9 @@ tools/ota_tool/
 - `Analysis`：仅 EcoLink 模式调用日志分析 EXE 并展示结果。
 - `Tests`：协议、状态机、网络和集成测试。
 
-本地任务和报告索引使用 SQLite，普通设置使用 JSON，密码和私钥口令保存到 Windows Credential Manager。
+本地任务和报告索引使用 SQLite，普通设置使用 JSON，密码和私钥口令保存到 Windows Credential Manager。JSON 内以 `ModeWorkspaces.EcoLink`、`ModeWorkspaces.Traditional` 作为全局模式工作区表，并记录 `ActiveMode`；旧版顶层设置首次加载时自动迁移为两份模式工作区。Credential Manager 键同样带模式前缀，避免两种模式互相覆盖。
+
+模式切换时分别保存并恢复当前页面、MQTT/HTTP/SFTP、Patch 目录与选择、升级参数、循环参数、Node 类型及发现勾选、日志目录、报告范围和升级状态机视图。历史报告按任务所属模式过滤；切换前如存在升级任务、MQTT 连接、本地 Broker、本地 HTTP 服务或 Patch 发布操作，必须先结束相关操作，防止把活动连接误套用到另一模式。
 
 模式与协议扩展点：
 
@@ -209,21 +211,18 @@ Manifest 记录：
 
 ### 5.3 当前差分引擎约束
 
-已确认：
+已确认 `OTA_TOOL.exe` 没有可直接调用的 DLL 或命令行 API，算法静态编入已经剥离符号的
+Qt 程序。当前实现不再要求用户在固定目录预装该工具，而是将已验证的完整 Qt 运行时快照
+放入 `assets/native/OTA_TOOL`，发布时复制到 `Tools/OTA_TOOL`。Patch 还原校验只启动发布包
+内置实例并在完成后关闭，避免复用机器上其他版本的同名进程。
 
-- `D:\tools\OTA_TOOL\OTA_TOOL.exe` 没有可直接调用的 DLL 或命令行 API。
-- 算法静态编入已经剥离符号的 Qt 程序。
-- 仓库现有两个 `bsdiff_cmd.exe` 与 OTA_TOOL 输出不兼容。
-- 使用不兼容 CLI 生成的 Patch 无法正确恢复新版固件。
+当前边界：
 
-因此：
-
-- 不逆向 OTA_TOOL。
-- 不通过 UI 自动化操作 OTA_TOOL。
-- 不集成未经验证的 `bsdiff_cmd.exe`。
-- 首版保留差分引擎接口，允许导入外部生成的 Patch。
-- 未安装已认证引擎时，生成按钮显示“差分引擎未安装或未认证”。
-- 获得 OTA_TOOL 源码或官方 CLI 后，再实现一键生成。
+- 不逆向或修改 OTA_TOOL。
+- `partition-bsdiff-lzzip` 命令行引擎负责生成 Patch；内置 OTA_TOOL 仅承担正反向还原校验。
+- 桌面端通过最小化启动和 UI Automation 驱动内置实例，不依赖 `D:\tools\OTA_TOOL` 等机器路径。
+- 发布脚本和在线更新包均校验 `OTA_TOOL.exe`、`Qt5Core.dll` 与 `platforms/qwindows.dll` 等必要运行文件。
+- 仍允许导入外部 Patch，但必须通过同一内置还原校验后才能进入发布和升级流程。
 
 新引擎必须通过：
 
@@ -643,6 +642,8 @@ V1 → V2 → V1
 - 工具异常退出后只恢复任务展示，不自动重发升级请求。
 - CANCEL、COMMIT 与回滚能力由当前协议适配器声明；界面不得将 EcoLink 语义套用到传统模式。
 - 自动循环不重复弹出版本确认。
+- 相邻两次单次升级之间支持固定秒数或自定义最小/最大秒数的随机间隔；间隔为 0 时连续执行。
+- 间隔只发生在相邻任务之间，首个任务前和最后一个任务后不等待；等待期间允许取消整个循环。
 
 ## 10. 报告与日志分析
 
@@ -675,6 +676,9 @@ V1 → V2 → V1
 - 首版支持当前 Node 四端分析。
 - 后续增加 Async、Sync 和 Gateway 专项分析规则。
 - 日志由用户手动导入，不负责串口抓取。
+- 选择目录后生成本次 `.log` 文件清单；用户可从清单删除文件，但不删除磁盘源文件。
+- 分析时先创建清单快照，分析器不得读取同目录中未列入清单的日志。
+- 当前分析器按最新 OTA `session_id` 输出单轮结论；循环任务包含多个 SID 时不会自动汇总所有轮次，需按轮分别分析。
 
 ## 11. 测试与验收
 
@@ -731,9 +735,9 @@ V1 → V2 → V1
 - 两种模式均以 Gateway 调用 `manager_ota_upgrade_prompt(OTA_PROMPT_COMPLETE)` 后上报的最终升级结果消息作为终态上报来源；传统模式以该消息为唯一完成依据，EcoLink 模式以该消息提示终态后继续用 `cmd=8` 确认。
 - EcoLink 模式支持 Gateway、Sync、Async、Node；Gateway 不主动周期上报进度，工具使用 `cmd=8` 查询、Gateway 使用 `cmd=9` 响应，并保留 `cmd=6` 最终结果协议。
 - EcoLink 查询只读取 Gateway 已有事实，不触发下游查询；传统模式不实现该查询。
-- 首版支持导入 Patch；`partition-bsdiff-lzzip` 引擎仅在第 5.4.3 节验收通过后启用一键生成。
+- 支持导入 Patch 和通过已认证的 `partition-bsdiff-lzzip` 引擎一键生成，二者都必须通过内置还原校验。
 - 不逆向 OTA_TOOL。
-- 不集成现有不兼容的 `bsdiff_cmd.exe`。
+- 不依赖机器预装 OTA_TOOL；还原校验运行时随桌面发布包交付。
 - 不负责构建、烧录和串口日志采集。
 - 同一工具实例同一时刻只执行一个父 OTA 任务。
 

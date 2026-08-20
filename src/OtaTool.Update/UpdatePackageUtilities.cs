@@ -11,6 +11,9 @@ public static partial class UpdatePackageUtilities
         UpdatePaths.ApplicationFileName,
         UpdatePaths.UpdaterFileName,
         "bsdiff_cmd.exe",
+        Path.Combine("Tools", "OTA_TOOL", "OTA_TOOL.exe"),
+        Path.Combine("Tools", "OTA_TOOL", "Qt5Core.dll"),
+        Path.Combine("Tools", "OTA_TOOL", "platforms", "qwindows.dll"),
         Path.Combine("Scripts", "TestPatchWithOtaTool.ps1"),
         "analyze_ota_logs.py",
     ];

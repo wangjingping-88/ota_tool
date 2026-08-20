@@ -9,5 +9,6 @@ artifacts/
 *.log
 crash.log
 TestResults/
+.learnings/
 *.pdb
 *.zip

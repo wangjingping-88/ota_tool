@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
@@ -19,12 +20,14 @@ public partial class MainWindow : Window
     private HwndSource? _windowSource;
     private UpdateWindow? _updateWindow;
     private bool _startupCompleted;
+    private bool _closeConfirmed;
 
     public MainWindow()
     {
         InitializeComponent();
         var viewModel = new MainWindowViewModel();
         viewModel.ApplicationUpdate.UpdateAvailable += OnUpdateAvailable;
+        viewModel.CloseApplicationRequested += OnCloseApplicationRequested;
         DataContext = viewModel;
     }
 
@@ -106,6 +109,23 @@ public partial class MainWindow : Window
         SystemCommands.CloseWindow(this);
     }
 
+    protected override void OnClosing(CancelEventArgs eventArgs)
+    {
+        if (!_closeConfirmed &&
+            DataContext is MainWindowViewModel viewModel &&
+            viewModel.RequestCloseApplicationConfirmation())
+        {
+            eventArgs.Cancel = true;
+        }
+        base.OnClosing(eventArgs);
+    }
+
+    private void OnCloseApplicationRequested(object? sender, EventArgs eventArgs)
+    {
+        _closeConfirmed = true;
+        Close();
+    }
+
     private async void OnClosed(object? sender, EventArgs eventArgs)
     {
         if (_windowSource is not null)
@@ -123,6 +143,7 @@ public partial class MainWindow : Window
         if (DataContext is MainWindowViewModel viewModel)
         {
             viewModel.ApplicationUpdate.UpdateAvailable -= OnUpdateAvailable;
+            viewModel.CloseApplicationRequested -= OnCloseApplicationRequested;
         }
 
         if (DataContext is IAsyncDisposable disposable)
