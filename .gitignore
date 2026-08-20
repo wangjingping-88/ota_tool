@@ -1,0 +1,13 @@
+bin/
+obj/
+publish/
+artifacts/
+.vs/
+.idea/
+*.user
+*.suo
+*.log
+crash.log
+TestResults/
+*.pdb
+*.zip

@@ -1,0 +1,7 @@
+<Project>
+  <Target Name="AddOtaToolBuildMetadata" BeforeTargets="GenerateAssemblyInfo">
+    <ItemGroup>
+      <AssemblyMetadata Include="BuildTimeUtc" Value="$([System.DateTime]::UtcNow.ToString('O'))" />
+    </ItemGroup>
+  </Target>
+</Project>

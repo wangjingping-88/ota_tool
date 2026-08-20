@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '正式版本标签，例如 v0.1.0'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: 验证版本标签
+        id: version
+        shell: pwsh
+        run: |
+          $tag = if ('${{ github.event_name }}' -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { '${{ github.ref_name }}' }
+          if ($tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
+            throw "非法正式版本标签：$tag"
+          }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
+
+      - name: 恢复并运行全部测试
+        shell: pwsh
+        run: |
+          dotnet restore OtaTool.sln
+          dotnet build OtaTool.sln -c Release --no-restore
+          dotnet run --project tests/OtaTool.Core.SmokeTests/OtaTool.Core.SmokeTests.csproj -c Release --no-build
+          dotnet run --project tests/OtaTool.Update.Tests/OtaTool.Update.Tests.csproj -c Release --no-build
+
+      - name: 发布便携目录
+        shell: pwsh
+        run: |
+          .\scripts\Publish-WinX64.ps1 `
+            -OutputPath .\artifacts\publish `
+            -Version '${{ steps.version.outputs.version }}' `
+            -SourceRevisionId '${{ github.sha }}'
+
+      - name: 生成 ZIP 与 SHA-256
+        shell: pwsh
+        run: |
+          $package = "OtaTool-${{ steps.version.outputs.tag }}-win-x64-portable.zip"
+          $packagePath = Join-Path $PWD "artifacts\$package"
+          Compress-Archive -Path '.\artifacts\publish\*' -DestinationPath $packagePath -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath "$packagePath.sha256.txt" -Value "$hash  $package" -NoNewline
+
+      - name: 创建草稿、上传并发布 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ steps.version.outputs.tag }}'
+          $package = "OtaTool-$tag-win-x64-portable.zip"
+          gh release create $tag `
+            ".\artifacts\$package" `
+            ".\artifacts\$package.sha256.txt" `
+            --draft `
+            --generate-notes `
+            --title $tag
+          gh release view $tag --json assets | ConvertFrom-Json | ForEach-Object {
+            $names = @($_.assets.name)
+            if ($names -notcontains $package -or $names -notcontains "$package.sha256.txt") {
+              throw 'Release 资产上传不完整。'
+            }
+          }
+          gh release edit $tag --draft=false

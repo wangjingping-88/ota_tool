@@ -1,0 +1,73 @@
+[CmdletBinding()]
+param(
+    [string]$OutputPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\win-x64'),
+    [string]$Version = '0.1.0',
+    [string]$SourceRevisionId = ''
+)
+
+$ErrorActionPreference = 'Stop'
+$repositoryRoot = Split-Path -Parent $PSScriptRoot
+$projectPath = Join-Path $repositoryRoot 'src\OtaTool.App\OtaTool.App.csproj'
+$updaterProjectPath = Join-Path $repositoryRoot 'src\OtaTool.Updater\OtaTool.Updater.csproj'
+$updaterOutputPath = Join-Path $repositoryRoot 'artifacts\updater-win-x64'
+$resolvedOutputPath = [System.IO.Path]::GetFullPath($OutputPath)
+$allowedOutputRoots = @(
+    [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'publish')),
+    [System.IO.Path]::GetFullPath((Join-Path $repositoryRoot 'artifacts'))
+)
+$isAllowedOutput = $allowedOutputRoots | Where-Object {
+    $resolvedOutputPath.StartsWith("$($_)$([System.IO.Path]::DirectorySeparatorChar)", [System.StringComparison]::OrdinalIgnoreCase)
+}
+if (-not $isAllowedOutput) {
+    throw '发布输出目录必须位于仓库的 publish 或 artifacts 子目录内。'
+}
+$OutputPath = $resolvedOutputPath
+
+if ($Version -notmatch '^\d+\.\d+\.\d+$') {
+    throw "版本号必须是 MAJOR.MINOR.PATCH：$Version"
+}
+
+$informationalVersion = $Version
+
+if (Test-Path -LiteralPath $OutputPath) {
+    Remove-Item -LiteralPath $OutputPath -Recurse -Force
+}
+if (Test-Path -LiteralPath $updaterOutputPath) {
+    Remove-Item -LiteralPath $updaterOutputPath -Recurse -Force
+}
+
+dotnet publish $projectPath `
+    -c Release `
+    -r win-x64 `
+    --self-contained true `
+    -o $OutputPath `
+    -p:Version=$Version `
+    -p:InformationalVersion=$informationalVersion `
+    -p:SourceRevisionId=$SourceRevisionId
+
+dotnet publish $updaterProjectPath `
+    -c Release `
+    -r win-x64 `
+    --self-contained true `
+    -o $updaterOutputPath `
+    -p:Version=$Version `
+    -p:InformationalVersion=$informationalVersion `
+    -p:SourceRevisionId=$SourceRevisionId
+
+Copy-Item -LiteralPath (Join-Path $updaterOutputPath 'OtaTool.Updater.exe') -Destination $OutputPath -Force
+
+$requiredFiles = @(
+    'OtaTool.App.exe',
+    'OtaTool.Updater.exe',
+    'bsdiff_cmd.exe',
+    'Scripts\TestPatchWithOtaTool.ps1',
+    'analyze_ota_logs.py'
+)
+foreach ($requiredFile in $requiredFiles) {
+    $requiredPath = Join-Path $OutputPath $requiredFile
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "发布目录缺少必要文件：$requiredFile"
+    }
+}
+
+Write-Host "OTA 测试平台已发布到：$OutputPath"

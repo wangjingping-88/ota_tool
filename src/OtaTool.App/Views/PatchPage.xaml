@@ -1,0 +1,219 @@
+<UserControl x:Class="OtaTool.App.Views.PatchPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:OtaTool.App.Controls">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="16" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Border Style="{StaticResource Card}">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,24,0">
+                <TextBlock FontSize="20" FontWeight="SemiBold" Text="Patch 制作" />
+                <TextBlock Margin="0,5,0,12" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="导入 A/B 固件后生成 Patch 正向和 Patch 反向；导入的 Patch 与制作结果分别保存和显示。" />
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,0,8,0">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="A 版本固件" />
+                        <Button Margin="0,5,0,0" HorizontalAlignment="Left" Style="{StaticResource QuietButton}" Content="导入 A 版本" Command="{Binding SelectOldImageCommand}" />
+                        <TextBlock Margin="0,5,0,0" FontFamily="Cascadia Mono" FontSize="11" Text="{Binding OldImageFileName}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding OldImageIdentityDetail}" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="0,0,8,0">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="B 版本固件" />
+                        <Button Margin="0,5,0,0" HorizontalAlignment="Left" Style="{StaticResource QuietButton}" Content="导入 B 版本" Command="{Binding SelectNewImageCommand}" />
+                        <TextBlock Margin="0,5,0,0" FontFamily="Cascadia Mono" FontSize="11" Text="{Binding NewImageFileName}" TextTrimming="CharacterEllipsis" />
+                        <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding NewImageIdentityDetail}" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="已有 Patch" />
+                        <Button Margin="0,5,0,0" HorizontalAlignment="Left" Style="{StaticResource QuietButton}" Content="导入已有 Patch" Command="{Binding SelectPatchCommand}" />
+                        <TextBlock Margin="0,5,0,0" FontFamily="Cascadia Mono" FontSize="11" Text="{Binding ImportedPatchFileName}" TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                </Grid>
+                <Grid Margin="0,10,29,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,0,8,0">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="Patch 正向名称" />
+                        <Border Margin="0,4,0,0" Style="{StaticResource ReadOnlyValue}">
+                            <TextBlock VerticalAlignment="Center" FontFamily="Cascadia Mono" Text="{Binding ForwardPatchName, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                        </Border>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="Patch 反向名称" />
+                        <Border Margin="0,4,0,0" Style="{StaticResource ReadOnlyValue}">
+                            <TextBlock VerticalAlignment="Center" FontFamily="Cascadia Mono" Text="{Binding ReversePatchName, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
+                        </Border>
+                    </StackPanel>
+                </Grid>
+                <TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Patch 输出目录（本地 HTTP 服务根目录）" />
+                <Grid Margin="0,4,29,0">
+                    <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBox Text="{Binding PatchOutputDirectory, UpdateSourceTrigger=PropertyChanged}" ToolTip="默认：本地 HTTP Range 服务目录" />
+                    <Button Grid.Column="1" Margin="8,0,0,0" Style="{StaticResource QuietButton}" Content="浏览…" Command="{Binding BrowsePatchOutputDirectoryCommand}" />
+                </Grid>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button Style="{StaticResource PrimaryButton}"
+                            Content="Patch 制作"
+                            Command="{Binding GeneratePatchCommand}"
+                            IsEnabled="{Binding CanGeneratePatch}"
+                            ToolTip="请先导入有效且相互兼容的 A/B 固件"
+                            ToolTipService.ShowOnDisabled="True" />
+                    <Button Margin="8,0,0,0" Style="{StaticResource QuietButton}" Content="打开 Patch 目录" Command="{Binding OpenPatchOutputDirectoryCommand}" />
+                </StackPanel>
+                <TextBlock Margin="0,7,29,0"
+                           FontSize="11"
+                           Foreground="{StaticResource MutedInkBrush}"
+                           Text="{Binding PatchStatus}"
+                           TextWrapping="Wrap" />
+                <Grid Margin="0,10,29,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="120" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="0,0,8,0">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="导入 Patch 验证" />
+                        <ComboBox Margin="0,4,0,0"
+                                  ItemsSource="{Binding PatchRestoreChoices}"
+                                  DisplayMemberPath="DisplayName"
+                                  SelectedItem="{Binding SelectedRestorePatch, Mode=TwoWay}" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="还原方向" />
+                        <ComboBox Margin="0,4,0,0"
+                                  ItemsSource="{Binding PatchRestoreDirections}"
+                                  SelectedItem="{Binding SelectedPatchRestoreDirection, Mode=TwoWay}" />
+                    </StackPanel>
+                    <Button Grid.Column="2"
+                            Margin="8,21,0,0"
+                            VerticalAlignment="Top"
+                            Style="{StaticResource QuietButton}"
+                            Content="验证导入 Patch"
+                            Command="{Binding TestPatchRestoreCommand}"
+                            IsEnabled="{Binding CanTestSelectedPatchRestore}" />
+                </Grid>
+                <TextBlock Margin="0,6,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding PatchRestoreTestStatus}" TextWrapping="Wrap" />
+                <TextBlock Margin="0,10,0,0" FontSize="14" FontWeight="SemiBold" Text="Patch 详情" />
+                <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="自动显示输出目录中的所有 Patch；裸 Patch 需结合 A/B 固件完成还原验证后，才能用于升级和发布。" TextWrapping="Wrap" />
+                <ScrollViewer Margin="0,7,0,0" MaxHeight="240" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                    <Border Padding="0,0,12,0">
+                    <ItemsControl ItemsSource="{Binding PatchCatalog}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border Margin="0,0,0,6" Padding="9" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock FontSize="12" FontWeight="SemiBold" Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Margin="0,2,0,0" FontSize="10" Foreground="{Binding ValidationColor}" Text="{Binding PublishState}" />
+                                            <TextBlock Margin="0,2,0,0" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="{Binding Md5Display}" TextTrimming="CharacterEllipsis" />
+                                        </StackPanel>
+                                        <Button Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Top" Style="{StaticResource QuietButton}" Content="删除" Command="{Binding DataContext.DeletePatchCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                    </Border>
+                </ScrollViewer>
+            </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <Border Grid.Column="2" Style="{StaticResource Card}">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,24,0">
+                <TextBlock FontSize="20" FontWeight="SemiBold" Text="Patch 发布" />
+                <TextBlock Margin="0,4,0,10" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="本地发布由 HTTP Range 服务提供下载；公网发布通过 SFTP 上传，再以 HTTP 文件地址校验。" />
+                <Border Padding="12" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="本地发布" />
+                            <Border Grid.Column="1" Padding="8,3" Background="{StaticResource GreenSoftBrush}" CornerRadius="9"><TextBlock FontSize="11" Foreground="{StaticResource GreenBrush}" Text="{Binding HttpServiceStatus}" /></Border>
+                        </Grid>
+                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="监听端口" />
+                        <TextBox Margin="0,4,0,0" Text="{Binding HttpPort, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="本地 HTTP 地址" />
+                        <TextBlock Margin="0,3,0,0" FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource GreenBrush}" Text="{Binding HttpServiceAddress}" />
+                        <Button Margin="0,8,0,0" HorizontalAlignment="Left" Style="{StaticResource PrimaryButton}" Content="{Binding HttpServiceToggleText}" Command="{Binding ToggleHttpServiceCommand}" />
+                    </StackPanel>
+                </Border>
+                <Border Margin="0,10,0,0" Padding="12" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="公网发布" />
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal" Visibility="{Binding PublishProgressVisibility}">
+                                    <ProgressBar Width="46" Height="5" Margin="0,0,7,0" VerticalAlignment="Center" IsIndeterminate="True" />
+                                    <TextBlock FontSize="11" Foreground="{StaticResource BlueBrush}" VerticalAlignment="Center" Text="发布中" />
+                                </StackPanel>
+                                <Border Visibility="{Binding PublishSuccessVisibility}" Background="{StaticResource GreenSoftBrush}" CornerRadius="9" Padding="8,3">
+                                    <TextBlock FontSize="11" Foreground="{StaticResource GreenBrush}" Text="已发布" />
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock Margin="0,4,0,9" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="SFTP 主机用于登录上传；HTTP 地址用于设备下载。多数部署主机相同，但端口和目录可以不同。" TextWrapping="Wrap" />
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="90" /></Grid.ColumnDefinitions>
+                            <StackPanel Margin="0,0,10,0"><TextBlock Style="{StaticResource FieldLabel}" Text="SFTP 主机" /><TextBox Margin="0,4,0,0" Text="{Binding SftpHost, UpdateSourceTrigger=PropertyChanged}" /></StackPanel>
+                            <StackPanel Grid.Column="1"><TextBlock Style="{StaticResource FieldLabel}" Text="端口" /><TextBox Margin="0,4,0,0" Text="{Binding SftpPort, UpdateSourceTrigger=PropertyChanged}" /></StackPanel>
+                        </Grid>
+                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="用户名" /><TextBox Margin="0,4,0,0" Text="{Binding SftpUserName, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="密码" /><controls:PasswordInput Margin="0,4,0,0" Password="{Binding SftpPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="远端目录" /><TextBox Margin="0,4,0,0" Text="{Binding SftpRemoteDirectory, UpdateSourceTrigger=PropertyChanged}" ToolTip="MobaXTerm 中拖入 Patch 的目录，例如 /opt/www/static/download/" />
+                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="HTTP 地址" /><TextBox Margin="0,4,0,0" Text="{Binding PublicHttpBaseUrl, UpdateSourceTrigger=PropertyChanged}" />
+                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                            <Button Style="{StaticResource PrimaryButton}" Content="{Binding TestPublishConnectionButtonText}" IsEnabled="{Binding CanOperatePublication}" Command="{Binding TestPublishConnectionCommand}" />
+                            <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="{Binding PublishButtonText}" IsEnabled="{Binding CanOperatePublication}" Command="{Binding PublishPatchCommand}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+            </ScrollViewer>
+        </Border>
+
+        <Border Grid.ColumnSpan="3"
+                Background="#660B1B2E"
+                Visibility="{Binding PatchDialogVisibility}"
+                Panel.ZIndex="20">
+            <Border Width="500"
+                    MaxHeight="620"
+                    Padding="22"
+                    Background="White"
+                    BorderBrush="{StaticResource LineBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <TextBlock FontSize="18" FontWeight="SemiBold" Text="{Binding PatchDialogTitle}" />
+                    <ScrollViewer Grid.Row="1" Margin="0,14,0,16" MaxHeight="430" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                        <TextBlock FontFamily="Cascadia Mono"
+                                   FontSize="12"
+                                   Foreground="{StaticResource InkBrush}"
+                                   Text="{Binding PatchDialogMessage}"
+                                   TextWrapping="Wrap" />
+                    </ScrollViewer>
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Style="{StaticResource QuietButton}" Content="取消" Command="{Binding CancelPatchDialogCommand}" />
+                        <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="{Binding PatchDialogConfirmText}" Command="{Binding ConfirmPatchDialogCommand}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Border>
+    </Grid>
+</UserControl>

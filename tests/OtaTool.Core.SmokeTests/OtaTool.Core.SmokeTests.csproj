@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\OtaTool.Core\OtaTool.Core.csproj" />
+    <None Include="..\..\src\OtaTool.App\App.xaml"
+          Link="TestAssets\App.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\MainWindow.xaml"
+          Link="TestAssets\MainWindow.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\MainWindow.xaml.cs"
+          Link="TestAssets\MainWindow.xaml.cs"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\Views\PatchPage.xaml"
+          Link="TestAssets\PatchPage.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\ViewModels\MainWindowViewModel.cs"
+          Link="TestAssets\MainWindowViewModel.cs"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\scripts\TestPatchWithOtaTool.ps1"
+          Link="TestAssets\TestPatchWithOtaTool.ps1"
+          CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
+</Project>
