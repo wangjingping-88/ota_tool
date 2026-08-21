@@ -25,16 +25,22 @@ public static class OtaUpgradeQualityEvaluator
         var retries = GetObject(root, "retries");
         var syncTiming = GetObject(root, "sync_frame_timing");
         var nodeLink = GetObject(root, "node_link_summary");
+        var cycle = GetObject(root, "cycle");
 
         var overallSuccess = GetBoolean(conclusions, "overall_success");
         var deviceSuccess = GetBoolean(conclusions, "device_upgrade_success");
         var parentSuccess = GetBoolean(conclusions, "parent_task_success");
         var target = Math.Max(0, GetInt32(counts, "target"));
+        var sessionCount = Math.Max(0, GetInt32(cycle, "session_count"));
+        var successfulSessionCount = Math.Max(0, GetInt32(cycle, "successful_session_count"));
 
-        var closedLoopScore =
-            (deviceSuccess ? 15 : 0) +
-            (parentSuccess ? 15 : 0) +
-            (overallSuccess ? 20 : 0);
+        var closedLoopScore = sessionCount > 0
+            ? RatioPoints(CountSuccessfulSessions(root, "device_upgrade_success"), sessionCount, 15) +
+              RatioPoints(CountSuccessfulSessions(root, "parent_task_success"), sessionCount, 15) +
+              RatioPoints(successfulSessionCount, sessionCount, 20)
+            : (deviceSuccess ? 15 : 0) +
+              (parentSuccess ? 15 : 0) +
+              (overallSuccess ? 20 : 0);
 
         var completionScore = target == 0
             ? 0
@@ -83,6 +89,8 @@ public static class OtaUpgradeQualityEvaluator
         };
 
         var observations = new List<string>();
+        if (sessionCount > 0)
+            observations.Add($"循环日志共识别 {sessionCount} 次单次升级，成功 {successfulSessionCount} 次，失败 {Math.Max(0, sessionCount - successfulSessionCount)} 次。" );
         if (overallSuccess) observations.Add("升级任务与设备结果均已闭环。" );
         else observations.Add("升级未形成完整闭环，需优先排查阻断原因。" );
         if (target > 0) observations.Add($"目标完成度：Node FINISHED {GetInt32(counts, "node_finished")}/{target}，聚合 FINISHED {GetInt32(counts, "aggregated_finished")}/{target}。" );
@@ -96,19 +104,25 @@ public static class OtaUpgradeQualityEvaluator
             observations.Add($"维护响应时延 P95 为 {p95.Value} ms。" );
 
         var suggestions = new List<string>();
+        if (sessionCount > 0 && successfulSessionCount < sessionCount)
+            suggestions.Add("按报告中的轮次和方向定位首个失败 SID，优先排查该次升级的阻断原因。" );
         if (!overallSuccess) suggestions.Add("先解决阻断原因，再进行连续多轮闭环验证。" );
         if (txFailures > 0 || inferredMissedFrames > 0) suggestions.Add("检查 Sync 发送节拍、空口占用和帧头同步稳定性。" );
         if (maintenanceRepeats > 0) suggestions.Add("重点分析维护重试触发条件，降低重复分片和等待时延。" );
         if (weakNodeCount > 0) suggestions.Add("复测弱链路 Node，并核对 RSSI、天线和现场干扰。" );
         if (suggestions.Count == 0) suggestions.Add("当前指标稳定，建议继续执行循环升级验证长期可靠性。" );
 
-        var summary = score >= 90
-            ? "升级闭环与链路质量整体稳定。"
-            : score >= 80
-                ? "升级已闭环，但链路重试或时延仍有优化空间。"
-                : score >= 60
-                    ? "升级结果可用，但可靠性指标需要重点改进。"
-                    : "升级质量未达到测试要求，应先处理阻断项。";
+        var summary = sessionCount > 0
+            ? successfulSessionCount == sessionCount
+                ? $"循环升级 {sessionCount} 次均已闭环，链路质量按全部轮次汇总。"
+                : $"循环升级 {sessionCount} 次中有 {sessionCount - successfulSessionCount} 次未闭环。"
+            : score >= 90
+                ? "升级闭环与链路质量整体稳定。"
+                : score >= 80
+                    ? "升级已闭环，但链路重试或时延仍有优化空间。"
+                    : score >= 60
+                        ? "升级结果可用，但可靠性指标需要重点改进。"
+                        : "升级质量未达到测试要求，应先处理阻断项。";
 
         var details = new StringBuilder()
             .AppendLine("评分明细")
@@ -169,4 +183,22 @@ public static class OtaUpgradeQualityEvaluator
            value.ValueKind == JsonValueKind.Array
             ? value.GetArrayLength()
             : 0;
+
+    private static int CountSuccessfulSessions(JsonElement root, string conclusionName)
+    {
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("sessions", out var sessions) ||
+            sessions.ValueKind != JsonValueKind.Array)
+        {
+            return 0;
+        }
+
+        var count = 0;
+        foreach (var session in sessions.EnumerateArray())
+        {
+            var sessionConclusions = GetObject(session, "conclusions");
+            if (GetBoolean(sessionConclusions, conclusionName)) count++;
+        }
+        return count;
+    }
 }

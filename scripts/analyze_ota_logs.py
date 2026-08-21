@@ -102,7 +102,11 @@ def _bitmap_offsets(low: int, high: int) -> list[int]:
     return result
 
 
-def _discover_session_id(files: list[tuple[Path, str, list[str]]]) -> int:
+def _discover_session_ids(
+    files: list[tuple[Path, str, list[str]]],
+) -> list[int]:
+    """按开始时间返回日志中所有 OTA 会话，供循环升级逐次分析。"""
+
     candidates: list[tuple[datetime, int, int]] = []
     fallback_time = datetime.min
     order = 0
@@ -131,7 +135,17 @@ def _discover_session_id(files: list[tuple[Path, str, list[str]]]) -> int:
     if not candidates:
         raise ValueError("日志中未找到 OTA session_id")
     candidates.sort(key=lambda item: (item[0], item[1]))
-    return candidates[-1][2]
+    session_ids: list[int] = []
+    for _timestamp_value, _order_value, session_id in candidates:
+        if session_id not in session_ids:
+            session_ids.append(session_id)
+    return session_ids
+
+
+def _discover_session_id(files: list[tuple[Path, str, list[str]]]) -> int:
+    """兼容单次分析调用：返回日志中的最新 OTA 会话。"""
+
+    return _discover_session_ids(files)[-1]
 
 
 def _session_time_window(
@@ -1372,11 +1386,299 @@ def analyze_log_directory(
     }
 
 
+def _combine_session_results(
+    session_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """把同一批日志中的多个 SID 汇总为循环升级结果。"""
+
+    if not session_results:
+        raise ValueError("没有可汇总的 OTA 会话")
+    if 1 == len(session_results):
+        return session_results[0]
+
+    def sum_count(name: str) -> int:
+        return sum(int(item["counts"].get(name, 0))
+                   for item in session_results)
+
+    def sum_nested(section: str, name: str) -> int:
+        return sum(int(item.get(section, {}).get(name, 0))
+                   for item in session_results)
+
+    session_steps: list[dict[str, Any]] = []
+    for index, item in enumerate(session_results, start=1):
+        conclusions = item["conclusions"]
+        versions = item["versions"]
+        session_steps.append({
+            "index": index,
+            "round": (index + 1) // 2,
+            "direction": "forward" if index % 2 else "reverse",
+            "session_id": item["session_id"],
+            "old_version": versions.get("old"),
+            "new_version": versions.get("new"),
+            "target_count": item["counts"].get("target", 0),
+            "device_upgrade_success":
+                conclusions.get("device_upgrade_success", False),
+            "parent_task_success":
+                conclusions.get("parent_task_success", False),
+            "overall_success": conclusions.get("overall_success", False),
+            "blocking_reasons": conclusions.get("blocking_reasons", []),
+        })
+
+    successful_steps = sum(
+        1 for item in session_steps if item["overall_success"]
+    )
+    device_success = all(
+        item["conclusions"].get("device_upgrade_success", False)
+        for item in session_results
+    )
+    parent_success = all(
+        item["conclusions"].get("parent_task_success", False)
+        for item in session_results
+    )
+    overall_success = successful_steps == len(session_results)
+
+    maintenance_events: list[dict[str, Any]] = []
+    maintenance_latency_values: list[int] = []
+    for item in session_results:
+        session_id = item["session_id"]
+        for event in item.get("maintenance", {}).get("events", []):
+            tagged = {"session_id": session_id, **event}
+            maintenance_events.append(tagged)
+            if "elapsed_ms" in event:
+                maintenance_latency_values.append(int(event["elapsed_ms"]))
+
+    retry_names = sorted({
+        name
+        for item in session_results
+        for name in item.get("retries", {})
+    })
+    retries = {
+        name: sum_nested("retries", name)
+        for name in retry_names
+    }
+    sync_names = sorted({
+        name
+        for item in session_results
+        for name, value in item.get("sync_frame_timing", {}).items()
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    })
+    sync_frame_timing = {
+        name: sum_nested("sync_frame_timing", name)
+        for name in sync_names
+    }
+
+    role_files: dict[str, list[str]] = defaultdict(list)
+    for item in session_results:
+        for role, names in item.get("files", {}).items():
+            for name in names:
+                _add_unique(role_files[role], name)
+
+    blocking_reasons = [
+        f"SID {item['session_id']}: {reason}"
+        for item in session_results
+        for reason in item["conclusions"].get("blocking_reasons", [])
+    ]
+    failure_events = [
+        f"SID {item['session_id']}: {event}"
+        for item in session_results
+        for event in item.get("failure_events", [])
+    ]
+    weak_link_node_ids = sorted({
+        node_id
+        for item in session_results
+        for node_id in item.get("node_link_summary", {}).get(
+            "weak_link_node_ids", [])
+    })
+    expected_node_ids = sorted({
+        node_id
+        for item in session_results
+        for node_id in item.get("expected_node_ids", [])
+    })
+    discovered_node_ids = sorted({
+        node_id
+        for item in session_results
+        for node_id in item.get("discovered_node_ids", [])
+    })
+    node_type_values = {
+        item["versions"].get("node_type")
+        for item in session_results
+        if item["versions"].get("node_type") is not None
+    }
+    first_versions = session_results[0]["versions"]
+    last_versions = session_results[-1]["versions"]
+    starts = [
+        item.get("session_window", {}).get("start")
+        for item in session_results
+        if item.get("session_window", {}).get("start")
+    ]
+    ends = [
+        item.get("session_window", {}).get("end")
+        for item in session_results
+        if item.get("session_window", {}).get("end")
+    ]
+
+    return {
+        "schema_version": 12,
+        "analysis_mode": "cycle",
+        "log_directory": session_results[0]["log_directory"],
+        "session_id": None,
+        "session_ids": [item["session_id"] for item in session_results],
+        "session_window": {
+            "start": min(starts) if starts else None,
+            "end": max(ends) if ends else None,
+        },
+        "subtask_ids": sorted({
+            subtask_id
+            for item in session_results
+            for subtask_id in item.get("subtask_ids", [])
+        }),
+        "versions": {
+            "old": first_versions.get("old"),
+            "new": last_versions.get("new"),
+            "node_type": (next(iter(node_type_values))
+                          if 1 == len(node_type_values) else None),
+            "directions": [
+                {
+                    "session_id": item["session_id"],
+                    "old": item["versions"].get("old"),
+                    "new": item["versions"].get("new"),
+                }
+                for item in session_results
+            ],
+        },
+        "files": dict(sorted(role_files.items())),
+        "expected_node_ids": expected_node_ids,
+        "discovered_node_ids": discovered_node_ids,
+        "target_count_observations": [
+            value
+            for item in session_results
+            for value in item.get("target_count_observations", [])
+        ],
+        "counts": {
+            name: sum_count(name)
+            for name in (
+                "target",
+                "ready",
+                "boot_report",
+                "aggregated_finished",
+                "node_logs",
+                "node_package_verified",
+                "node_new_version",
+                "node_finished",
+            )
+        },
+        "maintenance": {
+            "completed_count": len(maintenance_events),
+            "latency_ms": _metric_summary(maintenance_latency_values),
+            "events": maintenance_events,
+        },
+        "retries": retries,
+        "sync_frame_timing": sync_frame_timing,
+        "node_link_summary": {
+            "weak_link_node_ids": weak_link_node_ids,
+        },
+        "failure_events": failure_events,
+        "conclusions": {
+            "device_upgrade_success": device_success,
+            "parent_task_success": parent_success,
+            "overall_success": overall_success,
+            "storage_verification_success": all(
+                item["conclusions"].get(
+                    "storage_verification_success", False)
+                for item in session_results
+            ),
+            "blocking_reasons": blocking_reasons,
+        },
+        "cycle": {
+            "session_count": len(session_results),
+            "successful_session_count": successful_steps,
+            "failed_session_count": len(session_results) - successful_steps,
+            "complete_round_count": len(session_results) // 2,
+            "has_incomplete_round": bool(len(session_results) % 2),
+            "all_success": overall_success,
+            "steps": session_steps,
+        },
+        "sessions": session_results,
+    }
+
+
+def analyze_log_sessions(
+    log_dir: str | Path,
+    session_id: int | None = None,
+    expected_node_ids: Iterable[str | int] | None = None,
+) -> dict[str, Any]:
+    """自动识别全部 SID；多 SID 按循环升级汇总，单 SID 保持原结构。"""
+
+    root = Path(log_dir).resolve()
+    if not root.is_dir():
+        raise ValueError(f"日志目录不存在: {root}")
+    files: list[tuple[Path, str, list[str]]] = []
+    for path in sorted(root.glob("*.log")):
+        role = _role_from_name(path)
+        if role:
+            files.append((path, role, _read_text(path)))
+    if not files:
+        raise ValueError(f"目录中没有可识别的四端 .log 文件: {root}")
+
+    selected_session_ids = (
+        [session_id] if session_id is not None else _discover_session_ids(files)
+    )
+    expected_ids = list(expected_node_ids or [])
+    results = [
+        analyze_log_directory(
+            root,
+            session_id=selected_session_id,
+            expected_node_ids=expected_ids,
+        )
+        for selected_session_id in selected_session_ids
+    ]
+    return _combine_session_results(results)
+
+
 def _format_ratio(value: int, total: int) -> str:
     return f"{value}/{total}" if total else f"{value}/?"
 
 
 def print_human_summary(result: dict[str, Any]) -> None:
+    if result.get("analysis_mode") == "cycle":
+        cycle = result["cycle"]
+        status = "全部成功" if cycle["all_success"] else "存在未通过会话"
+        print(f"循环 OTA 日志判定：{status}")
+        print(
+            "识别 {sessions} 次单次升级，完整轮次 {rounds}，"
+            "成功 {success}，失败 {failed}{partial}".format(
+                sessions=cycle["session_count"],
+                rounds=cycle["complete_round_count"],
+                success=cycle["successful_session_count"],
+                failed=cycle["failed_session_count"],
+                partial="，另有半轮日志" if cycle["has_incomplete_round"] else "",
+            )
+        )
+        for step in cycle["steps"]:
+            direction = "正向" if step["direction"] == "forward" else "反向"
+            step_status = "成功" if step["overall_success"] else "未通过"
+            version = f"{step['old_version']} -> {step['new_version']}"
+            print(
+                f"第 {step['round']} 轮{direction}：SID {step['session_id']}，"
+                f"{version}，目标 {step['target_count']}，{step_status}"
+            )
+            if step["blocking_reasons"]:
+                print("  阻断原因：" + ", ".join(step["blocking_reasons"]))
+        maintenance = result["maintenance"]
+        latency = maintenance["latency_ms"]
+        print(
+            "循环汇总：目标 {target}，完成 {finished}，维护事件 {maintenance}，"
+            "维护延迟 P50/P95/MAX={p50}/{p95}/{maximum} ms".format(
+                target=result["counts"]["target"],
+                finished=result["counts"]["node_finished"],
+                maintenance=maintenance["completed_count"],
+                p50=latency["p50"],
+                p95=latency["p95"],
+                maximum=latency["max"],
+            )
+        )
+        return
+
     conclusions = result["conclusions"]
     counts = result["counts"]
     target = counts["target"]
@@ -1539,10 +1841,17 @@ def _parse_expected_nodes(values: list[str]) -> list[int]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="分析 EcoLink 四端 OTA 日志，区分设备升级与父任务闭环。"
+        description=(
+            "分析 EcoLink 四端 OTA 日志；自动按全部 SID 解析循环升级，"
+            "也可指定单个 SID。"
+        )
     )
-    parser.add_argument("log_dir", help="包含四端 .log 文件的单轮抓取目录")
-    parser.add_argument("--session-id", type=int, help="指定 SID；默认选择最新会话")
+    parser.add_argument("log_dir", help="包含四端 .log 文件的单次或循环抓取目录")
+    parser.add_argument(
+        "--session-id",
+        type=int,
+        help="只分析指定 SID；默认分析日志中的全部 SID",
+    )
     parser.add_argument(
         "--expected-node",
         action="append",
@@ -1553,7 +1862,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        result = analyze_log_directory(
+        result = analyze_log_sessions(
             args.log_dir,
             session_id=args.session_id,
             expected_node_ids=_parse_expected_nodes(args.expected_node),

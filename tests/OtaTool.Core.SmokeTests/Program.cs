@@ -30,6 +30,7 @@ try
     VerifyUpdateWindowBindings();
     VerifyUpgradeQualityAssessment();
     VerifyNodeTypePresentation();
+    VerifyStageApplicability();
     VerifyGeneratedMetadataPresentation();
     VerifyPatchCenterTitleCapitalization();
     VerifyMqttConfigurationTabs();
@@ -60,6 +61,25 @@ finally
         Console.Error.WriteLine($"清理冒烟测试临时目录失败：{exception.Message}");
         Environment.ExitCode = 1;
     }
+}
+
+static void VerifyStageApplicability()
+{
+    Assert(OtaStagePolicy.IsApplicable(DeviceType.Gateway, "PROGRAM")
+        && !OtaStagePolicy.IsApplicable(DeviceType.Gateway, "PREPARE")
+        && !OtaStagePolicy.IsApplicable(DeviceType.Gateway, "COMMIT"),
+        "网关升级只应显示网关本地执行的有效阶段。");
+    Assert(OtaStagePolicy.IsApplicable(DeviceType.Sync, "REPAIR")
+        && !OtaStagePolicy.IsApplicable(DeviceType.Sync, "VERIFY"),
+        "同步拓展器升级阶段筛选错误。");
+    Assert(OtaStagePolicy.IsApplicable(DeviceType.Async, "BOOT_VERIFY")
+        && !OtaStagePolicy.IsApplicable(DeviceType.Async, "COMMIT"),
+        "异步拓展器升级阶段筛选错误。");
+    Assert(OtaStagePolicy.IsApplicable(DeviceType.Node, "COMMIT")
+        && OtaStagePolicy.IsApplicable(DeviceType.Node, "BOOT_VERIFY"),
+        "Node 升级应显示完整下游闭环阶段。");
+    Assert(OtaStagePolicy.IsApplicable(DeviceType.Gateway, "FUTURE_STAGE"),
+        "未知的新协议阶段不应被静默隐藏。");
 }
 
 static void VerifyStaticResourceReferences()
@@ -180,6 +200,7 @@ static void VerifyStatusPanelLayout()
 {
     var xamlPath = Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml");
     var xaml = File.ReadAllText(xamlPath);
+    var patchPage = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "PatchPage.xaml"));
     var viewModel = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindowViewModel.cs"));
     var codeBehind = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml.cs"));
     Assert(!xaml.Contains("Opacity=\"0\"", StringComparison.Ordinal)
@@ -229,7 +250,7 @@ static void VerifyStatusPanelLayout()
     Assert(xaml.Contains("Text=\"{Binding UpgradeRunModeText}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding UpgradeRunProgressText}\"", StringComparison.Ordinal)
         && viewModel.Contains("UpgradeRunModeText = $\"单次 {task.OldVersion} to {task.NewVersion}\"", StringComparison.Ordinal)
-        && viewModel.Contains("UpgradeRunModeText = $\"循环 1/{CycleRounds} {forward.OldVersion} to {forward.NewVersion}\"", StringComparison.Ordinal),
+        && viewModel.Contains("UpgradeRunModeText = $\"循环 1/{cycleRounds} {forward.OldVersion} to {forward.NewVersion}\"", StringComparison.Ordinal),
         "状态机必须明确显示单次/循环升级方式和当前轮次进度。");
     Assert(xaml.Contains("Text=\"{Binding DisplayDuration}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding DisplayElapsed, Mode=OneWay}\"", StringComparison.Ordinal)
@@ -262,7 +283,7 @@ static void VerifyStatusPanelLayout()
         && taskLayout.Contains("Text=\"{Binding CycleFixedIntervalSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding CycleRandomMinimumSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding CycleRandomMaximumSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
-        && viewModel.Contains("new OtaCycleDefinition(forward, reverse, CycleRounds, cycleInterval)", StringComparison.Ordinal)
+        && viewModel.Contains("new OtaCycleDefinition(forward, reverse, cycleRounds, cycleInterval)", StringComparison.Ordinal)
         && viewModel.Contains("cycle.Waiting +=", StringComparison.Ordinal),
         "循环升级应支持固定或自定义范围的随机秒级间隔，并在等待时更新状态机。");
     Assert(!taskLayout.Contains("Content=\"导出报告\"", StringComparison.Ordinal)
@@ -341,8 +362,18 @@ static void VerifyStatusPanelLayout()
         "两种协议模式必须使用独立工作区、运行状态、报告视图和 Credential Manager 凭据键。");
     Assert(viewModel.Contains("autoExport: IsTerminalState(update.State) && !_isCycleUpgradeRunning", StringComparison.Ordinal)
         && viewModel.Contains("测试完成，报告已导出到", StringComparison.Ordinal)
+        && viewModel.Contains("report.FinalState == OtaTaskState.Succeeded ? \"通过\" : \"失败\"", StringComparison.Ordinal)
+        && xaml.Contains("Visibility=\"{Binding DialogResultStampVisibility}\"", StringComparison.Ordinal)
+        && xaml.Contains("<RotateTransform Angle=\"-12\" />", StringComparison.Ordinal)
         && !viewModel.Contains("ExportActiveReportAsync", StringComparison.Ordinal),
-        "成功或失败终态应自动导出报告并提示完整路径。");
+        "成功或失败终态应自动导出报告、提示完整路径，并显示倾斜的通过/失败印章。");
+    Assert(viewModel.Contains("PatchDialogAction.StartCycleUpgrade", StringComparison.Ordinal)
+        && viewModel.Contains("BuildCycleUpgradeConfirmationMessage(forward, reverse, cycleInterval, CycleRounds)", StringComparison.Ordinal)
+        && viewModel.Contains("循环轮数：{rounds} 轮（共 {rounds * 2} 次单次升级）", StringComparison.Ordinal)
+        && viewModel.Contains("单次间隔：{intervalText}", StringComparison.Ordinal)
+        && viewModel.Contains("正向 Patch：{Path.GetFileName(forward.PatchPath)}", StringComparison.Ordinal)
+        && viewModel.Contains("反向 Patch：{Path.GetFileName(reverse.PatchPath)}", StringComparison.Ordinal),
+        "循环升级启动前应使用统一弹框确认轮数、间隔和正反向 Patch。 ");
     Assert(viewModel.Contains("\"TRANSFER\" => \"分片传输\"", StringComparison.Ordinal),
         "TRANSFER 阶段应显示为分片传输。");
     Assert(viewModel.Contains("\"TRANSFER\" => \"数据传输\"", StringComparison.Ordinal)
@@ -363,12 +394,22 @@ static void VerifyStatusPanelLayout()
         "总体阶段应采用 Gateway 阶段，阶段开始时间必须基于稳定任务起点，终态不得覆盖具体失败阶段。");
     Assert(xaml.Contains("Content=\"查看详细报告\"", StringComparison.Ordinal)
         && xaml.Contains("Content=\"归档报告\"", StringComparison.Ordinal)
+        && xaml.Contains("GroupName=\"ReportScopeTabs\" Style=\"{StaticResource ModeRadio}\"", StringComparison.Ordinal)
+        && xaml.Contains("IsChecked=\"{Binding IsShowingActiveReports, Mode=OneWay}\"", StringComparison.Ordinal)
+        && xaml.Contains("IsChecked=\"{Binding IsShowingArchivedReports, Mode=OneWay}\"", StringComparison.Ordinal)
+        && viewModel.Contains("public bool IsShowingActiveReports => !_showArchivedReports;", StringComparison.Ordinal)
+        && viewModel.Contains("public bool IsShowingArchivedReports => _showArchivedReports;", StringComparison.Ordinal)
         && xaml.Contains("Key=\"Delete\" Command=\"{Binding DeleteReportCommand}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"报告总结\"", StringComparison.Ordinal)
         && xaml.Contains("ItemsSource=\"{Binding SelectedReport.StageTimeline, Mode=OneWay}\"", StringComparison.Ordinal)
         && !xaml.Contains("Text=\"最近事件\"", StringComparison.Ordinal)
         && xaml.Contains("Visibility=\"{Binding GlobalDialogVisibility}\"", StringComparison.Ordinal),
         "历史报告应显示去重后的阶段时间线，并支持查看、归档、删除与应用内确认弹框。");
+    Assert(xaml.Contains("Command=\"{Binding ConfirmPatchDialogCommand}\" IsDefault=\"{Binding IsGlobalDialogConfirmDefault}\"", StringComparison.Ordinal)
+        && patchPage.Contains("Command=\"{Binding ConfirmPatchDialogCommand}\" IsDefault=\"{Binding IsPatchDialogConfirmDefault}\"", StringComparison.Ordinal)
+        && viewModel.Contains("_patchDialogAction is PatchDialogAction.Delete or PatchDialogAction.Publish;", StringComparison.Ordinal)
+        && viewModel.Contains("_patchDialogAction is not (PatchDialogAction.Delete or PatchDialogAction.Publish);", StringComparison.Ordinal),
+        "所有应用内弹框都应支持按 Enter 确认，并且只能激活当前可见弹框的默认按钮。");
     Assert(xaml.Contains("Text=\"{Binding LogAnalysisQualityScore}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding LogAnalysisQualityGrade}\"", StringComparison.Ordinal)
         && xaml.Contains("ItemsSource=\"{Binding LogAnalysisResultLines, Mode=OneWay}\"", StringComparison.Ordinal)
@@ -385,11 +426,13 @@ static void VerifyStatusPanelLayout()
         && xaml.Contains("Content=\"删除\" Command=\"{Binding DataContext.RemoveImportedLogFileCommand", StringComparison.Ordinal)
         && xaml.Contains("Content=\"分析列表日志\"", StringComparison.Ordinal)
         && xaml.Contains("IsEnabled=\"{Binding HasImportedLogFiles}\"", StringComparison.Ordinal)
-        && xaml.Contains("当前分析器默认分析最新 SID", StringComparison.Ordinal)
+        && xaml.Contains("循环日志会按全部 SID 分轮解析", StringComparison.Ordinal)
         && viewModel.Contains("Directory.EnumerateFiles(LogDirectory, \"*.log\", SearchOption.TopDirectoryOnly)", StringComparison.Ordinal)
         && viewModel.Contains("File.Copy(item.FilePath, Path.Combine(analysisInputDirectory, item.FileName));", StringComparison.Ordinal)
         && viewModel.Contains("new LogAnalysisRequest(OtaMode.EcoLink, LogAnalyzerExecutablePath, analysisInputDirectory, outputDirectory)", StringComparison.Ordinal),
-        "日志目录导入后应显示可删除清单，分析器必须仅处理清单快照，并明确循环日志只分析最新 SID。");
+        "日志目录导入后应显示可删除清单，分析器必须仅处理清单快照，并支持按全部 SID 解析循环日志。");
+    Assert(viewModel.Contains("Rssi = node.Rssi > 0 ? (sbyte)-node.Rssi : node.Rssi;", StringComparison.Ordinal),
+        "Node RSSI 应统一规范为 dBm 负值后再显示和参与门限判断。");
     Assert(xaml.Contains("Content=\"清空\" Command=\"{Binding ClearGlobalLogCommand}\"", StringComparison.Ordinal)
         && xaml.Contains("仅保留本次运行最近 300 行", StringComparison.Ordinal)
         && viewModel.Contains("ClearGlobalLogCommand = new RelayCommand(_ => GlobalLogText = string.Empty);", StringComparison.Ordinal),
@@ -446,6 +489,46 @@ static void VerifyUpgradeQualityAssessment()
     Assert(assessment.Details.Contains("闭环完整性  50/50", StringComparison.Ordinal)
         && assessment.Details.Contains("传输可靠性  9/20", StringComparison.Ordinal),
         "升级质量评估缺少可解释的评分明细。");
+
+    using var cycleDocument = JsonDocument.Parse("""
+        {
+          "cycle": {
+            "session_count": 2,
+            "successful_session_count": 1
+          },
+          "sessions": [
+            { "conclusions": { "device_upgrade_success": true, "parent_task_success": true } },
+            { "conclusions": { "device_upgrade_success": false, "parent_task_success": false } }
+          ],
+          "conclusions": {
+            "device_upgrade_success": false,
+            "parent_task_success": false,
+            "overall_success": false
+          },
+          "counts": {
+            "target": 4,
+            "ready": 3,
+            "boot_report": 3,
+            "node_finished": 3,
+            "aggregated_finished": 3
+          },
+          "maintenance": {
+            "completed_count": 2,
+            "latency_ms": { "p95": 800 }
+          },
+          "retries": { "maintenance_repeat": 1 },
+          "sync_frame_timing": {
+            "tx_failure_events": 1,
+            "inferred_missed_frames": 0
+          },
+          "node_link_summary": { "weak_link_node_ids": ["0x0002"] }
+        }
+        """);
+    var cycleAssessment = OtaUpgradeQualityEvaluator.Evaluate(cycleDocument.RootElement);
+    Assert(cycleAssessment.ClosedLoopScore == 26
+        && cycleAssessment.Summary.Contains("2 次中有 1 次未闭环", StringComparison.Ordinal)
+        && cycleAssessment.Details.Contains("循环日志共识别 2 次单次升级", StringComparison.Ordinal),
+        "循环日志质量评估应按每个 SID 的闭环结果计分并显示轮次汇总。");
 }
 
 static void VerifyPatchCenterTitleCapitalization()
@@ -732,6 +815,15 @@ static async Task VerifyHttpRangeServerAsync(string workspace)
     Assert(headResponse.StatusCode == HttpStatusCode.OK && headResponse.Content.Headers.ContentLength == payload.Length, "HEAD 响应错误。");
     var md5 = (await PatchMetadata.FromFileAsync(Path.Combine(root, "firmware.bin"))).Md5;
     Assert((await HttpFileVerifier.VerifyAsync(new Uri(server.BaseAddress!, "firmware.bin"), payload.Length, md5, verifyFullMd5: true)).IsSuccess, "HTTP 文件完整性验证失败。");
+
+    using var transientClient = new HttpClient(new TransientPatchHttpHandler(payload));
+    var transientResult = await HttpFileVerifier.VerifyAsync(
+        transientClient,
+        new Uri("http://ota.test/firmware.bin"),
+        payload.Length,
+        md5,
+        verifyFullMd5: true);
+    Assert(transientResult.IsSuccess, "HTTP 文件校验应自动重试临时 503 响应。");
 }
 
 static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
@@ -871,6 +963,34 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
     Assert(failedUpdateObservedInactive, "失败终态通知界面前应先释放活动任务。");
     Assert(failedMqtt.Published.Count == publishedAfterFailure, "失败终态后仍继续发送状态查询。");
 
+    await using var delayedMqtt = new FakeMqttTransport();
+    await using var delayedRunner = new OtaTaskRunner(
+        delayedMqtt,
+        new EcoLinkProtocolProfile(),
+        new InMemoryTaskSequenceStore(),
+        pollingOptions: new OtaPollingOptions(
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(10)));
+    OtaExecutionUpdate? delayedTerminal = null;
+    delayedRunner.Updated += (_, update) =>
+    {
+        if (update.State is OtaTaskState.Succeeded or OtaTaskState.Failed)
+        {
+            delayedTerminal = update;
+        }
+    };
+    Assert((await delayedRunner.StartAsync(ecoTask)).State == OtaTaskState.Running, "延迟状态响应测试任务未启动。");
+    await WaitUntilAsync(() => delayedMqtt.Published.Count >= 3, TimeSpan.FromSeconds(1));
+    var delayedStatusQuery = delayedMqtt.Published[1];
+    var delayedStatusSequence = int.Parse(delayedStatusQuery.Topic.Split('/')[^1]);
+    delayedMqtt.Inject("ucchip/up/sgw/704027/1",
+        $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{delayedStatusSequence},\"task_seq\":1,\"session_id\":11,\"result\":\"OK\",\"status\":\"SUCCESS\",\"stage\":\"FINISHED\"}}}}");
+    await WaitUntilAsync(() => !delayedRunner.HasActiveTask, TimeSpan.FromSeconds(1));
+    Assert(delayedTerminal?.State == OtaTaskState.Succeeded,
+        "已超时查询的延迟状态响应应恢复任务并识别终态。");
+
     await using var silentMqtt = new FakeMqttTransport();
     await using var silentRunner = new OtaTaskRunner(
         silentMqtt,
@@ -882,19 +1002,25 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
             TimeSpan.FromMilliseconds(5),
             TimeSpan.FromMilliseconds(10)));
     OtaExecutionUpdate? silentFailure = null;
+    OtaExecutionUpdate? silentWarning = null;
     silentRunner.Updated += (_, update) =>
     {
         if (update.State == OtaTaskState.Failed)
         {
             silentFailure = update;
         }
+        if (update.Message.Contains("下游任务可能仍在运行", StringComparison.Ordinal))
+        {
+            silentWarning = update;
+        }
     };
     Assert((await silentRunner.StartAsync(ecoTask)).State == OtaTaskState.Running, "无响应状态查询测试任务未启动。");
-    await WaitUntilAsync(() => !silentRunner.HasActiveTask, TimeSpan.FromSeconds(1));
-    Assert(silentFailure?.Message.Contains("连续 3 次无响应", StringComparison.Ordinal) == true,
-        "连续三次状态查询无响应后未自动结束任务。");
-    Assert(silentMqtt.Published.Count == 4,
-        "状态查询无响应时应在第三次查询后停止，不应继续轮询。");
+    await WaitUntilAsync(() => silentMqtt.Published.Count >= 5, TimeSpan.FromSeconds(1));
+    Assert(silentRunner.HasActiveTask && silentFailure is null,
+        "状态查询无响应不应直接判定下游升级失败。");
+    Assert(silentWarning is not null,
+        "连续三次状态查询无响应后应提示查询异常并继续轮询。");
+    await silentRunner.CancelAsync();
 
     await using var missingMqtt = new FakeMqttTransport();
     await using var missingRunner = new OtaTaskRunner(
@@ -1290,6 +1416,44 @@ static void Assert(bool condition, string message)
     if (!condition)
     {
         throw new InvalidOperationException(message);
+    }
+}
+
+sealed class TransientPatchHttpHandler(byte[] payload) : HttpMessageHandler
+{
+    private int _headAttempts;
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.Method == HttpMethod.Head && Interlocked.Increment(ref _headAttempts) == 1)
+        {
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.ServiceUnavailable));
+        }
+
+        if (request.Method == HttpMethod.Head)
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent([]),
+            };
+            response.Content.Headers.ContentLength = payload.Length;
+            return Task.FromResult(response);
+        }
+
+        if (request.Headers.Range is not null)
+        {
+            var response = new HttpResponseMessage(HttpStatusCode.PartialContent)
+            {
+                Content = new ByteArrayContent(payload[..1]),
+            };
+            response.Content.Headers.ContentRange = new ContentRangeHeaderValue(0, 0, payload.Length);
+            return Task.FromResult(response);
+        }
+
+        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(payload),
+        });
     }
 }
 

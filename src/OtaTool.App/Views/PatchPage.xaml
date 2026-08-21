@@ -210,7 +210,7 @@
                     </ScrollViewer>
                     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
                         <Button Style="{StaticResource QuietButton}" Content="取消" Command="{Binding CancelPatchDialogCommand}" />
-                        <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="{Binding PatchDialogConfirmText}" Command="{Binding ConfirmPatchDialogCommand}" />
+                        <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="{Binding PatchDialogConfirmText}" Command="{Binding ConfirmPatchDialogCommand}" IsDefault="{Binding IsPatchDialogConfirmDefault}" />
                     </StackPanel>
                 </Grid>
             </Border>

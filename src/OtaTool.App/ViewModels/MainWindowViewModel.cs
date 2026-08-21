@@ -78,11 +78,18 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private ReportListItem? _pendingReportDeletion;
     private OtaTask? _pendingUpgradeTask;
     private IOtaProtocolProfile? _pendingUpgradeProfile;
+    private OtaTask? _pendingCycleForwardTask;
+    private OtaTask? _pendingCycleReverseTask;
+    private IOtaProtocolProfile? _pendingCycleProfile;
+    private OtaCycleIntervalOptions? _pendingCycleInterval;
+    private int _pendingCycleRounds;
     private bool _isUpgradeStartInProgress;
     private bool _isPatchDialogOpen;
     private string _patchDialogTitle = string.Empty;
     private string _patchDialogMessage = string.Empty;
     private string _patchDialogConfirmText = "确认";
+    private string _dialogResultStampText = string.Empty;
+    private string _dialogResultStampColor = "#159E68";
     private long _importedPatchLength;
     private string _importedPatchMd5 = string.Empty;
     private string _importedPatchSha256 = string.Empty;
@@ -199,6 +206,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private GatewayOtaStatus? _lastGatewayStatus;
     private int? _gatewayTaskSequence;
     private DateTimeOffset? _gatewayTaskStartedAt;
+    private DeviceType _gatewayStatusDeviceType = DeviceType.Gateway;
     private ReportListItem? _selectedReport;
     private bool _showArchivedReports;
 
@@ -476,6 +484,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         ? Visibility.Collapsed
         : Visibility.Visible;
 
+    public bool IsPatchDialogConfirmDefault => IsPatchDialogOpen &&
+        _patchDialogAction is PatchDialogAction.Delete or PatchDialogAction.Publish;
+
+    public bool IsGlobalDialogConfirmDefault => IsPatchDialogOpen &&
+        _patchDialogAction is not (PatchDialogAction.Delete or PatchDialogAction.Publish);
+
     public bool IsPatchDialogOpen
     {
         get => _isPatchDialogOpen;
@@ -485,6 +499,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(PatchDialogVisibility));
             OnPropertyChanged(nameof(GlobalDialogVisibility));
             OnPropertyChanged(nameof(DialogCancelVisibility));
+            OnPropertyChanged(nameof(IsPatchDialogConfirmDefault));
+            OnPropertyChanged(nameof(IsGlobalDialogConfirmDefault));
         }
     }
 
@@ -493,6 +509,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public string PatchDialogMessage { get => _patchDialogMessage; private set => SetProperty(ref _patchDialogMessage, value); }
 
     public string PatchDialogConfirmText { get => _patchDialogConfirmText; private set => SetProperty(ref _patchDialogConfirmText, value); }
+
+    public string DialogResultStampText { get => _dialogResultStampText; private set => SetProperty(ref _dialogResultStampText, value); }
+
+    public string DialogResultStampColor { get => _dialogResultStampColor; private set => SetProperty(ref _dialogResultStampColor, value); }
+
+    public Visibility DialogResultStampVisibility => string.IsNullOrWhiteSpace(DialogResultStampText)
+        ? Visibility.Collapsed
+        : Visibility.Visible;
 
     public ICommand NavigateCommand { get; }
 
@@ -1011,6 +1035,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public Visibility ReportSelectionHintVisibility => SelectedReport is null ? Visibility.Visible : Visibility.Collapsed;
 
+    public bool IsShowingActiveReports => !_showArchivedReports;
+
+    public bool IsShowingArchivedReports => _showArchivedReports;
+
     public string ActiveReportsHeader => _showArchivedReports ? "归档报告" : "当前报告";
 
     public string ReportScopeDescription => _showArchivedReports
@@ -1050,7 +1078,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    public bool CanStartUpgrade => !_isUpgradeStartInProgress && _pendingUpgradeTask is null && _runner?.HasActiveTask != true;
+    public bool CanStartUpgrade => !_isUpgradeStartInProgress &&
+        _pendingUpgradeTask is null &&
+        _pendingCycleForwardTask is null &&
+        _runner?.HasActiveTask != true;
 
     public bool CanStartCycleUpgrade => CanStartUpgrade
         && SelectedReverseUpgradePatch is { FilePath.Length: > 0 } reversePatch
@@ -1666,6 +1697,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         state.LastGatewayStatus = _lastGatewayStatus;
         state.GatewayTaskSequence = _gatewayTaskSequence;
         state.GatewayTaskStartedAt = _gatewayTaskStartedAt;
+        state.GatewayStatusDeviceType = _gatewayStatusDeviceType;
         state.UpgradeRunModeText = UpgradeRunModeText;
         state.UpgradeRunModeForeground = UpgradeRunModeForeground;
         state.UpgradeRunModeBackground = UpgradeRunModeBackground;
@@ -1729,6 +1761,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _lastGatewayStatus = state.LastGatewayStatus;
         _gatewayTaskSequence = state.GatewayTaskSequence;
         _gatewayTaskStartedAt = state.GatewayTaskStartedAt;
+        _gatewayStatusDeviceType = state.GatewayStatusDeviceType;
         UpgradeRunModeText = state.UpgradeRunModeText;
         UpgradeRunModeForeground = state.UpgradeRunModeForeground;
         UpgradeRunModeBackground = state.UpgradeRunModeBackground;
@@ -1955,8 +1988,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _nodeDiscoveryCompletedAt = workspace.NodeDiscoveryCompletedAt;
             RestoreDiscoveryCollections(workspace);
             _showArchivedReports = workspace.ShowArchivedReports;
-            OnPropertyChanged(nameof(ActiveReportsHeader));
-            OnPropertyChanged(nameof(ReportScopeDescription));
+            NotifyReportScopeChanged();
             LoadCurrentModeSecrets();
         }
         finally
@@ -3014,6 +3046,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _runner = new OtaTaskRunner(_mqtt, profile, _reportStore);
         _runner.Updated += OnTaskUpdated;
         _runner.MessagePublished += OnMqttMessagePublished;
+        _gatewayStatusDeviceType = task.DeviceType;
+        GatewayStages.Clear();
+        GatewaySubtasks.Clear();
         _gatewayTaskSequence = null;
         _gatewayTaskStartedAt = null;
         GatewayStageSummary = task.Mode == OtaMode.EcoLink
@@ -3092,6 +3127,50 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             $"下载地址：{task.PatchUrl}",
             string.Empty,
             "确认后将向设备发送 OTA 升级请求。");
+    }
+
+    private static string BuildCycleUpgradeConfirmationMessage(
+        OtaTask forward,
+        OtaTask reverse,
+        OtaCycleIntervalOptions interval,
+        int rounds)
+    {
+        var type = forward.DeviceType switch
+        {
+            DeviceType.Gateway => "网关升级",
+            DeviceType.Sync => "拓展器-同步升级",
+            DeviceType.Async => "拓展器-异步升级",
+            DeviceType.Node => "节点升级",
+            _ => forward.DeviceType.ToString(),
+        };
+        var target = forward.DeviceType switch
+        {
+            DeviceType.Gateway => "网关升级（无需指定目标 ID）",
+            DeviceType.Node => $"Node 类型：{NodeTypeCatalog.Format(forward.NodeType)}；目标：{string.Join("；", forward.ExtenderTargets.Select(item => $"{item.ExtenderId}: {string.Join(',', item.NodeIds)}"))}",
+            _ when forward.Target.Scope == TargetScope.Broadcast => "目标范围：广播",
+            _ => $"目标 ID：{string.Join("、", forward.Target.DeviceIds)}",
+        };
+        var intervalText = interval.Mode == OtaCycleIntervalMode.Random
+            ? $"随机 {interval.RandomMinimumSeconds}～{interval.RandomMaximumSeconds} 秒"
+            : interval.FixedSeconds == 0
+                ? "固定 0 秒（连续执行）"
+                : $"固定 {interval.FixedSeconds} 秒";
+
+        return string.Join(
+            Environment.NewLine,
+            $"模式：{(forward.Mode == OtaMode.EcoLink ? "EcoLink" : "传统")}",
+            $"升级类型：{type}",
+            $"Gateway dev ID：{forward.GatewayId}",
+            target,
+            $"循环轮数：{rounds} 轮（共 {rounds * 2} 次单次升级）",
+            $"循环顺序：{forward.OldVersion} → {forward.NewVersion} → {reverse.NewVersion}",
+            $"单次间隔：{intervalText}",
+            $"正向 Patch：{Path.GetFileName(forward.PatchPath)}",
+            $"反向 Patch：{Path.GetFileName(reverse.PatchPath)}",
+            $"正向下载地址：{forward.PatchUrl}",
+            $"反向下载地址：{reverse.PatchUrl}",
+            string.Empty,
+            "确认后将先校验正、反向 Patch，再按上述参数启动循环升级。");
     }
 
     private OtaTaskTarget BuildTaskTarget(
@@ -3622,7 +3701,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _gatewayTaskStartedAt = DateTimeOffset.Now - TimeSpan.FromMilliseconds(Math.Max(0, status.TaskElapsedMs.Value));
         }
         GatewayStages.Clear();
-        foreach (var stage in status.Stages)
+        foreach (var stage in status.Stages.Where(stage =>
+                     OtaStagePolicy.IsApplicable(_gatewayStatusDeviceType, stage.Stage)))
         {
             var localStartTime = stage.State.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
                 ? "未开始"
@@ -3973,13 +4053,37 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (!validation.IsValid) { TaskStatusMessage = $"循环任务未启动：{validation.Message}"; return; }
         validation = OtaTaskValidator.Validate(reverse, profile);
         if (!validation.IsValid) { TaskStatusMessage = $"循环任务未启动：{validation.Message}"; return; }
+
+        _pendingCycleForwardTask = forward;
+        _pendingCycleReverseTask = reverse;
+        _pendingCycleProfile = profile;
+        _pendingCycleInterval = cycleInterval;
+        _pendingCycleRounds = CycleRounds;
+        NotifyUpgradeActionAvailability();
+        OpenPatchDialog(
+            PatchDialogAction.StartCycleUpgrade,
+            "确认启动循环升级",
+            BuildCycleUpgradeConfirmationMessage(forward, reverse, cycleInterval, CycleRounds),
+            "确认启动");
+    }
+
+    private async Task VerifyAndStartCycleAsync(
+        OtaTask forward,
+        OtaTask reverse,
+        IOtaProtocolProfile profile,
+        OtaCycleIntervalOptions cycleInterval,
+        int cycleRounds)
+    {
         try
         {
-            foreach (var cycleTask in new[] { forward, reverse })
+        try
+        {
+            foreach (var (cycleTask, direction) in new[] { (forward, "正向"), (reverse, "反向") })
             {
+                TaskStatusMessage = $"正在校验循环升级{direction} Patch HTTP 完整性…";
                 var metadata = await PatchMetadata.FromFileAsync(cycleTask.PatchPath);
                 var verification = await HttpFileVerifier.VerifyAsync(new Uri(cycleTask.PatchUrl), metadata.Length, metadata.Md5, verifyFullMd5: true);
-                if (!verification.IsSuccess) { TaskStatusMessage = $"循环任务未启动：{verification.Message}"; return; }
+                if (!verification.IsSuccess) { TaskStatusMessage = $"循环任务未启动：{direction} Patch HTTP 校验失败：{verification.Message}"; return; }
             }
         }
         catch (Exception exception) { TaskStatusMessage = $"循环任务未启动：{exception.Message}"; return; }
@@ -3988,7 +4092,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _runner = new OtaTaskRunner(_mqtt, profile, _reportStore);
         _runner.Updated += OnTaskUpdated;
         _runner.MessagePublished += OnMqttMessagePublished;
-        _activeReport = new OtaReport { Task = forward, LogAnalysisConclusion = mode == OtaMode.Traditional ? "日志解析不支持" : null };
+        _gatewayStatusDeviceType = forward.DeviceType;
+        GatewayStages.Clear();
+        GatewaySubtasks.Clear();
+        _activeReport = new OtaReport { Task = forward, LogAnalysisConclusion = forward.Mode == OtaMode.Traditional ? "日志解析不支持" : null };
         _reportTaskIds.Clear();
         _reportTaskIds.Add(forward.Id);
         _reportTaskIds.Add(reverse.Id);
@@ -3999,13 +4106,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         cycle.StepStarting += (_, update) => RunOnUi(() =>
         {
             var task = update.IsForward ? forward : reverse;
-            UpgradeRunModeText = $"循环 {update.Round}/{CycleRounds} {task.OldVersion} to {task.NewVersion}";
-            UpgradeRunProgressText = $"第 {update.Round}/{CycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")}升级正在执行";
+            UpgradeRunModeText = $"循环 {update.Round}/{cycleRounds} {task.OldVersion} to {task.NewVersion}";
+            UpgradeRunProgressText = $"第 {update.Round}/{cycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")}升级正在执行";
         });
         cycle.Waiting += (_, update) => RunOnUi(() =>
         {
             var task = update.NextIsForward ? forward : reverse;
-            UpgradeRunModeText = $"循环 {update.NextRound}/{CycleRounds} 间隔 {update.DelaySeconds} s";
+            UpgradeRunModeText = $"循环 {update.NextRound}/{cycleRounds} 间隔 {update.DelaySeconds} s";
             UpgradeRunProgressText = $"等待 {update.DelaySeconds} s 后执行 {task.OldVersion} to {task.NewVersion}";
         });
         cycle.Updated += (_, update) =>
@@ -4015,27 +4122,27 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             RunOnUi(() =>
             {
                 TaskStatusMessage = $"第 {update.Round} 轮{(update.IsForward ? "正向" : "反向")}：{update.Result.Message}";
-                UpgradeRunProgressText = $"第 {update.Round}/{CycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")} · {update.Result.Message}";
+                UpgradeRunProgressText = $"第 {update.Round}/{cycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")} · {update.Result.Message}";
                 UpgradeRunModeText = update.Result.State != OtaTaskState.Succeeded
-                    ? $"循环 {update.Round}/{CycleRounds} {(update.IsForward ? $"{forward.OldVersion} to {forward.NewVersion}" : $"{reverse.OldVersion} to {reverse.NewVersion}")}"
+                    ? $"循环 {update.Round}/{cycleRounds} {(update.IsForward ? $"{forward.OldVersion} to {forward.NewVersion}" : $"{reverse.OldVersion} to {reverse.NewVersion}")}"
                     : update.IsForward
-                        ? $"循环 {update.Round}/{CycleRounds} {reverse.OldVersion} to {reverse.NewVersion}"
-                        : update.Round < CycleRounds
-                            ? $"循环 {update.Round + 1}/{CycleRounds} {forward.OldVersion} to {forward.NewVersion}"
-                            : $"循环 {CycleRounds}/{CycleRounds} 已完成";
+                        ? $"循环 {update.Round}/{cycleRounds} {reverse.OldVersion} to {reverse.NewVersion}"
+                        : update.Round < cycleRounds
+                            ? $"循环 {update.Round + 1}/{cycleRounds} {forward.OldVersion} to {forward.NewVersion}"
+                            : $"循环 {cycleRounds}/{cycleRounds} 已完成";
             });
         };
-        UpgradeRunModeText = $"循环 1/{CycleRounds} {forward.OldVersion} to {forward.NewVersion}";
+        UpgradeRunModeText = $"循环 1/{cycleRounds} {forward.OldVersion} to {forward.NewVersion}";
         UpgradeRunModeForeground = "#7A4CC2";
         UpgradeRunModeBackground = "#F1EAFE";
-        UpgradeRunProgressText = $"共 {CycleRounds} 轮 · 准备执行第 1 轮正向升级";
+        UpgradeRunProgressText = $"共 {cycleRounds} 轮 · 准备执行第 1 轮正向升级";
         _isCycleUpgradeRunning = true;
         _cycleCancellation = new CancellationTokenSource();
         NotifyUpgradeActionAvailability();
         try
         {
             var result = await cycle.RunAsync(
-                new OtaCycleDefinition(forward, reverse, CycleRounds, cycleInterval),
+                new OtaCycleDefinition(forward, reverse, cycleRounds, cycleInterval),
                 _runner,
                 _cycleCancellation.Token);
             TaskStatusMessage = result.Message;
@@ -4050,7 +4157,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                         result.Message,
                         result.OccurredAt));
                 }
-                _activeReport.Cycle = new OtaCycleSummary(CycleRounds, completedSteps, successfulSteps, DateTimeOffset.Now - startedAt, result.Message);
+                _activeReport.Cycle = new OtaCycleSummary(cycleRounds, completedSteps, successfulSteps, DateTimeOffset.Now - startedAt, result.Message);
                 try
                 {
                     var exportedPaths = await SaveReportAsync(_activeReport, autoExport: true);
@@ -4076,6 +4183,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _isCycleUpgradeRunning = false;
             _cycleCancellation?.Dispose();
             _cycleCancellation = null;
+            NotifyUpgradeActionAvailability();
+        }
+        }
+        finally
+        {
+            _isUpgradeStartInProgress = false;
             NotifyUpgradeActionAvailability();
         }
     }
@@ -4123,7 +4236,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             report.FinalState == OtaTaskState.Succeeded ? "测试完成" : "测试结束",
             $"测试完成，报告已自动导出到：{Environment.NewLine}{outputDirectory}{Environment.NewLine}{Environment.NewLine}" +
             $"HTML：{Path.GetFileName(paths.HtmlPath)}{Environment.NewLine}JSON：{Path.GetFileName(paths.JsonPath)}",
-            "知道了");
+            "知道了",
+            report.FinalState == OtaTaskState.Succeeded ? "通过" : "失败",
+            report.FinalState == OtaTaskState.Succeeded ? "#159E68" : "#C73A3A");
     }
 
     private void NotifyReportExportFailed(Exception exception)
@@ -4394,8 +4509,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (_showArchivedReports)
         {
             _showArchivedReports = false;
-            OnPropertyChanged(nameof(ActiveReportsHeader));
-            OnPropertyChanged(nameof(ReportScopeDescription));
+            NotifyReportScopeChanged();
         }
         await LoadReportsAsync(updateStatus: false);
     }
@@ -4410,9 +4524,16 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         if (_showArchivedReports == showArchived) return;
         _showArchivedReports = showArchived;
+        NotifyReportScopeChanged();
+        _ = LoadReportsAsync(updateStatus: false);
+    }
+
+    private void NotifyReportScopeChanged()
+    {
+        OnPropertyChanged(nameof(IsShowingActiveReports));
+        OnPropertyChanged(nameof(IsShowingArchivedReports));
         OnPropertyChanged(nameof(ActiveReportsHeader));
         OnPropertyChanged(nameof(ReportScopeDescription));
-        _ = LoadReportsAsync(updateStatus: false);
     }
 
     private async Task OpenSelectedReportAsync()
@@ -4913,7 +5034,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private void OpenPatchDialog(PatchDialogAction action, string title, string message, string confirmText)
+    private void OpenPatchDialog(
+        PatchDialogAction action,
+        string title,
+        string message,
+        string confirmText,
+        string resultStampText = "",
+        string resultStampColor = "#159E68")
     {
         _patchDialogAction = action;
         OnPropertyChanged(nameof(PatchDialogVisibility));
@@ -4922,6 +5049,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         PatchDialogTitle = title;
         PatchDialogMessage = message;
         PatchDialogConfirmText = confirmText;
+        DialogResultStampText = resultStampText;
+        DialogResultStampColor = resultStampColor;
+        OnPropertyChanged(nameof(DialogResultStampVisibility));
         IsPatchDialogOpen = true;
     }
 
@@ -4934,6 +5064,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _pendingReportDeletion = null;
         _pendingUpgradeTask = null;
         _pendingUpgradeProfile = null;
+        _pendingCycleForwardTask = null;
+        _pendingCycleReverseTask = null;
+        _pendingCycleProfile = null;
+        _pendingCycleInterval = null;
+        _pendingCycleRounds = 0;
+        DialogResultStampText = string.Empty;
+        OnPropertyChanged(nameof(DialogResultStampVisibility));
         NotifyUpgradeActionAvailability();
     }
 
@@ -4941,6 +5078,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         var wasPublishing = _patchDialogAction == PatchDialogAction.Publish;
         var wasStartingUpgrade = _patchDialogAction == PatchDialogAction.StartUpgrade;
+        var wasStartingCycle = _patchDialogAction == PatchDialogAction.StartCycleUpgrade;
         ClosePatchDialog();
         if (wasPublishing)
         {
@@ -4950,6 +5088,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         else if (wasStartingUpgrade)
         {
             TaskStatusMessage = "已取消启动升级，任务尚未发送。";
+        }
+        else if (wasStartingCycle)
+        {
+            TaskStatusMessage = "已取消启动循环升级，任务尚未发送。";
         }
     }
 
@@ -4961,7 +5103,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var reportDeletion = _pendingReportDeletion;
         var upgradeTask = _pendingUpgradeTask;
         var upgradeProfile = _pendingUpgradeProfile;
-        if (action == PatchDialogAction.StartUpgrade)
+        var cycleForwardTask = _pendingCycleForwardTask;
+        var cycleReverseTask = _pendingCycleReverseTask;
+        var cycleProfile = _pendingCycleProfile;
+        var cycleInterval = _pendingCycleInterval;
+        var cycleRounds = _pendingCycleRounds;
+        if (action is PatchDialogAction.StartUpgrade or PatchDialogAction.StartCycleUpgrade)
         {
             _isUpgradeStartInProgress = true;
             NotifyUpgradeActionAvailability();
@@ -5005,6 +5152,20 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (action == PatchDialogAction.StartUpgrade && upgradeTask is not null && upgradeProfile is not null)
         {
             await VerifyAndStartValidatedTaskAsync(upgradeTask, upgradeProfile);
+        }
+
+        if (action == PatchDialogAction.StartCycleUpgrade &&
+            cycleForwardTask is not null &&
+            cycleReverseTask is not null &&
+            cycleProfile is not null &&
+            cycleInterval is not null)
+        {
+            await VerifyAndStartCycleAsync(
+                cycleForwardTask,
+                cycleReverseTask,
+                cycleProfile,
+                cycleInterval,
+                cycleRounds);
         }
     }
 
@@ -5455,6 +5616,7 @@ public enum PatchDialogAction
     Information,
     Publish,
     StartUpgrade,
+    StartCycleUpgrade,
     CancelTask,
     CloseApplication,
 }
@@ -5555,24 +5717,26 @@ public sealed class ReportListItem
             ?.GatewayStatus;
         if (status is null) return [];
 
-        return status.Stages.Select(stage =>
-        {
-            var startTime = !stage.State.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
-                ? report.StartedAt.AddMilliseconds(stage.StartOffsetMs).ToString("HH:mm:ss.fff")
-                : "未开始";
-            var duration = DurationDisplay.Format(stage.DurationMs);
-            var direction = StageDirections.GetValueOrDefault(stage.Stage, "—");
-            var directionOrReason = string.IsNullOrWhiteSpace(stage.Reason)
-                ? direction
-                : $"{direction} · {stage.Reason}";
-            return new ReportStageSummaryItem(
-                OtaStatusDisplay.Stage(stage.Stage),
-                OtaStatusDisplay.State(stage.State),
-                startTime,
-                duration,
-                directionOrReason,
-                StatusColor.For(stage.State));
-        }).ToArray();
+        return status.Stages
+            .Where(stage => OtaStagePolicy.IsApplicable(report.Task.DeviceType, stage.Stage))
+            .Select(stage =>
+            {
+                var startTime = !stage.State.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
+                    ? report.StartedAt.AddMilliseconds(stage.StartOffsetMs).ToString("HH:mm:ss.fff")
+                    : "未开始";
+                var duration = DurationDisplay.Format(stage.DurationMs);
+                var direction = StageDirections.GetValueOrDefault(stage.Stage, "—");
+                var directionOrReason = string.IsNullOrWhiteSpace(stage.Reason)
+                    ? direction
+                    : $"{direction} · {stage.Reason}";
+                return new ReportStageSummaryItem(
+                    OtaStatusDisplay.Stage(stage.Stage),
+                    OtaStatusDisplay.State(stage.State),
+                    startTime,
+                    duration,
+                    directionOrReason,
+                    StatusColor.For(stage.State));
+            }).ToArray();
     }
 }
 
@@ -5664,7 +5828,8 @@ public sealed class SelectableNodeItem : ObservableObject
         NodeId = node.NodeId;
         NodeType = node.NodeType;
         SoftwareVersion = node.SoftwareVersion;
-        Rssi = node.Rssi;
+        // 网关上报值可能使用正数表示信号强度绝对值，界面和门限判断统一使用 dBm 负值。
+        Rssi = node.Rssi > 0 ? (sbyte)-node.Rssi : node.Rssi;
         SequenceNumber = sequenceNumber;
         _isSelected = isSelected;
         _selectionChanged = selectionChanged;
@@ -5857,6 +6022,7 @@ internal sealed class UpgradeModeUiState
     public GatewayOtaStatus? LastGatewayStatus { get; set; }
     public int? GatewayTaskSequence { get; set; }
     public DateTimeOffset? GatewayTaskStartedAt { get; set; }
+    public DeviceType GatewayStatusDeviceType { get; set; } = DeviceType.Gateway;
     public string UpgradeRunModeText { get; set; } = "尚未启动";
     public string UpgradeRunModeForeground { get; set; } = "#65758B";
     public string UpgradeRunModeBackground { get; set; } = "#EEF2F7";

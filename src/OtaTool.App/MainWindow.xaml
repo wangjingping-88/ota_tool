@@ -16,7 +16,7 @@
     <WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="32"
                             ResizeBorderThickness="6"
-                            GlassFrameThickness="0"
+                            GlassFrameThickness="1"
                             CornerRadius="0"
                             UseAeroCaptionButtons="False" />
     </WindowChrome.WindowChrome>
@@ -65,6 +65,19 @@
         <KeyBinding Key="D" Modifiers="Control" Command="{Binding NavigateCommand}" CommandParameter="PATCH 中心" />
         <KeyBinding Key="T" Modifiers="Control" Command="{Binding NavigateCommand}" CommandParameter="升级任务" />
     </Window.InputBindings>
+    <Border x:Name="WindowFrame"
+            BorderBrush="#AEB8C5"
+            SnapsToDevicePixels="True">
+        <Border.Style>
+            <Style TargetType="Border">
+                <Setter Property="BorderThickness" Value="1" />
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding WindowState, RelativeSource={RelativeSource AncestorType=Window}}" Value="Maximized">
+                        <Setter Property="BorderThickness" Value="0" />
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Border.Style>
     <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="220" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
 
@@ -669,7 +682,7 @@
                                 </ScrollViewer>
                             </Border>
                             <StackPanel Grid.Row="3" Margin="0,10,0,0">
-                                <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="删除只影响本次分析清单，不会删除磁盘源文件。循环日志包含多个 SID 时，当前分析器默认分析最新 SID。" TextWrapping="Wrap" />
+                                <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="删除只影响本次分析清单，不会删除磁盘源文件。循环日志会按全部 SID 分轮解析；单次日志按唯一 SID 解析。" TextWrapping="Wrap" />
                                 <Button Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,12,0,0" Content="分析列表日志" Command="{Binding AnalyzeLogsCommand}" IsEnabled="{Binding HasImportedLogFiles}" />
                                 <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,8,0,0" Text="{Binding LogAnalysisStatus}" TextWrapping="Wrap" />
                             </StackPanel>
@@ -725,20 +738,24 @@
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="16" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                     <Border Style="{StaticResource Card}">
                         <Grid>
-                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
-                            <Grid>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                            <Border Background="#EEF2F8" CornerRadius="6" Padding="3" HorizontalAlignment="Left">
+                                <StackPanel Orientation="Horizontal">
+                                    <RadioButton GroupName="ReportScopeTabs" Style="{StaticResource ModeRadio}" Content="当前报告"
+                                                 IsChecked="{Binding IsShowingActiveReports, Mode=OneWay}"
+                                                 Command="{Binding ShowActiveReportsCommand}" />
+                                    <RadioButton GroupName="ReportScopeTabs" Style="{StaticResource ModeRadio}" Content="归档报告"
+                                                 IsChecked="{Binding IsShowingArchivedReports, Mode=OneWay}"
+                                                 Command="{Binding ShowArchivedReportsCommand}" />
+                                </StackPanel>
+                            </Border>
+                            <Grid Grid.Row="1" Margin="0,14,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                 <TextBlock FontSize="20" FontWeight="SemiBold" Text="{Binding ActiveReportsHeader}" />
                                 <Button Grid.Column="1" Style="{StaticResource QuietButton}" Content="刷新" Command="{Binding LoadReportsCommand}" />
                             </Grid>
-                            <StackPanel Grid.Row="1" Margin="0,8,0,14">
-                                <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="{Binding ReportScopeDescription}" TextWrapping="Wrap" />
-                                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                    <Button Style="{StaticResource QuietButton}" Content="当前报告" Command="{Binding ShowActiveReportsCommand}" />
-                                    <Button Margin="8,0,0,0" Style="{StaticResource QuietButton}" Content="归档报告" Command="{Binding ShowArchivedReportsCommand}" />
-                                </StackPanel>
-                            </StackPanel>
-                            <ListBox Grid.Row="2" ItemsSource="{Binding RecentReports}" SelectedItem="{Binding SelectedReport, Mode=TwoWay}" BorderThickness="0" Background="Transparent" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <TextBlock Grid.Row="2" Margin="0,6,0,14" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="{Binding ReportScopeDescription}" TextWrapping="Wrap" />
+                            <ListBox Grid.Row="3" ItemsSource="{Binding RecentReports}" SelectedItem="{Binding SelectedReport, Mode=TwoWay}" BorderThickness="0" Background="Transparent" ScrollViewer.VerticalScrollBarVisibility="Auto">
                                 <ListBox.InputBindings><KeyBinding Key="Delete" Command="{Binding DeleteReportCommand}" /></ListBox.InputBindings>
                                 <ListBox.ContextMenu>
                                     <ContextMenu DataContext="{Binding PlacementTarget.DataContext, RelativeSource={RelativeSource Self}}">
@@ -878,13 +895,41 @@
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
-                        <TextBlock FontSize="18" FontWeight="SemiBold" Text="{Binding PatchDialogTitle}" />
+                        <TextBlock Margin="0,0,88,0" VerticalAlignment="Top" FontSize="18" FontWeight="SemiBold" Text="{Binding PatchDialogTitle}" />
+                        <Border Grid.Row="0"
+                                Width="72"
+                                Height="72"
+                                Margin="0,-8,-8,0"
+                                HorizontalAlignment="Right"
+                                VerticalAlignment="Top"
+                                Background="Transparent"
+                                BorderBrush="{Binding DialogResultStampColor}"
+                                BorderThickness="3"
+                                CornerRadius="36"
+                                Opacity="0.9"
+                                Visibility="{Binding DialogResultStampVisibility}">
+                            <Grid Margin="4">
+                                <Border BorderBrush="{Binding DialogResultStampColor}" BorderThickness="1" CornerRadius="30" />
+                                <TextBlock HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           FontSize="19"
+                                           FontStyle="Italic"
+                                           FontWeight="Bold"
+                                           Foreground="{Binding DialogResultStampColor}"
+                                           RenderTransformOrigin="0.5,0.5"
+                                           Text="{Binding DialogResultStampText}">
+                                    <TextBlock.RenderTransform>
+                                        <RotateTransform Angle="-12" />
+                                    </TextBlock.RenderTransform>
+                                </TextBlock>
+                            </Grid>
+                        </Border>
                         <ScrollViewer Grid.Row="1" Margin="0,14,0,16" MaxHeight="430" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                             <TextBlock FontFamily="Cascadia Mono" FontSize="12" Foreground="{StaticResource InkBrush}" Text="{Binding PatchDialogMessage}" TextWrapping="Wrap" />
                         </ScrollViewer>
                         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
                             <Button Style="{StaticResource QuietButton}" Content="取消" Command="{Binding CancelPatchDialogCommand}" Visibility="{Binding DialogCancelVisibility}" />
-                            <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="{Binding PatchDialogConfirmText}" Command="{Binding ConfirmPatchDialogCommand}" />
+                            <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="{Binding PatchDialogConfirmText}" Command="{Binding ConfirmPatchDialogCommand}" IsDefault="{Binding IsGlobalDialogConfirmDefault}" />
                         </StackPanel>
                     </Grid>
                 </Border>
@@ -904,4 +949,5 @@
             <Border Grid.Row="3" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="28,0"><DockPanel><TextBlock DockPanel.Dock="Left" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding TaskStatusMessage}" /><TextBlock DockPanel.Dock="Right" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="Ctrl+D PATCH 中心  ·  Ctrl+T 升级任务" /></DockPanel></Border>
         </Grid>
     </Grid>
+    </Border>
 </Window>

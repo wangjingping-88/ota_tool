@@ -42,12 +42,12 @@ public sealed record OtaPollingOptions(
         TimeSpan.FromSeconds(2),
         TimeSpan.FromSeconds(5),
         TimeSpan.FromSeconds(10),
-        TimeSpan.FromSeconds(3));
+        TimeSpan.FromSeconds(8));
 }
 
 public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
 {
-    private const int MaxConsecutiveStatusTimeouts = 3;
+    private const int StatusTimeoutWarningThreshold = 3;
 
     private readonly IMqttTransport _mqtt;
     private readonly IOtaProtocolProfile _profile;
@@ -286,6 +286,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 lock (_sync)
                 {
                     if (!ReferenceEquals(_activeTask, active)) return;
+                    active.TrackStatusQuery(querySequence);
                     active.PendingStatusResponse = response;
                     active.PendingQuerySequence = querySequence;
                 }
@@ -329,18 +330,22 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 catch (TimeoutException)
                 {
                     active.ConsecutiveStatusTimeouts++;
-                    if (active.ConsecutiveStatusTimeouts >= MaxConsecutiveStatusTimeouts)
+                    if (active.ConsecutiveStatusTimeouts == StatusTimeoutWarningThreshold)
                     {
-                        Finish(active, OtaTaskState.Failed,
-                            $"cmd=8 状态查询连续 {MaxConsecutiveStatusTimeouts} 次无响应，Gateway 可能已离线或重启，已停止轮询。",
+                        Emit(active, OtaTaskState.Running,
+                            $"cmd=8 状态查询连续 {StatusTimeoutWarningThreshold} 次无响应，当前升级状态暂不可用；下游任务可能仍在运行，工具将降低频率继续查询。",
                             null,
                             null);
-                        return;
                     }
-                    Emit(active, OtaTaskState.Running,
-                        $"cmd=8 状态查询响应超时（{active.ConsecutiveStatusTimeouts}/{MaxConsecutiveStatusTimeouts}），将在 {backoff.TotalSeconds:0} 秒后重试。",
-                        null,
-                        null);
+                    else
+                    {
+                        Emit(active, OtaTaskState.Running,
+                            active.ConsecutiveStatusTimeouts < StatusTimeoutWarningThreshold
+                                ? $"cmd=8 状态查询响应超时（{active.ConsecutiveStatusTimeouts}/{StatusTimeoutWarningThreshold}），将在 {backoff.TotalSeconds:0} 秒后重试。"
+                                : $"cmd=8 状态查询仍无响应（已连续 {active.ConsecutiveStatusTimeouts} 次），将在 {backoff.TotalSeconds:0} 秒后继续查询。",
+                            null,
+                            null);
+                    }
                     await Task.Delay(backoff, active.Cancellation.Token);
                     backoff = TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30));
                 }
@@ -387,21 +392,26 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
 
         if (OtaMessageCodec.TryParseGatewayStatus(json, out var status) && status is not null)
         {
-            if (status.TaskSequence != active.TaskSequence
-                || status.QuerySequence != active.PendingQuerySequence)
+            TaskCompletionSource<GatewayOtaStatus>? pendingResponse;
+            lock (_sync)
             {
-                return;
+                if (!ReferenceEquals(_activeTask, active)
+                    || status.TaskSequence != active.TaskSequence
+                    || !active.IsTrackedStatusQuery(status.QuerySequence)
+                    || (active.SessionId != 0 && status.SessionId != active.SessionId))
+                {
+                    return;
+                }
+                active.AcceptStatusQuery(status.QuerySequence);
+                if (status.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
+                {
+                    active.SessionId = status.SessionId;
+                    active.ConsecutiveStatusTimeouts = 0;
+                }
+                active.LastStage = status.Stage;
+                pendingResponse = active.PendingStatusResponse;
             }
-            if (active.SessionId != 0 && status.SessionId != active.SessionId)
-            {
-                return;
-            }
-            if (status.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
-            {
-                active.SessionId = status.SessionId;
-            }
-            active.LastStage = status.Stage;
-            active.PendingStatusResponse?.TrySetResult(status);
+            pendingResponse?.TrySetResult(status);
             if (!status.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
             {
                 return;
@@ -503,8 +513,33 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         public int ConsecutiveStatusTimeouts { get; set; }
         public Task? PollingTask { get; set; }
         public Task? TimeoutTask { get; set; }
+        private Queue<int> TrackedStatusQueries { get; } = new();
+        private HashSet<int> TrackedStatusQuerySet { get; } = [];
+        private int LastAcceptedStatusQuery { get; set; }
         private TaskCompletionSource<bool>? ResumeSignal { get; set; }
         public bool PollingPaused { get; private set; }
+
+        public void TrackStatusQuery(int querySequence)
+        {
+            TrackedStatusQueries.Enqueue(querySequence);
+            TrackedStatusQuerySet.Add(querySequence);
+            while (TrackedStatusQueries.Count > 16)
+            {
+                TrackedStatusQuerySet.Remove(TrackedStatusQueries.Dequeue());
+            }
+        }
+
+        public bool IsTrackedStatusQuery(int querySequence)
+            => querySequence > LastAcceptedStatusQuery && TrackedStatusQuerySet.Contains(querySequence);
+
+        public void AcceptStatusQuery(int querySequence)
+        {
+            LastAcceptedStatusQuery = querySequence;
+            while (TrackedStatusQueries.TryPeek(out var trackedSequence) && trackedSequence <= querySequence)
+            {
+                TrackedStatusQuerySet.Remove(TrackedStatusQueries.Dequeue());
+            }
+        }
 
         public void PausePolling()
         {
