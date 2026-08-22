@@ -122,6 +122,18 @@ static void VerifyPatchCenterWorkflow()
         && xaml.Contains("Text=\"{Binding PublishState}\"", StringComparison.Ordinal),
         "Patch details must show all upgrade files while restore selection excludes full images.");
     Assert(
+        xaml.Contains("IsChecked=\"{Binding IsSelectedForPublish, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
+        && xaml.Contains("取消勾选不会删除源文件", StringComparison.Ordinal)
+        && viewModel.Contains(".Where(item => item.IsSelectedForPublish)", StringComparison.Ordinal)
+        && viewModel.Contains("patch.IsSelectedForPublish = false;", StringComparison.Ordinal)
+        && viewModel.Contains("public sealed class PatchSelection : ObservableObject", StringComparison.Ordinal),
+        "Patch publication must use an independently mutable per-file mark and clear successful marks without deleting source files.");
+    Assert(
+        System.Text.RegularExpressions.Regex.Matches(xaml, "VerticalScrollBarVisibility=\"Visible\"").Count >= 3
+        && xaml.Contains("Margin=\"0,7,0,12\" MaxHeight=\"240\"", StringComparison.Ordinal)
+        && xaml.Contains("Padding=\"0,0,12,8\"", StringComparison.Ordinal),
+        "Patch columns must reserve scrollbar gutters and keep the final catalog item fully visible.");
+    Assert(
         xaml.Contains("Content=\"Patch 制作\"", StringComparison.Ordinal)
         && xaml.Contains("Command=\"{Binding GeneratePatchCommand}\"", StringComparison.Ordinal)
         && xaml.Contains("IsEnabled=\"{Binding CanGeneratePatch}\"", StringComparison.Ordinal)
@@ -203,6 +215,8 @@ static void VerifyStatusPanelLayout()
     var patchPage = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "PatchPage.xaml"));
     var viewModel = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindowViewModel.cs"));
     var codeBehind = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml.cs"));
+    var appCodeBehind = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "App.xaml.cs"));
+    var appDialog = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "AppMessageDialog.xaml"));
     Assert(!xaml.Contains("Opacity=\"0\"", StringComparison.Ordinal)
         && codeBehind.Contains("await viewModel.Initialization;", StringComparison.Ordinal)
         && !codeBehind.Contains("Opacity = 1;", StringComparison.Ordinal)
@@ -226,9 +240,25 @@ static void VerifyStatusPanelLayout()
         "右侧状态区域应统一命名为升级状态机。");
     Assert(xaml.Contains("Text=\"正向升级 Patch\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"反向升级 Patch\"", StringComparison.Ordinal)
-        && xaml.Contains("Content=\"启动单次升级\"", StringComparison.Ordinal)
+        && xaml.Contains("Content=\"正向升级\"", StringComparison.Ordinal)
+        && xaml.Contains("Command=\"{Binding StartForwardTaskCommand}\"", StringComparison.Ordinal)
+        && xaml.Contains("IsEnabled=\"{Binding CanStartForwardUpgrade}\"", StringComparison.Ordinal)
+        && xaml.Contains("Content=\"反向升级\"", StringComparison.Ordinal)
+        && xaml.Contains("Command=\"{Binding StartReverseTaskCommand}\"", StringComparison.Ordinal)
+        && xaml.Contains("IsEnabled=\"{Binding CanStartReverseUpgrade}\"", StringComparison.Ordinal)
+        && !xaml.Contains("Content=\"启动单次升级\"", StringComparison.Ordinal)
         && xaml.Contains("Content=\"启动循环升级\"", StringComparison.Ordinal),
-        "单次和循环升级配置应合并到同一任务区域。");
+        "单次升级应拆分为正向和反向入口，并与循环升级位于同一任务区域。");
+    Assert(viewModel.Contains("StartForwardTaskCommand = new AsyncRelayCommand(() => StartSingleTaskAsync(reverse: false));", StringComparison.Ordinal)
+        && viewModel.Contains("StartReverseTaskCommand = new AsyncRelayCommand(() => StartSingleTaskAsync(reverse: true));", StringComparison.Ordinal)
+        && viewModel.Contains("IsPatchConfiguredForDirection(SelectedUpgradePatch, reverse: false)", StringComparison.Ordinal)
+        && viewModel.Contains("IsPatchConfiguredForDirection(SelectedReverseUpgradePatch, reverse: true)", StringComparison.Ordinal)
+        && viewModel.Contains("IsSelectedTargetAtDirectionStartVersion(reverse: false)", StringComparison.Ordinal)
+        && viewModel.Contains("IsSelectedTargetAtDirectionStartVersion(reverse: true)", StringComparison.Ordinal)
+        && viewModel.Contains("OldVersion = reverse ? NewVersion : OldVersion", StringComparison.Ordinal)
+        && viewModel.Contains("NewVersion = reverse ? OldVersion : NewVersion", StringComparison.Ordinal)
+        && viewModel.Contains("ApplySuccessfulUpgradeVersion(completedTask);", StringComparison.Ordinal),
+        "正反向按钮只能在 Patch 方向和目标底版本匹配时启用，成功后应更新本次发现版本以便直接执行反向升级。");
     Assert(xaml.Contains("<Grid Margin=\"0,20,0,0\">", StringComparison.Ordinal)
         && xaml.Contains("<ColumnDefinition Width=\"1.25*\" />", StringComparison.Ordinal)
         && xaml.Contains("Text=\"升级类型\"", StringComparison.Ordinal)
@@ -278,8 +308,11 @@ static void VerifyStatusPanelLayout()
         "升级配置和升级状态机应使用等宽双栏布局。");
     Assert(taskLayout.Contains("IsEnabled=\"{Binding CanStartCycleUpgrade}\"", StringComparison.Ordinal),
         "循环升级按钮应根据反向 Patch 前置条件更新可用状态。");
-    Assert(taskLayout.Contains("Text=\"循环升级间隔\"", StringComparison.Ordinal)
+    Assert(taskLayout.Contains("Text=\"循环升级设置\"", StringComparison.Ordinal)
         && taskLayout.Contains("ItemsSource=\"{Binding CycleIntervalModes}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"循环次数\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding CycleRounds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
+        && System.Text.RegularExpressions.Regex.Matches(taskLayout, "<Grid Margin=\"0,9,0,0\">").Count >= 2
         && taskLayout.Contains("Text=\"{Binding CycleFixedIntervalSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding CycleRandomMinimumSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding CycleRandomMaximumSeconds, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
@@ -296,8 +329,9 @@ static void VerifyStatusPanelLayout()
         && System.Text.RegularExpressions.Regex.Matches(taskLayout, "IsEnabled=\"\\{Binding CanRefreshDiscovery\\}\"").Count == 2
         && taskLayout.Contains("MinWidth=\"112\"", StringComparison.Ordinal)
         && taskLayout.Contains("Content=\"{Binding ExtenderSelectionToggleText}\" Command=\"{Binding ToggleExtenderSelectionCommand}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Visibility=\"{Binding ExtenderTargetListVisibility}\"", StringComparison.Ordinal)
         && !taskLayout.Contains("Text=\"在线 Extender\"", StringComparison.Ordinal),
-        "Extender 与 Node 应使用独立且宽度稳定的刷新按钮，Extender 区域应保留全选/取消切换按钮。");
+        "Gateway、Extender 与 Node 应使用宽度稳定的手动刷新入口，Gateway 查询时隐藏 Extender 选择控件。");
     Assert(viewModel.Contains("public bool CanRefreshDiscovery => IsEcoLink && IsMqttConnected && !IsDiscoveringDevices && !IsUpgradeInProgress;", StringComparison.Ordinal)
         && viewModel.Contains("OnPropertyChanged(nameof(CanRefreshDiscovery));", StringComparison.Ordinal)
         && viewModel.Contains("升级过程中不能刷新 Extender。", StringComparison.Ordinal)
@@ -338,7 +372,16 @@ static void VerifyStatusPanelLayout()
     Assert(viewModel.Contains("public bool IsRefreshingExtenders", StringComparison.Ordinal)
         && viewModel.Contains("public bool IsRefreshingNodes", StringComparison.Ordinal)
         && viewModel.Contains("SelectEligibleNodesAfterRefresh();", StringComparison.Ordinal),
-        "Extender/Node 刷新状态必须相互独立，Node 刷新后应自动选择所有符合 Patch 条件的节点。");
+        "Extender/Node 刷新状态必须相互独立，Node 刷新后应自动选择当前类型的节点。");
+    Assert(viewModel.Contains("group.SetFilter(NodeIdSearch, filterType);", StringComparison.Ordinal)
+        && viewModel.Contains("query = query.Where(node => node.NodeType == filterType.Value);", StringComparison.Ordinal)
+        && viewModel.Contains("node.ApplyEligibility(null, null);", StringComparison.Ordinal)
+        && !viewModel.Contains("group.SetFilter(NodeIdSearch, filterType, requiredPatchType", StringComparison.Ordinal),
+        "Node 列表和勾选应只按用户选择类型处理，不得被 Patch 类型或版本禁用。");
+    Assert(viewModel.Contains("ClearDiscoveredExtenderResults();", StringComparison.Ordinal)
+        && viewModel.Contains("ClearDiscoveredNodeResults();", StringComparison.Ordinal)
+        && viewModel.Contains("results.Where(result => result.IsSuccess)", StringComparison.Ordinal),
+        "设备刷新开始时应清理旧结果，失败结果不得继续显示为有效 Extender 或 Node。");
     var mqttNavigation = viewModel.IndexOf("AddNavigation(\"01\", \"MQTT 配置\")", StringComparison.Ordinal);
     var patchNavigation = viewModel.IndexOf("AddNavigation(\"02\", \"PATCH 中心\")", StringComparison.Ordinal);
     var taskNavigation = viewModel.IndexOf("AddNavigation(\"03\", \"升级任务\")", StringComparison.Ordinal);
@@ -378,9 +421,14 @@ static void VerifyStatusPanelLayout()
         "TRANSFER 阶段应显示为分片传输。");
     Assert(viewModel.Contains("\"TRANSFER\" => \"数据传输\"", StringComparison.Ordinal)
         && viewModel.Contains("\"REPAIR\" => \"Node 下游升级\"", StringComparison.Ordinal)
+        && viewModel.Contains("\"REPAIR\" when deviceType == DeviceType.Async => \"异步拓展器升级\"", StringComparison.Ordinal)
+        && viewModel.Contains("\"REPAIR\" when deviceType == DeviceType.Sync => \"同步拓展器升级\"", StringComparison.Ordinal)
         && viewModel.Contains("\"REQUEST_ACCEPTED\" => \"MQTT to 网关\"", StringComparison.Ordinal)
         && viewModel.Contains("\"PATCH_DOWNLOAD\" => \"HTTP to 网关\"", StringComparison.Ordinal)
+        && viewModel.Contains("\"REPAIR\" when deviceType == DeviceType.Async => \"Sync to Async\"", StringComparison.Ordinal)
         && viewModel.Contains("\"REPAIR\" => \"Async to Node\"", StringComparison.Ordinal)
+        && viewModel.Contains("deviceType == DeviceType.Node &&", StringComparison.Ordinal)
+        && viewModel.Contains("OtaStagePresentation.Name(stage.Stage, report.Task.DeviceType)", StringComparison.Ordinal)
         && viewModel.Contains("Node 准备超时（{subtask.PreparedCount}/{subtask.TargetCount}）", StringComparison.Ordinal)
         && viewModel.Contains("public string DisplayReason => OtaStatusDisplay.Reason(Reason);", StringComparison.Ordinal)
         && viewModel.Contains("public static string Stage(string code) => StageDescription(code);", StringComparison.Ordinal)
@@ -410,6 +458,23 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("_patchDialogAction is PatchDialogAction.Delete or PatchDialogAction.Publish;", StringComparison.Ordinal)
         && viewModel.Contains("_patchDialogAction is not (PatchDialogAction.Delete or PatchDialogAction.Publish);", StringComparison.Ordinal),
         "所有应用内弹框都应支持按 Enter 确认，并且只能激活当前可见弹框的默认按钮。");
+    Assert(!viewModel.Contains("MessageBox.Show", StringComparison.Ordinal)
+        && !codeBehind.Contains("MessageBox.Show", StringComparison.Ordinal)
+        && !appCodeBehind.Contains("MessageBox.Show", StringComparison.Ordinal)
+        && appDialog.Contains("IsDefault=\"True\"", StringComparison.Ordinal)
+        && appDialog.Contains("Background=\"#276EF1\"", StringComparison.Ordinal)
+        && xaml.Contains("ItemsSource=\"{Binding GatewayIdHistory}\"", StringComparison.Ordinal)
+        && xaml.Contains("IsEditable=\"True\"", StringComparison.Ordinal)
+        && viewModel.Contains("await _mqtt.UnsubscribeAsync(previousTopic);", StringComparison.Ordinal)
+        && viewModel.Contains("await ReplaceGatewaySubscriptionAsync(GatewaySubscriptionTopic);", StringComparison.Ordinal)
+        && viewModel.Contains("MqttMessages.Clear();", StringComparison.Ordinal)
+        && viewModel.Contains("if (existing is not null)", StringComparison.Ordinal)
+        && !viewModel.Contains("GatewayIdHistory.Remove(existing);", StringComparison.Ordinal),
+        "应用提示应使用统一样式；Gateway ID 历史选择不得被集合重排清空，切换主题时应取消旧订阅并清空收发记录。");
+    Assert(viewModel.Contains("return IsHttpServiceRunning ? GetLocalPatchUrl(patchPath) : GetPublicPatchUrl(patchPath);", StringComparison.Ordinal)
+        && !viewModel.Contains("HttpUsesLocalServer && !_httpRangeServer.IsRunning", StringComparison.Ordinal)
+        && viewModel.Contains("本地 HTTP Range 服务未运行，且未配置可用的公网 HTTP 地址", StringComparison.Ordinal),
+        "Patch 下载地址应在本地服务运行时优先使用本地，否则自动回退公网地址。");
     Assert(xaml.Contains("Text=\"{Binding LogAnalysisQualityScore}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding LogAnalysisQualityGrade}\"", StringComparison.Ordinal)
         && xaml.Contains("ItemsSource=\"{Binding LogAnalysisResultLines, Mode=OneWay}\"", StringComparison.Ordinal)
@@ -440,11 +505,28 @@ static void VerifyStatusPanelLayout()
     Assert(viewModel.Contains("if (SetProperty(ref _forwardPatchName, value)) ScheduleSettingsAutoSave();", StringComparison.Ordinal)
         && viewModel.Contains("if (SetProperty(ref _reversePatchName, value)) ScheduleSettingsAutoSave();", StringComparison.Ordinal),
         "正反向 Patch 名称修改后应自动持久化。");
-    Assert(viewModel.Contains("DeviceType? OtaDeviceType = null", StringComparison.Ordinal)
+    Assert(viewModel.Contains("public DeviceType? OtaDeviceType { get; }", StringComparison.Ordinal)
         && viewModel.Contains("item.OtaDeviceType == selectedDeviceType", StringComparison.Ordinal)
         && viewModel.Contains("ApplyManifestDetails(manifest, updateTaskType: false);", StringComparison.Ordinal)
         && viewModel.Contains("当前没有适用于“{SelectedTaskType}”的 Patch", StringComparison.Ordinal),
         "升级类型应保留用户选择，只展示设备类型匹配的 Patch，并在没有匹配项时明确提示。");
+    Assert(viewModel.Contains("MatchesPatchDirection(previousForwardPatch, reverse: false)", StringComparison.Ordinal)
+        && viewModel.Contains("MatchesPatchDirection(item, reverse: true)", StringComparison.Ordinal)
+        && viewModel.Contains("public byte? OldVersion { get; }", StringComparison.Ordinal)
+        && viewModel.Contains("public byte? NewVersion { get; }", StringComparison.Ordinal),
+        "正向和反向 Patch 的默认选择必须按照 Manifest 版本方向匹配，不能依赖文件名或集合顺序。");
+    Assert(viewModel.Contains("var expectedType = (byte)FirmwareDeviceType.ExtenderS;", StringComparison.Ordinal)
+        && !viewModel.Contains("deviceType == DeviceType.Sync ? (byte)2 : (byte)1", StringComparison.Ordinal)
+        && viewModel.Contains("DiscoverAsyncVersionsAsync", StringComparison.Ordinal)
+        && viewModel.Contains("item.GetSoftwareVersion(deviceType) != manifest.OldVersion", StringComparison.Ordinal)
+        && viewModel.Contains("task.DeviceType is DeviceType.Sync or DeviceType.Async", StringComparison.Ordinal),
+        "同步和异步升级必须共用 ExtenderS 承载板，但分别查询、校验并更新各自 MCU 的软件版本。");
+    Assert(viewModel.Contains("SelectedTaskType == GatewayTaskType", StringComparison.Ordinal)
+        && viewModel.Contains("QueryGatewayBasicInfoAsync(gatewayId.ToString())", StringComparison.Ordinal)
+        && viewModel.Contains("ValidateGatewayVersionBeforeUpgrade(task)", StringComparison.Ordinal)
+        && viewModel.Contains("请先点击“刷新 Gateway”查询当前软件版本。", StringComparison.Ordinal)
+        && !viewModel.Contains("ValidateGatewayVersionBeforeUpgradeAsync", StringComparison.Ordinal),
+        "Gateway 应与其他设备一样手动刷新版本，启动时只校验缓存结果，不能自动查询。");
 }
 
 static void VerifyUpdateWindowBindings()
@@ -722,6 +804,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         SftpPrivateKeyPath = "D:\\keys\\ota", LogDirectory = "D:\\logs",
         ForwardPatchName = "node-v1-to-v2.patch", ReversePatchName = "node-v2-to-v1.patch",
         CycleIntervalMode = "随机间隔", CycleRandomMinimumSeconds = 3, CycleRandomMaximumSeconds = 9,
+        GatewayIdHistory = ["704027", "704065"],
         CustomNodeTypes = [new NodeTypeDefinitionSettings(9, "烟感")],
         DiscoveredExtenders = [new DiscoveredExtenderSettings(1821385, "0x8000011c", 2, 1, true)],
         DiscoveredNodeGroups =
@@ -740,6 +823,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
                 SelectedTaskType = "节点升级",
                 MqttClientUsesLocalBroker = false,
                 GatewayId = "eco-gateway",
+                GatewayIdHistory = ["704027", "704065"],
                 NodeType = 9,
             },
             ["Traditional"] = new()
@@ -747,6 +831,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
                 SelectedPageName = "PATCH 中心",
                 SelectedTaskType = "拓展器-同步升级",
                 GatewayId = "traditional-gateway",
+                GatewayIdHistory = ["800001"],
             },
         },
     };
@@ -762,6 +847,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         && actual.CycleIntervalMode == expected.CycleIntervalMode
         && actual.CycleRandomMinimumSeconds == expected.CycleRandomMinimumSeconds
         && actual.CycleRandomMaximumSeconds == expected.CycleRandomMaximumSeconds
+        && actual.GatewayIdHistory.SequenceEqual(expected.GatewayIdHistory)
         && actual.CustomNodeTypes.Count == 1 && actual.CustomNodeTypes[0] == new NodeTypeDefinitionSettings(9, "烟感")
         && actual.DiscoveredExtenders.Count == 1 && actual.DiscoveredExtenders[0].ExtenderId == 1821385
         && actual.DiscoveredExtenders[0].IsSelected
@@ -774,6 +860,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         && actual.ModeWorkspaces["EcoLink"].SelectedPageName == "升级任务"
         && actual.ModeWorkspaces["EcoLink"].SelectedTaskType == "节点升级"
         && actual.ModeWorkspaces["EcoLink"].NodeType == 9
+        && actual.ModeWorkspaces["EcoLink"].GatewayIdHistory.SequenceEqual(["704027", "704065"])
         && actual.ModeWorkspaces["Traditional"].GatewayId == "traditional-gateway",
         "JSON 设置或设备发现结果持久化错误。");
     Assert(synchronous.ActiveMode == expected.ActiveMode
@@ -782,6 +869,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
     var migrated = ModeWorkspaceSettings.FromLegacy(expected);
     Assert(migrated.MqttHost == expected.MqttHost
         && migrated.SelectedTaskType == expected.SelectedTaskType
+        && migrated.GatewayIdHistory.SequenceEqual(expected.GatewayIdHistory)
         && migrated.CustomNodeTypes.Count == 1
         && migrated.DiscoveredNodeGroups.Count == 1,
         "旧版顶层设置迁移到模式工作区失败。");
@@ -958,10 +1046,94 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
     failedMqtt.Inject("ucchip/up/sgw/704027/1",
         $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{failedStatusSequence},\"task_seq\":1,\"session_id\":9,\"result\":\"OK\",\"status\":\"FAILED\",\"stage\":\"REPAIR\"}}}}");
     await WaitUntilAsync(() => !failedRunner.HasActiveTask, TimeSpan.FromSeconds(1));
+    await WaitUntilAsync(() => failedMqtt.Published.Count >= 3, TimeSpan.FromSeconds(1));
     var publishedAfterFailure = failedMqtt.Published.Count;
     await Task.Delay(80);
     Assert(failedUpdateObservedInactive, "失败终态通知界面前应先释放活动任务。");
     Assert(failedMqtt.Published.Count == publishedAfterFailure, "失败终态后仍继续发送状态查询。");
+    Assert(failedMqtt.Published[^1].GetPayloadAsUtf8().Contains("\"active\":0", StringComparison.Ordinal),
+        "失败终态后应向 Gateway 发送 active=0 取消请求。");
+
+    await using var subtaskFailedMqtt = new FakeMqttTransport();
+    await using var subtaskFailedRunner = new OtaTaskRunner(
+        subtaskFailedMqtt,
+        new EcoLinkProtocolProfile(),
+        new InMemoryTaskSequenceStore(),
+        pollingOptions: new OtaPollingOptions(
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromSeconds(1)));
+    OtaExecutionUpdate? subtaskFailure = null;
+    subtaskFailedRunner.Updated += (_, update) =>
+    {
+        if (update.State == OtaTaskState.Failed) subtaskFailure = update;
+    };
+    Assert((await subtaskFailedRunner.StartAsync(ecoTask)).State == OtaTaskState.Running,
+        "子任务失败测试任务未启动。");
+    await WaitUntilAsync(() => subtaskFailedMqtt.Published.Count >= 2, TimeSpan.FromSeconds(1));
+    var subtaskStatusSequence = int.Parse(subtaskFailedMqtt.Published[1].Topic.Split('/')[^1]);
+    subtaskFailedMqtt.Inject("ucchip/up/sgw/704027/1",
+        $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{subtaskStatusSequence},\"task_seq\":1,\"session_id\":10,\"result\":\"OK\",\"status\":\"RUNNING\",\"stage\":\"REPAIR\",\"subtasks\":[{{\"extender_id\":1821373,\"stage\":\"REPAIR\",\"result\":\"FAILED\",\"reason\":\"DOWNSTREAM_FAILED\"}}]}}}}");
+    await WaitUntilAsync(() => !subtaskFailedRunner.HasActiveTask && subtaskFailedMqtt.Published.Count >= 3, TimeSpan.FromSeconds(1));
+    Assert(subtaskFailure?.Message.Contains("已停止状态轮询", StringComparison.Ordinal) == true
+        && subtaskFailedMqtt.Published[^1].GetPayloadAsUtf8().Contains("\"active\":0", StringComparison.Ordinal),
+        "顶层仍为 RUNNING 时，明确的子任务失败也应停止轮询并取消 Gateway 任务。");
+
+    await using var partialFailedMqtt = new FakeMqttTransport();
+    await using var partialFailedRunner = new OtaTaskRunner(
+        partialFailedMqtt,
+        new EcoLinkProtocolProfile(),
+        new InMemoryTaskSequenceStore(),
+        pollingOptions: new OtaPollingOptions(
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromSeconds(1)));
+    var partialFailureStillRunning = false;
+    OtaExecutionUpdate? aggregateFailure = null;
+    partialFailedRunner.Updated += (_, update) =>
+    {
+        if (update.State == OtaTaskState.Running &&
+            update.Message.Contains("等待全部 Extender 完成", StringComparison.Ordinal))
+        {
+            partialFailureStillRunning = true;
+        }
+        if (update.State == OtaTaskState.Failed) aggregateFailure = update;
+    };
+    Assert((await partialFailedRunner.StartAsync(ecoTask)).State == OtaTaskState.Running,
+        "多 Extender 部分失败测试任务未启动。");
+    await WaitUntilAsync(() => partialFailedMqtt.Published.Count >= 2, TimeSpan.FromSeconds(1));
+    var partialStatusSequence = int.Parse(partialFailedMqtt.Published[1].Topic.Split('/')[^1]);
+    partialFailedMqtt.Inject("ucchip/up/sgw/704027/1",
+        $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{partialStatusSequence},\"task_seq\":1,\"session_id\":11,\"result\":\"OK\",\"status\":\"RUNNING\",\"stage\":\"PROGRAM\",\"subtasks\":[{{\"extender_id\":1821373,\"stage\":\"PROGRAM\",\"result\":\"FAILED\",\"reason\":\"FLASH_WRITE_FAILED\"}},{{\"extender_id\":1821362,\"stage\":\"PROGRAM\",\"result\":\"RUNNING\",\"reason\":\"\"}}]}}}}");
+    await WaitUntilAsync(() => partialFailureStillRunning && partialFailedMqtt.Published.Count >= 3, TimeSpan.FromSeconds(1));
+    Assert(partialFailedRunner.HasActiveTask && aggregateFailure is null,
+        "一个 Extender 失败但另一个仍运行时，不应提前结束整个升级任务。");
+    var aggregateStatusSequence = int.Parse(partialFailedMqtt.Published[^1].Topic.Split('/')[^1]);
+    partialFailedMqtt.Inject("ucchip/up/sgw/704027/1",
+        $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{aggregateStatusSequence},\"task_seq\":1,\"session_id\":11,\"result\":\"OK\",\"status\":\"RUNNING\",\"stage\":\"FINISHED\",\"subtasks\":[{{\"extender_id\":1821373,\"stage\":\"PROGRAM\",\"result\":\"FAILED\",\"reason\":\"FLASH_WRITE_FAILED\"}},{{\"extender_id\":1821362,\"stage\":\"FINISHED\",\"result\":\"SUCCESS\",\"reason\":\"\"}}]}}}}");
+    await WaitUntilAsync(() => !partialFailedRunner.HasActiveTask && aggregateFailure is not null, TimeSpan.FromSeconds(1));
+    Assert(aggregateFailure?.Message.Contains("Extender 1821373 子任务失败", StringComparison.Ordinal) == true,
+        "所有 Extender 进入终态后，应汇总失败 Extender 并结束任务。");
+
+    await using var finalFailedMqtt = new FakeMqttTransport();
+    await using var finalFailedRunner = new OtaTaskRunner(
+        finalFailedMqtt,
+        new EcoLinkProtocolProfile(),
+        new InMemoryTaskSequenceStore(),
+        pollingOptions: new OtaPollingOptions(
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1)));
+    Assert((await finalFailedRunner.StartAsync(ecoTask)).State == OtaTaskState.Running,
+        "最终失败上报测试任务未启动。");
+    finalFailedMqtt.Inject("ucchip/up/sgw/704027/1",
+        "{\"cmd\":6,\"seq\":1,\"old_ver\":1,\"new_ver\":2,\"dev_type\":\"gateway\",\"prompt\":\"upgrade failed\"}");
+    await WaitUntilAsync(() => !finalFailedRunner.HasActiveTask && finalFailedMqtt.Published.Count >= 2, TimeSpan.FromSeconds(1));
+    Assert(finalFailedMqtt.Published[^1].GetPayloadAsUtf8().Contains("\"active\":0", StringComparison.Ordinal),
+        "EcoLink 明确失败终态上报后不应继续轮询，应立即发送 Gateway 取消请求。");
 
     await using var delayedMqtt = new FakeMqttTransport();
     await using var delayedRunner = new OtaTaskRunner(
@@ -1077,6 +1249,19 @@ static async Task VerifyDeviceDiscoveryAsync()
             out var legacyExtenders) && legacyExtenders.Count == 1 &&
             legacyExtenders[0].DeviceType == 0 && legacyExtenders[0].SoftwareVersion == 0,
         "缺少智能化字段的鉴权列表应继续用于发现，类型和版本按未知处理。");
+    Assert(OtaMessageCodec.TryParseGatewayBasicInfo(
+            "{\"cmd\":3,\"src\":704027,\"base\":{\"dev_id\":704027,\"ota_software_version\":2,\"sw_ver\":\"v1.3.1\"}}",
+            out var gatewayInfo) && gatewayInfo is not null &&
+            gatewayInfo.GatewayId == 704027 && gatewayInfo.SoftwareVersion == 2,
+        "Gateway 基础信息中的 OTA 软件版本解析错误。");
+    Assert(OtaMessageCodec.TryParseGatewayBasicInfo(
+            "{\"cmd\":3,\"base\":{\"dev_id\":704027,\"sw_ver\":\"v2\"}}",
+            out gatewayInfo) && gatewayInfo?.SoftwareVersion == 2,
+        "Gateway 基础信息应兼容无小数点的 vN 版本字符串。");
+    Assert(!OtaMessageCodec.TryParseGatewayBasicInfo(
+            "{\"cmd\":3,\"base\":{\"dev_id\":704027,\"sw_ver\":\"v1.3.1\"}}",
+            out _),
+        "产品语义版本不能被误当成 OTA 单字节软件版本。");
     Assert(!OtaMessageCodec.TryParseGatewayAuthListPage(
             "{\"cmd\":\"legacy\",\"auth_num\":0}",
             out _),
@@ -1089,6 +1274,20 @@ static async Task VerifyDeviceDiscoveryAsync()
             "{\"cmd\":11,\"node_list\":\"unsupported\"}",
             out _),
         "旧 Gateway 的非对象 Node 载荷不应抛出异常。");
+    Assert(OtaMessageCodec.TryParseNodeListPage(
+            "{\"cmd\":11,\"node_list\":{\"query_seq\":7,\"extender_id\":101,\"page_index\":0,\"page_count\":1,\"total_count\":1,\"item_count\":1,\"result\":\"OK\",\"reason\":\"NONE\",\"nodes\":[{\"node_id\":53936,\"node_type\":5,\"software_version\":0,\"rssi\":0}]}}",
+            out var unknownVersionPage) && unknownVersionPage is not null &&
+            unknownVersionPage.Nodes.Count == 1 && unknownVersionPage.Nodes[0].SoftwareVersion == 0,
+        "Node 列表中的未知软件版本 0 应保留并继续完成列表解析。");
+    Assert(OtaMessageCodec.TryParseAsyncVersionResponse(
+            "{\"cmd\":13,\"async_version\":{\"query_seq\":7,\"extender_id\":101,\"result\":\"OK\",\"reason\":\"NONE\",\"software_version\":2}}",
+            out var asyncVersion) && asyncVersion is not null &&
+            asyncVersion.ExtenderId == 101 && asyncVersion.SoftwareVersion == 2,
+        "异步板版本响应解析错误。");
+    Assert(!OtaMessageCodec.TryParseAsyncVersionResponse(
+            "{\"cmd\":13,\"async_version\":{\"query_seq\":7,\"extender_id\":101,\"result\":\"OK\",\"software_version\":0}}",
+            out _),
+        "异步板成功响应必须携带 1～254 的有效软件版本。");
     await using var mqtt = new FakeMqttTransport();
     var pageZeroRequests = new ConcurrentDictionary<uint, int>();
     mqtt.OnPublished = message =>
@@ -1101,6 +1300,21 @@ static async Task VerifyDeviceDiscoveryAsync()
                 "{\"cmd\":3,\"auth_num\":1,\"101\":{\"detail\":\"online-a\",\"device_type\":2,\"software_version\":1}}");
             mqtt.Inject("ucchip/up/sgw/704027/auth-list",
                 "{\"cmd\":3,\"auth_num\":9,\"101\":{\"detail\":\"online-a-duplicate\",\"device_type\":2,\"software_version\":1},\"202\":{\"detail\":\"online-b\",\"device_type\":2,\"software_version\":1},\"303\":{\"detail\":\"online-empty\",\"device_type\":2,\"software_version\":1},\"404\":{\"detail\":\"online-full\",\"device_type\":2,\"software_version\":1},\"505\":{\"detail\":\"online-one\",\"device_type\":2,\"software_version\":1},\"606\":{\"detail\":\"online-page\",\"device_type\":2,\"software_version\":1},\"707\":{\"detail\":\"online-retry\",\"device_type\":2,\"software_version\":1},\"808\":{\"detail\":\"online-missing\",\"device_type\":2,\"software_version\":1},\"909\":{\"detail\":\"online-duplicate-node\",\"device_type\":2,\"software_version\":1}}");
+            return Task.CompletedTask;
+        }
+        if (payload.Contains("\"query\":\"base\"", StringComparison.Ordinal))
+        {
+            mqtt.Inject($"ucchip/up/sgw/704027/{sequence}",
+                "{\"cmd\":3,\"ver\":\"v2.0\",\"src\":704027,\"base\":{\"dev_id\":704027,\"ota_software_version\":2,\"sw_ver\":\"v1.3.1\"}}");
+            return Task.CompletedTask;
+        }
+        if (OtaMessageCodec.TryParseAsyncVersionQuery(payload, out var asyncExtenderId))
+        {
+            if (asyncExtenderId != 202)
+            {
+                mqtt.Inject($"ucchip/up/sgw/704027/{sequence}",
+                    $"{{\"cmd\":13,\"async_version\":{{\"query_seq\":{sequence},\"extender_id\":{asyncExtenderId},\"result\":\"OK\",\"reason\":\"NONE\",\"software_version\":2}}}}");
+            }
             return Task.CompletedTask;
         }
         if (!OtaMessageCodec.TryParseNodeListQuery(payload, out var extenderId, out var pageIndex))
@@ -1142,7 +1356,9 @@ static async Task VerifyDeviceDiscoveryAsync()
             nodeIds = [56];
         }
         var nodes = string.Join(',', nodeIds
-            .Select(nodeId => $"{{\"node_id\":{nodeId},\"node_type\":2,\"software_version\":1,\"rssi\":-50}}"));
+            .Select(nodeId => extenderId == 505
+                ? $"{{\"node_id\":{nodeId},\"node_type\":2,\"software_version\":0,\"rssi\":0}}"
+                : $"{{\"node_id\":{nodeId},\"node_type\":2,\"software_version\":1,\"rssi\":-50}}"));
         mqtt.Inject($"ucchip/up/sgw/704027/{sequence}",
             $"{{\"cmd\":11,\"node_list\":{{\"query_seq\":{sequence},\"extender_id\":{extenderId},\"page_index\":{pageIndex},\"page_count\":{pageCount},\"total_count\":{total},\"item_count\":{count},\"result\":\"OK\",\"reason\":\"NONE\",\"nodes\":[{nodes}]}}}}");
         return Task.CompletedTask;
@@ -1153,9 +1369,17 @@ static async Task VerifyDeviceDiscoveryAsync()
         new DeviceDiscoveryOptions(
             TimeSpan.FromMilliseconds(50),
             TimeSpan.FromMilliseconds(10)));
+    var basicInfo = await discovery.QueryGatewayBasicInfoAsync("704027");
+    Assert(basicInfo.GatewayId == 704027 && basicInfo.SoftwareVersion == 2,
+        "Gateway 基础信息查询未正确关联响应或软件版本。");
     var extenders = await discovery.DiscoverExtendersAsync("704027");
     Assert(extenders.Select(item => item.ExtenderId).SequenceEqual([101U, 202U, 303U, 404U, 505U, 606U, 707U, 808U, 909U]),
         "Extender 分页聚合错误。");
+    var asyncVersions = await discovery.DiscoverAsyncVersionsAsync("704027", [101U, 202U]);
+    Assert(asyncVersions.Count == 2 &&
+           asyncVersions.Single(item => item.ExtenderId == 101).SoftwareVersion == 2 &&
+           !asyncVersions.Single(item => item.ExtenderId == 202).IsSuccess,
+        "异步板版本查询应按 Extender 并行关联响应，并隔离单板超时。");
     var results = await discovery.DiscoverNodesAsync("704027", [101U, 202U, 303U, 404U, 505U, 606U, 707U, 808U, 909U]);
     Assert(results.Count == 9 && results[0].IsSuccess && results[0].Nodes.Count == 65,
         "Node 65 项分页聚合错误。");
@@ -1165,8 +1389,8 @@ static async Task VerifyDeviceDiscoveryAsync()
         "Node 空列表分页聚合错误。");
     Assert(results[3].IsSuccess && results[3].Nodes.Count == 256,
         "Node 256 项分页聚合错误。");
-    Assert(results[4].IsSuccess && results[4].Nodes.Count == 1,
-        "Node 1 项分页聚合错误。");
+    Assert(results[4].IsSuccess && results[4].Nodes.Count == 0,
+        "版本和 RSSI 同时为 0 的失效 Node 记录不应进入可升级列表。");
     Assert(results[5].IsSuccess && results[5].Nodes.Count == 56,
         "Node 56 项分页聚合错误。");
     Assert(results[5].Nodes.Select(node => node.NodeId).SequenceEqual(Enumerable.Range(1, 56).Select(value => (ushort)value)),
@@ -1216,13 +1440,23 @@ static async Task VerifyEmbeddedBrokerAndMqttClientAsync()
     await using var subscriber = new Mqtt311Client();
     await using var publisher = new Mqtt311Client();
     var received = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
-    subscriber.MessageReceived += (_, message) => received.TrySetResult(message.GetPayloadAsUtf8());
+    var receivedCount = 0;
+    subscriber.MessageReceived += (_, message) =>
+    {
+        Interlocked.Increment(ref receivedCount);
+        received.TrySetResult(message.GetPayloadAsUtf8());
+    };
     await subscriber.ConnectAsync(new MqttClientOptions("127.0.0.1", port, "smoke-subscriber"));
     await publisher.ConnectAsync(new MqttClientOptions("127.0.0.1", port, "smoke-publisher"));
     await subscriber.SubscribeAsync("smoke/ota");
     await Task.Delay(25);
     await publisher.PublishAsync(new MqttApplicationMessage("smoke/ota", Encoding.UTF8.GetBytes("ok"), QualityOfService: 1));
     Assert(await received.Task.WaitAsync(TimeSpan.FromSeconds(3)) == "ok", "MQTT 发布/订阅失败。");
+    await subscriber.UnsubscribeAsync("smoke/ota");
+    await Task.Delay(25);
+    await publisher.PublishAsync(new MqttApplicationMessage("smoke/ota", Encoding.UTF8.GetBytes("ignored"), QualityOfService: 1));
+    await Task.Delay(100);
+    Assert(Volatile.Read(ref receivedCount) == 1, "MQTT 取消订阅后不应继续收到旧主题消息。");
 }
 
 static async Task VerifyReportsAsync(string workspace)
@@ -1465,6 +1699,8 @@ sealed class FakeMqttTransport : IMqttTransport
 
     public List<string> Subscriptions { get; } = [];
 
+    public List<string> Unsubscriptions { get; } = [];
+
     public Func<MqttApplicationMessage, Task>? OnPublished { get; set; }
 
     public event EventHandler<MqttApplicationMessage>? MessageReceived;
@@ -1484,6 +1720,12 @@ sealed class FakeMqttTransport : IMqttTransport
     public Task SubscribeAsync(string topicFilter, byte qualityOfService = 1, CancellationToken cancellationToken = default)
     {
         Subscriptions.Add(topicFilter);
+        return Task.CompletedTask;
+    }
+
+    public Task UnsubscribeAsync(string topicFilter, CancellationToken cancellationToken = default)
+    {
+        Unsubscriptions.Add(topicFilter);
         return Task.CompletedTask;
     }
 

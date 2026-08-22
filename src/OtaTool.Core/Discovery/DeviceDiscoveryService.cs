@@ -13,6 +13,14 @@ public sealed record ExtenderNodeDiscoveryResult(
     public bool IsSuccess => string.IsNullOrWhiteSpace(Error);
 }
 
+public sealed record ExtenderAsyncVersionDiscoveryResult(
+    uint ExtenderId,
+    byte? SoftwareVersion,
+    string? Error)
+{
+    public bool IsSuccess => SoftwareVersion is >= 1 and <= 254 && string.IsNullOrWhiteSpace(Error);
+}
+
 public sealed record DeviceDiscoveryOptions(
     TimeSpan ResponseTimeout,
     TimeSpan AuthListQuietPeriod,
@@ -96,6 +104,55 @@ public sealed class DeviceDiscoveryService
         }
     }
 
+    public async Task<GatewayBasicInfo> QueryGatewayBasicInfoAsync(
+        string gatewayId,
+        CancellationToken cancellationToken = default)
+    {
+        var sequence = NextSequence();
+        var completion = new TaskCompletionSource<GatewayBasicInfo>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Handler(object? _, MqttApplicationMessage message)
+        {
+            if (!MatchesGatewayUpstreamTopic(message.Topic, gatewayId) ||
+                !OtaMessageCodec.TryParseGatewayBasicInfo(
+                    message.GetPayloadAsUtf8(),
+                    out var info) ||
+                info is null ||
+                info.GatewayId.ToString(System.Globalization.CultureInfo.InvariantCulture) != gatewayId)
+            {
+                return;
+            }
+            completion.TrySetResult(info);
+        }
+
+        _mqtt.MessageReceived += Handler;
+        try
+        {
+            var request = OtaMessageCodec.CreateGatewayBasicInfoQuery(gatewayId, sequence);
+            await _mqtt.PublishAsync(
+                new MqttApplicationMessage(
+                    request.Topic,
+                    System.Text.Encoding.UTF8.GetBytes(request.JsonPayload),
+                    request.QualityOfService),
+                cancellationToken);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(_options.ResponseTimeout);
+            try
+            {
+                return await completion.Task.WaitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException("等待 Gateway 基础信息响应超时。");
+            }
+        }
+        finally
+        {
+            _mqtt.MessageReceived -= Handler;
+        }
+    }
+
     public async Task<IReadOnlyList<ExtenderNodeDiscoveryResult>> DiscoverNodesAsync(
         string gatewayId,
         IEnumerable<uint> extenderIds,
@@ -117,6 +174,48 @@ public sealed class DeviceDiscoveryService
                 catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
                 {
                     return new ExtenderNodeDiscoveryResult(extenderId, [], exception.Message);
+                }
+            })
+            .ToArray();
+        if (tasks.Length == 0)
+        {
+            return [];
+        }
+        return await Task.WhenAll(tasks);
+    }
+
+    public async Task<IReadOnlyList<ExtenderAsyncVersionDiscoveryResult>> DiscoverAsyncVersionsAsync(
+        string gatewayId,
+        IEnumerable<uint> extenderIds,
+        CancellationToken cancellationToken = default)
+    {
+        var tasks = extenderIds
+            .Where(id => id > 0)
+            .Distinct()
+            .Order()
+            .Select(async extenderId =>
+            {
+                try
+                {
+                    var response = await RequestAsyncVersionAsync(
+                        gatewayId,
+                        extenderId,
+                        cancellationToken);
+                    if (!response.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return new ExtenderAsyncVersionDiscoveryResult(
+                            extenderId,
+                            null,
+                            $"Gateway 返回 {response.Result}/{response.Reason}。");
+                    }
+                    return new ExtenderAsyncVersionDiscoveryResult(
+                        extenderId,
+                        response.SoftwareVersion,
+                        null);
+                }
+                catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    return new ExtenderAsyncVersionDiscoveryResult(extenderId, null, exception.Message);
                 }
             })
             .ToArray();
@@ -179,7 +278,12 @@ public sealed class DeviceDiscoveryService
             throw new InvalidDataException(
                 $"分页总数不一致，声明 {first.TotalCount}，实际 {nodes.Length}。");
         }
-        return nodes;
+
+        // 部分固件会把注册表中的空槽或失效记录一并放进 Node 列表，
+        // 这类记录的版本和 RSSI 都为 0，不能作为真实在线 Node 提供给升级任务。
+        return nodes
+            .Where(node => node.SoftwareVersion != 0 || node.Rssi != 0)
+            .ToArray();
     }
 
     private async Task<GatewayNodeListPage> RequestNodePageAsync(
@@ -218,6 +322,61 @@ public sealed class DeviceDiscoveryService
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException($"等待 Extender {extenderId} 的第 {pageIndex + 1} 页 Node 列表响应超时。");
+            }
+        }
+        finally
+        {
+            _mqtt.MessageReceived -= Handler;
+        }
+    }
+
+    private async Task<GatewayAsyncVersion> RequestAsyncVersionAsync(
+        string gatewayId,
+        uint extenderId,
+        CancellationToken cancellationToken)
+    {
+        var sequence = NextSequence();
+        var completion = new TaskCompletionSource<GatewayAsyncVersion>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void Handler(object? _, MqttApplicationMessage message)
+        {
+            if (!MatchesUpstreamTopic(message.Topic, gatewayId, sequence) ||
+                !OtaMessageCodec.TryParseAsyncVersionResponse(
+                    message.GetPayloadAsUtf8(),
+                    out var response) ||
+                response is null ||
+                response.QuerySequence != sequence ||
+                response.ExtenderId != extenderId)
+            {
+                return;
+            }
+            completion.TrySetResult(response);
+        }
+
+        _mqtt.MessageReceived += Handler;
+        try
+        {
+            var request = OtaMessageCodec.CreateAsyncVersionQuery(
+                gatewayId,
+                sequence,
+                extenderId);
+            await _mqtt.PublishAsync(
+                new MqttApplicationMessage(
+                    request.Topic,
+                    System.Text.Encoding.UTF8.GetBytes(request.JsonPayload),
+                    request.QualityOfService),
+                cancellationToken);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(_options.ResponseTimeout);
+            try
+            {
+                return await completion.Task.WaitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"等待 Extender {extenderId} 的异步板版本响应超时。");
             }
         }
         finally

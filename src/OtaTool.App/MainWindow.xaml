@@ -328,7 +328,7 @@
                                         <StackPanel>
                                             <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock FontSize="16" FontWeight="SemiBold" Text="主题配置" /><Border Grid.Column="1" Background="{Binding GatewaySubscriptionBadgeBackground}" CornerRadius="9" Padding="8,3"><TextBlock Foreground="{Binding GatewaySubscriptionBadgeForeground}" FontSize="11" Text="{Binding GatewaySubscriptionBadgeText}" /></Border></Grid>
                                             <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" Margin="0,4,0,10" Text="主题格式固定；配置 Gateway ID 后订阅其上行消息。升级任务直接使用此 ID。" TextWrapping="Wrap" />
-                                            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="10" /><ColumnDefinition Width="*" /><ColumnDefinition Width="10" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Style="{StaticResource FieldLabel}" VerticalAlignment="Center" Text="Gateway dev ID（十进制）" /><TextBox Grid.Column="2" Text="{Binding GatewayId, UpdateSourceTrigger=PropertyChanged}" ToolTip="十进制 Gateway ID" /><Button Grid.Column="4" Style="{StaticResource PrimaryButton}" Padding="12,5" Content="订阅主题" Command="{Binding SubscribeGatewayTopicCommand}" /></Grid>
+                                            <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="10" /><ColumnDefinition Width="*" /><ColumnDefinition Width="10" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Style="{StaticResource FieldLabel}" VerticalAlignment="Center" Text="Gateway dev ID（十进制）" /><ComboBox Grid.Column="2" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding GatewayIdHistory}" Text="{Binding GatewayId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="可直接输入或选择最近使用的 Gateway dev ID" /><Button Grid.Column="4" Style="{StaticResource PrimaryButton}" Padding="12,5" Content="订阅主题" Command="{Binding SubscribeGatewayTopicCommand}" /></Grid>
                                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,8,0,0" Text="订阅主题（上行）" /><TextBlock FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource BlueBrush}" Margin="0,3,0,0" Text="{Binding GatewaySubscriptionTopic}" TextWrapping="Wrap" />
                                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,7,0,0" Text="发布主题（下行）" /><TextBlock FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource BlueBrush}" Margin="0,3,0,0" Text="{Binding GatewayPublishTopic}" TextWrapping="Wrap" />
                                         </StackPanel>
@@ -398,10 +398,10 @@
                                 <StackPanel>
                                     <WrapPanel>
                                         <Button MinWidth="112" Style="{StaticResource QuietButton}" Content="{Binding DeviceDiscoveryButtonText}" Command="{Binding RefreshExtendersCommand}" IsEnabled="{Binding CanRefreshDiscovery}" Margin="0,0,8,0" />
-                                        <Button Style="{StaticResource QuietButton}" Content="{Binding ExtenderSelectionToggleText}" Command="{Binding ToggleExtenderSelectionCommand}" />
+                                        <Button Style="{StaticResource QuietButton}" Content="{Binding ExtenderSelectionToggleText}" Command="{Binding ToggleExtenderSelectionCommand}" Visibility="{Binding ExtenderTargetListVisibility}" />
                                     </WrapPanel>
                                     <TextBlock Margin="0,6,0,8" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding DeviceDiscoveryStatus}" TextWrapping="Wrap" />
-                                    <ItemsControl ItemsSource="{Binding DiscoveredExtenders}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><CheckBox Margin="0,3,14,3" IsChecked="{Binding IsSelected, Mode=TwoWay}"><StackPanel><TextBlock FontFamily="Cascadia Mono" Text="{Binding ExtenderId}" /><TextBlock FontSize="10" Foreground="{StaticResource BlueBrush}" Text="{Binding IdentityDisplay}" /><TextBlock MaxWidth="210" FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="{Binding Detail}" TextTrimming="CharacterEllipsis" /></StackPanel></CheckBox></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
+                                    <ItemsControl ItemsSource="{Binding DiscoveredExtenders}" Visibility="{Binding ExtenderTargetListVisibility}"><ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel /></ItemsPanelTemplate></ItemsControl.ItemsPanel><ItemsControl.ItemTemplate><DataTemplate><CheckBox Margin="0,3,14,3" IsChecked="{Binding IsSelected, Mode=TwoWay}"><StackPanel><TextBlock FontFamily="Cascadia Mono" Text="{Binding ExtenderId}" /><TextBlock FontSize="10" Foreground="{StaticResource BlueBrush}" Text="{Binding IdentityDisplay}" /><TextBlock MaxWidth="210" FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="{Binding Detail}" TextTrimming="CharacterEllipsis" /></StackPanel></CheckBox></DataTemplate></ItemsControl.ItemTemplate></ItemsControl>
                                 </StackPanel>
                             </Border>
                             <StackPanel Margin="0,12,0,0" Visibility="{Binding NodeDiscoveryVisibility}">
@@ -503,7 +503,7 @@
                             <Border Margin="0,16,0,0" Background="#FFF6E7" BorderBrush="#F1D7A4" BorderThickness="1" CornerRadius="5" Padding="10" Visibility="{Binding BroadcastTargetVisibility}"><TextBlock FontSize="12" Foreground="{StaticResource AmberBrush}" Text="广播升级不会填写、保存或发送目标 ID。" /></Border>
                             <Border Margin="0,18,0,0" Padding="12" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="6">
                                 <StackPanel>
-                                    <TextBlock FontSize="13" FontWeight="SemiBold" Text="循环升级间隔" />
+                                    <TextBlock FontSize="13" FontWeight="SemiBold" Text="循环升级设置" />
                                     <Grid Margin="0,9,0,0">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="10" /><ColumnDefinition Width="120" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                         <TextBlock VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Text="间隔方式" />
@@ -521,24 +521,19 @@
                                             <TextBlock VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Text="s" />
                                         </StackPanel>
                                     </Grid>
+                                    <Grid Margin="0,9,0,0">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="10" /><ColumnDefinition Width="120" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                        <TextBlock VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Text="循环次数" />
+                                        <TextBox Grid.Column="2" Width="82" HorizontalAlignment="Left" Text="{Binding CycleRounds, UpdateSourceTrigger=PropertyChanged}" />
+                                    </Grid>
                                     <TextBlock Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding CycleIntervalSummary}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
-                            <Grid Margin="0,20,0,0">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="16" />
-                                    <ColumnDefinition Width="Auto" />
-                                    <ColumnDefinition Width="8" />
-                                    <ColumnDefinition Width="72" />
-                                    <ColumnDefinition Width="8" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <Button Style="{StaticResource PrimaryButton}" Content="启动单次升级" Command="{Binding StartTaskCommand}" IsEnabled="{Binding CanStartUpgrade}" />
-                                <TextBlock Grid.Column="2" VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Text="循环次数" />
-                                <TextBox Grid.Column="4" VerticalAlignment="Center" Text="{Binding CycleRounds, UpdateSourceTrigger=PropertyChanged}" />
-                                <Button Grid.Column="6" Style="{StaticResource PrimaryButton}" Content="启动循环升级" Command="{Binding StartCycleCommand}" IsEnabled="{Binding CanStartCycleUpgrade}" />
-                            </Grid>
+                            <StackPanel Margin="0,20,0,0" Orientation="Horizontal">
+                                <Button Style="{StaticResource PrimaryButton}" Content="正向升级" Command="{Binding StartForwardTaskCommand}" IsEnabled="{Binding CanStartForwardUpgrade}" ToolTip="使用正向 Patch 按旧版本升级到新版本" />
+                                <Button Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" Content="反向升级" Command="{Binding StartReverseTaskCommand}" IsEnabled="{Binding CanStartReverseUpgrade}" ToolTip="使用反向 Patch 按新版本回退到旧版本" />
+                                <Button Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" Content="启动循环升级" Command="{Binding StartCycleCommand}" IsEnabled="{Binding CanStartCycleUpgrade}" />
+                            </StackPanel>
                         </StackPanel></Border>
                     </ScrollViewer>
                     <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">

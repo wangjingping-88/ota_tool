@@ -6,7 +6,7 @@ using System.Text;
 
 namespace OtaTool.Core.Mqtt;
 
-/// <summary>只实现 OTA 工具需要的 MQTT 3.1.1 CONNECT、PUBLISH、SUBSCRIBE、PING 与 QoS 0/1。</summary>
+/// <summary>只实现 OTA 工具需要的 MQTT 3.1.1 CONNECT、PUBLISH、SUBSCRIBE、UNSUBSCRIBE、PING 与 QoS 0/1。</summary>
 public sealed class Mqtt311Client : IMqttTransport
 {
     private readonly SemaphoreSlim _sendLock = new(1, 1);
@@ -105,6 +105,17 @@ public sealed class Mqtt311Client : IMqttTransport
         WriteUtf8(body, topicFilter);
         body.Write(new byte[] { qualityOfService });
         await SendPacketAsync(_stream!, BuildPacket(0x82, body.WrittenSpan), cancellationToken);
+    }
+
+    public async Task UnsubscribeAsync(string topicFilter, CancellationToken cancellationToken = default)
+    {
+        EnsureConnected();
+        ValidateTopic(topicFilter, allowWildcards: true);
+        var identifier = NextPacketIdentifier();
+        var body = new ArrayBufferWriter<byte>();
+        WriteUInt16(body, identifier);
+        WriteUtf8(body, topicFilter);
+        await SendPacketAsync(_stream!, BuildPacket(0xA2, body.WrittenSpan), cancellationToken);
     }
 
     public async Task PublishAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)

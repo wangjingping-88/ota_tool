@@ -423,7 +423,37 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 "CANCELLED" => OtaTaskState.Cancelled,
                 _ => OtaTaskState.Running,
             };
-            if (terminalState is OtaTaskState.Succeeded or OtaTaskState.Failed or OtaTaskState.Cancelled)
+            var failedSubtask = status.Subtasks.FirstOrDefault(subtask =>
+                subtask.Result.Equals("FAILED", StringComparison.OrdinalIgnoreCase));
+            var failedStage = status.Stages.FirstOrDefault(stage =>
+                stage.State.Equals("FAILED", StringComparison.OrdinalIgnoreCase));
+            var hasFailureFact = failedSubtask is not null || failedStage is not null;
+            var hasUnfinishedSubtask = status.Subtasks.Any(subtask => !IsTerminalSubtaskResult(subtask.Result));
+            if (terminalState == OtaTaskState.Failed ||
+                (terminalState != OtaTaskState.Cancelled &&
+                 hasFailureFact &&
+                 (terminalState == OtaTaskState.Succeeded || !hasUnfinishedSubtask)))
+            {
+                var failureDetail = failedSubtask is not null
+                    ? $"Extender {failedSubtask.ExtenderId} 子任务失败：{failedSubtask.Stage} / {failedSubtask.Reason}"
+                    : failedStage is not null
+                        ? $"Gateway 阶段失败：{failedStage.Stage} / {failedStage.Reason}"
+                        : $"Gateway 状态：{status.Status} / {status.Stage}";
+                _ = FinishFailedAndCancelGatewayAsync(active, failureDetail, status, null);
+            }
+            else if (hasFailureFact)
+            {
+                var failedCount = status.Subtasks.Count(subtask =>
+                    subtask.Result.Equals("FAILED", StringComparison.OrdinalIgnoreCase));
+                var unfinishedCount = status.Subtasks.Count(subtask => !IsTerminalSubtaskResult(subtask.Result));
+                Emit(
+                    active,
+                    OtaTaskState.Running,
+                    $"已有 {failedCount} 个 Extender 子任务失败，仍有 {unfinishedCount} 个子任务未结束；将继续轮询并等待全部 Extender 完成。",
+                    status,
+                    null);
+            }
+            else if (terminalState is OtaTaskState.Succeeded or OtaTaskState.Cancelled)
             {
                 Finish(active, terminalState, $"Gateway 状态：{status.Status} / {status.Stage}", status, null);
             }
@@ -438,7 +468,18 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         {
             if (_profile.SupportsGatewayStatusPolling)
             {
-                Emit(active, OtaTaskState.Running, "已收到 Gateway 最终结果上报，正在使用 cmd=8 确认最终事实。", null, final);
+                if (final.IsSuccess)
+                {
+                    Emit(active, OtaTaskState.Running, "已收到 Gateway 最终结果上报，正在使用 cmd=8 确认最终事实。", null, final);
+                }
+                else
+                {
+                    _ = FinishFailedAndCancelGatewayAsync(
+                        active,
+                        $"Gateway 最终结果上报失败：{final.Prompt}",
+                        null,
+                        final);
+                }
             }
             else
             {
@@ -447,6 +488,11 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
             }
         }
     }
+
+    private static bool IsTerminalSubtaskResult(string result)
+        => result.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase) ||
+           result.Equals("FAILED", StringComparison.OrdinalIgnoreCase) ||
+           result.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsMatchingFinalResult(ActiveTask active, GatewayFinalResult final)
     {
@@ -468,8 +514,47 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
 
     private void Finish(ActiveTask active, OtaTaskState state, string message, GatewayOtaStatus? status, GatewayFinalResult? final)
     {
-        Complete(active);
-        Emit(active, state, message, status, final);
+        if (Complete(active))
+        {
+            Emit(active, state, message, status, final);
+        }
+    }
+
+    private async Task FinishFailedAndCancelGatewayAsync(
+        ActiveTask active,
+        string failureMessage,
+        GatewayOtaStatus? status,
+        GatewayFinalResult? final)
+    {
+        if (!Complete(active)) return;
+
+        var cancelResult = "MQTT 未连接，无法向 Gateway 发送取消请求。";
+        if (_mqtt.IsConnected)
+        {
+            try
+            {
+                var sequence = await _sequenceStore.NextAsync(CancellationToken.None);
+                var cancel = OtaMessageCodec.CreateCancelRequest(active.Task, sequence, _protocolOptions);
+                await PublishAsync(
+                    new MqttApplicationMessage(
+                        cancel.Topic,
+                        Encoding.UTF8.GetBytes(cancel.JsonPayload),
+                        cancel.QualityOfService),
+                    CancellationToken.None);
+                cancelResult = $"已发送 cmd=5 active=0 取消请求，任务序号 {sequence}。";
+            }
+            catch (Exception exception)
+            {
+                cancelResult = $"Gateway 取消请求发送失败：{exception.Message}";
+            }
+        }
+
+        Emit(
+            active,
+            OtaTaskState.Failed,
+            $"{failureMessage}；已停止状态轮询。{cancelResult}",
+            status,
+            final);
     }
 
     private async Task PublishAsync(MqttApplicationMessage message, CancellationToken cancellationToken)
@@ -478,11 +563,11 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         MessagePublished?.Invoke(this, message);
     }
 
-    private void Complete(ActiveTask active)
+    private bool Complete(ActiveTask active)
     {
         lock (_sync)
         {
-            if (!ReferenceEquals(_activeTask, active)) return;
+            if (!ReferenceEquals(_activeTask, active)) return false;
             _activeTask = null;
         }
         active.Cancellation.Cancel();
@@ -498,6 +583,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 TaskContinuationOptions.ExecuteSynchronously,
                 TaskScheduler.Default);
         }
+        return true;
     }
 
     private sealed class ActiveTask(OtaTask task, int taskSequence, CancellationTokenSource cancellation)

@@ -61,6 +61,11 @@ public sealed record GatewayExtenderInfo(
     byte DeviceType,
     byte SoftwareVersion);
 
+public sealed record GatewayBasicInfo(
+    uint GatewayId,
+    byte SoftwareVersion,
+    string RawSoftwareVersion);
+
 public sealed record GatewayNodeInfo(ushort NodeId, byte NodeType, byte SoftwareVersion, sbyte Rssi);
 
 public sealed record GatewayNodeListPage(
@@ -73,6 +78,13 @@ public sealed record GatewayNodeListPage(
     string Reason,
     IReadOnlyList<GatewayNodeInfo> Nodes);
 
+public sealed record GatewayAsyncVersion(
+    int QuerySequence,
+    uint ExtenderId,
+    string Result,
+    string Reason,
+    byte SoftwareVersion);
+
 public static class OtaMessageCodec
 {
     public const int UpgradeCommand = 5;
@@ -81,6 +93,8 @@ public static class OtaMessageCodec
     public const int StatusResponseCommand = 9;
     public const int NodeListQueryCommand = 10;
     public const int NodeListResponseCommand = 11;
+    public const int AsyncVersionQueryCommand = 12;
+    public const int AsyncVersionResponseCommand = 13;
 
     public static OutboundOtaMessage CreateUpgradeRequest(OtaTask task, int sequence, OtaProtocolOptions? options = null)
     {
@@ -276,6 +290,34 @@ public static class OtaMessageCodec
             querySequence);
     }
 
+    public static OutboundOtaMessage CreateAsyncVersionQuery(
+        string gatewayId,
+        int querySequence,
+        uint extenderId,
+        OtaProtocolOptions? options = null)
+    {
+        options ??= new OtaProtocolOptions();
+        ArgumentException.ThrowIfNullOrWhiteSpace(gatewayId);
+        if (querySequence <= 0) throw new ArgumentOutOfRangeException(nameof(querySequence));
+        if (extenderId == 0) throw new ArgumentOutOfRangeException(nameof(extenderId));
+        var root = new JsonObject
+        {
+            ["cmd"] = AsyncVersionQueryCommand,
+            ["ver"] = "v2.0",
+            ["src"] = 0,
+            ["dst"] = 0,
+            ["async_version"] = new JsonObject
+            {
+                ["query_seq"] = querySequence,
+                ["extender_id"] = extenderId,
+            },
+        };
+        return new OutboundOtaMessage(
+            BuildDownstreamTopic(gatewayId, querySequence, options),
+            root.ToJsonString(),
+            querySequence);
+    }
+
     public static bool TryParseGatewayAuthListPage(
         string json,
         out IReadOnlyList<GatewayExtenderInfo> extenders)
@@ -335,6 +377,48 @@ public static class OtaMessageCodec
         }
     }
 
+    public static bool TryParseGatewayBasicInfo(
+        string json,
+        out GatewayBasicInfo? info)
+    {
+        info = null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("cmd", out var command) ||
+                command.GetInt32() != 3 ||
+                !root.TryGetProperty("base", out var basicInfo) ||
+                basicInfo.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            var gatewayId = GetOptionalUInt(basicInfo, "dev_id") ??
+                            GetOptionalUInt(root, "src") ?? 0;
+            foreach (var name in new[]
+                     {
+                         "ota_software_version",
+                         "software_version",
+                         "sw_ver",
+                     })
+            {
+                if (!basicInfo.TryGetProperty(name, out var versionElement) ||
+                    !TryParseSoftwareVersion(versionElement, out var softwareVersion, out var rawVersion))
+                {
+                    continue;
+                }
+                info = new GatewayBasicInfo(gatewayId, softwareVersion, rawVersion);
+                return gatewayId > 0;
+            }
+            return false;
+        }
+        catch (Exception exception) when (IsMalformedPayloadException(exception))
+        {
+            return false;
+        }
+    }
+
     public static bool TryParseNodeListPage(string json, out GatewayNodeListPage? page)
     {
         page = null;
@@ -360,7 +444,6 @@ public static class OtaMessageCodec
                         !nodeTypeElement.TryGetByte(out var nodeType) ||
                         !node.TryGetProperty("software_version", out var softwareVersionElement) ||
                         !softwareVersionElement.TryGetByte(out var softwareVersion) ||
-                        softwareVersion is < 1 or > 254 ||
                         !node.TryGetProperty("rssi", out var rssiElement) ||
                         !rssiElement.TryGetSByte(out var rssi))
                     {
@@ -384,6 +467,70 @@ public static class OtaMessageCodec
                 GetString(nodeList, "reason"),
                 nodes);
             return page.QuerySequence > 0 && page.ExtenderId > 0;
+        }
+        catch (Exception exception) when (IsMalformedPayloadException(exception))
+        {
+            return false;
+        }
+    }
+
+    public static bool TryParseAsyncVersionResponse(
+        string json,
+        out GatewayAsyncVersion? version)
+    {
+        version = null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("cmd", out var command) ||
+                command.GetInt32() != AsyncVersionResponseCommand ||
+                !root.TryGetProperty("async_version", out var asyncVersion) ||
+                asyncVersion.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            var result = GetString(asyncVersion, "result");
+            var softwareVersion = asyncVersion.TryGetProperty("software_version", out var versionElement) &&
+                                  versionElement.TryGetByte(out var parsedVersion)
+                ? parsedVersion
+                : (byte)0;
+            version = new GatewayAsyncVersion(
+                GetInt(asyncVersion, "query_seq"),
+                GetOptionalUInt(asyncVersion, "extender_id") ?? 0,
+                result,
+                GetString(asyncVersion, "reason"),
+                softwareVersion);
+            return version.QuerySequence > 0 &&
+                   version.ExtenderId > 0 &&
+                   (!result.Equals("OK", StringComparison.OrdinalIgnoreCase) ||
+                    softwareVersion is >= 1 and <= 254);
+        }
+        catch (Exception exception) when (IsMalformedPayloadException(exception))
+        {
+            return false;
+        }
+    }
+
+    public static bool TryParseAsyncVersionQuery(
+        string json,
+        out uint extenderId)
+    {
+        extenderId = 0;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("cmd", out var command) ||
+                command.GetInt32() != AsyncVersionQueryCommand ||
+                !root.TryGetProperty("async_version", out var asyncVersion) ||
+                asyncVersion.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+            extenderId = GetOptionalUInt(asyncVersion, "extender_id") ?? 0;
+            return extenderId > 0;
         }
         catch (Exception exception) when (IsMalformedPayloadException(exception))
         {
@@ -551,6 +698,32 @@ public static class OtaMessageCodec
 
     private static uint? GetOptionalUInt(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.TryGetUInt32(out var number) ? number : null;
+
+    private static bool TryParseSoftwareVersion(
+        JsonElement element,
+        out byte softwareVersion,
+        out string rawVersion)
+    {
+        softwareVersion = 0;
+        rawVersion = element.ToString();
+        if (element.ValueKind == JsonValueKind.Number &&
+            element.TryGetByte(out softwareVersion) &&
+            softwareVersion is >= 1 and <= 254)
+        {
+            return true;
+        }
+        if (element.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+        rawVersion = element.GetString()?.Trim() ?? string.Empty;
+        var numeric = rawVersion.StartsWith('v') || rawVersion.StartsWith('V')
+            ? rawVersion[1..]
+            : rawVersion;
+        return !numeric.Contains('.') &&
+               byte.TryParse(numeric, out softwareVersion) &&
+               softwareVersion is >= 1 and <= 254;
+    }
 
     private static bool IsMalformedPayloadException(Exception exception)
         => exception is JsonException or InvalidOperationException or FormatException or OverflowException;

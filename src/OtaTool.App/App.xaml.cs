@@ -44,11 +44,9 @@ public partial class App : Application
             return;
         }
 
-        MessageBox.Show(
-            $"工具发生无法恢复的界面异常：{eventArgs.Exception.Message}\n\n详细信息已写入 crash.log。",
-            "OTA 测试平台",
-            MessageBoxButton.OK,
-            MessageBoxImage.Error);
+        AppMessageDialog.Show(
+            "工具发生无法恢复的界面异常",
+            $"{eventArgs.Exception.Message}\n\n详细信息已写入 crash.log。");
         Current.Shutdown(-1);
     }
 

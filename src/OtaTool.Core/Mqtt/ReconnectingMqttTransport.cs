@@ -30,6 +30,7 @@ public sealed class ReconnectingMqttTransport : IMqttTransport
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
         _options = null;
+        _subscriptions.Clear();
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -53,6 +54,15 @@ public sealed class ReconnectingMqttTransport : IMqttTransport
         _subscriptions[topicFilter] = qualityOfService;
         await EnsureConnectedAsync(cancellationToken);
         await _current!.SubscribeAsync(topicFilter, qualityOfService, cancellationToken);
+    }
+
+    public async Task UnsubscribeAsync(string topicFilter, CancellationToken cancellationToken = default)
+    {
+        _subscriptions.Remove(topicFilter);
+        if (_current?.IsConnected == true)
+        {
+            await _current.UnsubscribeAsync(topicFilter, cancellationToken);
+        }
     }
 
     public async Task PublishAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)

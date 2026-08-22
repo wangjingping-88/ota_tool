@@ -74,6 +74,8 @@ public sealed class AppSettings
 
     public string GatewayId { get; init; } = string.Empty;
 
+    public IReadOnlyList<string> GatewayIdHistory { get; init; } = [];
+
     public int CycleRounds { get; init; } = 1;
 
     public string CycleIntervalMode { get; init; } = "固定间隔";
@@ -145,6 +147,7 @@ public sealed class ModeWorkspaceSettings
     public IReadOnlyList<NodeTypeDefinitionSettings> CustomNodeTypes { get; set; } = [];
     public string NodeTargetsText { get; set; } = string.Empty;
     public string GatewayId { get; set; } = string.Empty;
+    public IReadOnlyList<string> GatewayIdHistory { get; set; } = [];
     public int CycleRounds { get; set; } = 1;
     public string CycleIntervalMode { get; set; } = "固定间隔";
     public int CycleFixedIntervalSeconds { get; set; }
@@ -199,6 +202,7 @@ public sealed class ModeWorkspaceSettings
         CustomNodeTypes = settings.CustomNodeTypes,
         NodeTargetsText = settings.NodeTargetsText,
         GatewayId = settings.GatewayId,
+        GatewayIdHistory = settings.GatewayIdHistory,
         CycleRounds = settings.CycleRounds,
         CycleIntervalMode = settings.CycleIntervalMode,
         CycleFixedIntervalSeconds = settings.CycleFixedIntervalSeconds,
@@ -223,7 +227,8 @@ public sealed record DiscoveredExtenderSettings(
     string Detail,
     byte DeviceType,
     byte SoftwareVersion,
-    bool IsSelected);
+    bool IsSelected,
+    byte? AsyncSoftwareVersion = null);
 
 public sealed record NodeTypeDefinitionSettings(int Value, string Name);
 

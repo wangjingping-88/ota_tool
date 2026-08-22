@@ -10,7 +10,7 @@
         </Grid.ColumnDefinitions>
 
         <Border Style="{StaticResource Card}">
-            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <ScrollViewer VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Margin="0,0,24,0">
                 <TextBlock FontSize="20" FontWeight="SemiBold" Text="Patch 制作" />
                 <TextBlock Margin="0,5,0,12" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="导入 A/B 固件后生成 Patch 正向和 Patch 反向；导入的 Patch 与制作结果分别保存和显示。" />
@@ -101,21 +101,25 @@
                 </Grid>
                 <TextBlock Margin="0,6,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding PatchRestoreTestStatus}" TextWrapping="Wrap" />
                 <TextBlock Margin="0,10,0,0" FontSize="14" FontWeight="SemiBold" Text="Patch 详情" />
-                <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="自动显示输出目录中的所有 Patch；裸 Patch 需结合 A/B 固件完成还原验证后，才能用于升级和发布。" TextWrapping="Wrap" />
-                <ScrollViewer Margin="0,7,0,0" MaxHeight="240" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
-                    <Border Padding="0,0,12,0">
+                <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="勾选本次需要发布的 Patch；取消勾选不会删除源文件。裸 Patch 完成还原验证后才能用于升级和发布。" TextWrapping="Wrap" />
+                <ScrollViewer Margin="0,7,0,12" MaxHeight="240" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                    <Border Padding="0,0,12,8">
                     <ItemsControl ItemsSource="{Binding PatchCatalog}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <Border Margin="0,0,0,6" Padding="9" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
                                     <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                                        <StackPanel>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <CheckBox Margin="0,1,9,0"
+                                                  VerticalAlignment="Top"
+                                                  IsChecked="{Binding IsSelectedForPublish, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                  ToolTip="标记后，本次公网发布将包含此 Patch" />
+                                        <StackPanel Grid.Column="1">
                                             <TextBlock FontSize="12" FontWeight="SemiBold" Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" />
                                             <TextBlock Margin="0,2,0,0" FontSize="10" Foreground="{Binding ValidationColor}" Text="{Binding PublishState}" />
                                             <TextBlock Margin="0,2,0,0" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="{Binding Md5Display}" TextTrimming="CharacterEllipsis" />
                                         </StackPanel>
-                                        <Button Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Top" Style="{StaticResource QuietButton}" Content="删除" Command="{Binding DataContext.DeletePatchCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" />
+                                        <Button Grid.Column="2" Margin="8,0,0,0" VerticalAlignment="Top" Style="{StaticResource QuietButton}" Content="删除" Command="{Binding DataContext.DeletePatchCommand, RelativeSource={RelativeSource AncestorType=UserControl}}" CommandParameter="{Binding}" />
                                     </Grid>
                                 </Border>
                             </DataTemplate>
@@ -128,7 +132,7 @@
         </Border>
 
         <Border Grid.Column="2" Style="{StaticResource Card}">
-            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <ScrollViewer VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Margin="0,0,24,0">
                 <TextBlock FontSize="20" FontWeight="SemiBold" Text="Patch 发布" />
                 <TextBlock Margin="0,4,0,10" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="本地发布由 HTTP Range 服务提供下载；公网发布通过 SFTP 上传，再以 HTTP 文件地址校验。" />

@@ -5,6 +5,15 @@
     <None Include="..\..\src\OtaTool.App\App.xaml"
           Link="TestAssets\App.xaml"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\App.xaml.cs"
+          Link="TestAssets\App.xaml.cs"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\AppMessageDialog.xaml"
+          Link="TestAssets\AppMessageDialog.xaml"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\AppMessageDialog.xaml.cs"
+          Link="TestAssets\AppMessageDialog.xaml.cs"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\src\OtaTool.App\MainWindow.xaml"
           Link="TestAssets\MainWindow.xaml"
           CopyToOutputDirectory="PreserveNewest" />

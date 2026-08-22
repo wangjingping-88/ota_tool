@@ -53,11 +53,9 @@ public partial class MainWindow : Window
         }
         catch (Exception exception)
         {
-            MessageBox.Show(
-                $"应用初始化未完全完成：{exception.Message}",
-                "OTA 测试平台",
-                MessageBoxButton.OK,
-                MessageBoxImage.Warning);
+            viewModel.ShowInformationDialog(
+                "应用初始化未完全完成",
+                exception.Message);
         }
     }
 

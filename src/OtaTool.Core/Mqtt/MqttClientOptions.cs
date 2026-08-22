@@ -42,5 +42,7 @@ public interface IMqttTransport : IAsyncDisposable
 
     Task SubscribeAsync(string topicFilter, byte qualityOfService = 1, CancellationToken cancellationToken = default);
 
+    Task UnsubscribeAsync(string topicFilter, CancellationToken cancellationToken = default);
+
     Task PublishAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default);
 }
