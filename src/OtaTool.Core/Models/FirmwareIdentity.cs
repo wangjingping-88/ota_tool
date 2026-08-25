@@ -16,6 +16,28 @@ public enum FirmwareDeviceType : byte
     Gateway = 8,
 }
 
+public static class FirmwarePatchNaming
+{
+    public static string GetPrefix(FirmwareDeviceType deviceType) => deviceType switch
+    {
+        FirmwareDeviceType.Server => "server",
+        FirmwareDeviceType.ExtenderA => "ext-a",
+        FirmwareDeviceType.ExtenderS => "ext-s",
+        FirmwareDeviceType.RoomLight => "room-light",
+        FirmwareDeviceType.Switch => "switch",
+        FirmwareDeviceType.Socket => "socket",
+        FirmwareDeviceType.Dtu => "dtu",
+        FirmwareDeviceType.StreetLight => "street-light",
+        FirmwareDeviceType.Gateway => "gateway",
+        _ => throw new InvalidOperationException($"设备类型 {(byte)deviceType} 不支持制作 Patch。"),
+    };
+
+    public static bool IsCompatiblePrefix(FirmwareDeviceType deviceType, string patchType)
+        => string.Equals(patchType, GetPrefix(deviceType), StringComparison.Ordinal) ||
+           deviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight &&
+           string.Equals(patchType, "node", StringComparison.Ordinal);
+}
+
 public sealed record FirmwareIdentity(
     FirmwareDeviceType DeviceType,
     byte? Version,
@@ -28,15 +50,7 @@ public sealed record FirmwareIdentity(
 
     public bool IsNode => DeviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight;
 
-    public string PatchPrefix => DeviceType switch
-    {
-        FirmwareDeviceType.ExtenderA => "ext-a",
-        FirmwareDeviceType.ExtenderS => "ext-s",
-        FirmwareDeviceType.Gateway => "gateway",
-        FirmwareDeviceType.Server => "server",
-        _ when IsNode => "node",
-        _ => throw new InvalidOperationException($"设备类型 {(byte)DeviceType} 不支持制作 Patch。"),
-    };
+    public string PatchPrefix => FirmwarePatchNaming.GetPrefix(DeviceType);
 
     public OtaTool.Core.Models.DeviceType OtaDeviceType => DeviceType switch
     {

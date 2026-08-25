@@ -823,7 +823,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         MqttUseTls = true, MqttUserName = "tester", MqttClientUsesLocalBroker = false, LocalBrokerPort = 1885, LocalBrokerUserName = "local-user",
         HttpUsesLocalServer = false, PublicHttpBaseUrl = "https://files.example/ota/", SftpHost = "sftp.example", SftpPort = 2222,
         SftpPrivateKeyPath = "D:\\keys\\ota", LogDirectory = "D:\\logs",
-        ForwardPatchName = "node-v1-to-v2.patch", ReversePatchName = "node-v2-to-v1.patch",
+        ForwardPatchName = "socket-v1-to-v2.patch", ReversePatchName = "socket-v2-to-v1.patch",
         CycleIntervalMode = "随机间隔", CycleRandomMinimumSeconds = 3, CycleRandomMaximumSeconds = 9,
         GatewayIdHistory = ["704027", "704065"],
         CustomNodeTypes = [new NodeTypeDefinitionSettings(9, "烟感")],
@@ -1865,8 +1865,24 @@ static async Task VerifyDiffManifestGateAsync(string workspace)
     var oldIdentity = await FirmwareIdentityReader.ReadAsync(oldPath);
     var newIdentity = await FirmwareIdentityReader.ReadAsync(newPath);
     Assert(oldIdentity.DeviceType == FirmwareDeviceType.Socket && oldIdentity.Version == 1
-        && oldIdentity.SuggestedPatchNameTo(newIdentity) == "node-v1-to-v2.patch",
+        && oldIdentity.SuggestedPatchNameTo(newIdentity) == "socket-v1-to-v2.patch"
+        && manifest.PatchType == "socket",
         "固件身份识别或 Patch 自动命名错误。");
+    var expectedNodePrefixes = new Dictionary<FirmwareDeviceType, string>
+    {
+        [FirmwareDeviceType.RoomLight] = "room-light",
+        [FirmwareDeviceType.Switch] = "switch",
+        [FirmwareDeviceType.Socket] = "socket",
+        [FirmwareDeviceType.Dtu] = "dtu",
+        [FirmwareDeviceType.StreetLight] = "street-light",
+    };
+    Assert(expectedNodePrefixes.All(item => FirmwarePatchNaming.GetPrefix(item.Key) == item.Value),
+        "不同 Node 类型必须使用互不覆盖的 Patch 文件名前缀。");
+    var legacyManifest = manifest with { PatchType = "node", PatchVerified = true };
+    await PackageManifestExporter.ExportAsync(legacyManifest, patchPath + ".json");
+    var importedLegacyManifest = await PackageManifestImporter.LoadAndValidateAsync(patchPath);
+    Assert(importedLegacyManifest.PatchType == "node" && importedLegacyManifest.DeviceTypeCode == (byte)FirmwareDeviceType.Socket,
+        "历史 node 前缀的 Patch 元数据应保持可导入兼容。");
     Assert(File.Exists(output) && !manifest.PatchVerified, "Manifest 导出或 PatchTest 门禁错误。");
 }
 

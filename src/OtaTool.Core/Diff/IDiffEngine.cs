@@ -168,16 +168,8 @@ public static class PackageManifestImporter
         {
             throw new InvalidDataException("Patch 文件与侧车元数据的大小或哈希不一致。");
         }
-        var expectedPrefix = ((FirmwareDeviceType)manifest.DeviceTypeCode) switch
-        {
-            FirmwareDeviceType.ExtenderA => "ext-a",
-            FirmwareDeviceType.ExtenderS => "ext-s",
-            FirmwareDeviceType.Gateway => "gateway",
-            >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight => "node",
-            FirmwareDeviceType.Server => "server",
-            _ => string.Empty,
-        };
-        if (!manifest.PatchType.Equals(expectedPrefix, StringComparison.Ordinal))
+        var firmwareDeviceType = (FirmwareDeviceType)manifest.DeviceTypeCode;
+        if (!FirmwarePatchNaming.IsCompatiblePrefix(firmwareDeviceType, manifest.PatchType))
         {
             throw new InvalidDataException("Patch 类型与设备类型不一致。");
         }

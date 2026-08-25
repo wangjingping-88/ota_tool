@@ -93,14 +93,14 @@ Node、Async、Sync 已在镜像 `28 KiB` 边界前四字节写入标识：
 | 0 | `SERVER` | 云平台服务器 | `server` |
 | 1 | `EXTENDER_A` | 扩展器-异步 | `ext-a` |
 | 2 | `EXTENDER_S` | 扩展器-同步 | `ext-s` |
-| 3 | `ROOM_LIGHT` | 室内灯控 | `node` |
-| 4 | `SWITCH` | 开关 | `node` |
-| 5 | `SOCKET` | 电源插座 | `node` |
-| 6 | `DTU` | DTU | `node` |
-| 7 | `STREET_LIGHT` | 路灯控制器 | `node` |
+| 3 | `ROOM_LIGHT` | 室内灯控 | `room-light` |
+| 4 | `SWITCH` | 开关 | `switch` |
+| 5 | `SOCKET` | 电源插座 | `socket` |
+| 6 | `DTU` | DTU | `dtu` |
+| 7 | `STREET_LIGHT` | 路灯控制器 | `street-light` |
 | 8 | `GATEWAY` | 网关 | `gateway` |
 
-Node Patch 的文件名前缀统一为 `node`，具体 Node 类型仍必须记录在 Patch 元数据中。当前各工程类型配置并不完全一致，实施时先抽取或生成共享类型定义，确保类型 0～8 在构建端、协议端和桌面工具端一一对应。
+Node Patch 按具体类型使用独立文件名前缀，防止相同版本方向的不同 Node 类型 Patch 在输出目录中互相覆盖；具体 Node 类型同时记录在 Patch 元数据中。工具继续兼容导入历史 `node` 前缀元数据，但新制作的 Patch 不再生成通用 `node` 前缀。当前各工程类型配置并不完全一致，实施时先抽取或生成共享类型定义，确保类型 0～8 在构建端、协议端和桌面工具端一一对应。
 
 ### 3.4 四端构建改造
 
@@ -192,21 +192,25 @@ Extender 刷新结果同步增加设备类型和版本，以便 Extender 升级�
 根据镜像类型和版本自动生成文件名：
 
 ```text
-node-v1-to-v2.patch
+room-light-v1-to-v2.patch
+switch-v1-to-v2.patch
+socket-v1-to-v2.patch
+dtu-v1-to-v2.patch
+street-light-v1-to-v2.patch
 ext-a-v1-to-v2.patch
 ext-s-v1-to-v2.patch
 gateway-v1-to-v2.patch
 ```
 
-Node 的具体类型不体现在文件名前缀中，但写入强制元数据。正向、反向 Patch 分别根据输入方向生成，不允许用户编辑出与元数据矛盾的名称。
+Node 的具体类型同时体现在文件名前缀和强制元数据中。正向、反向 Patch 分别根据输入方向生成，不允许用户编辑出与元数据矛盾的名称。
 
 ### 6.3 强制 Patch 元数据
 
 每个 Patch 必须同时生成同名侧车文件，例如：
 
 ```text
-node-v1-to-v2.patch
-node-v1-to-v2.patch.json
+socket-v1-to-v2.patch
+socket-v1-to-v2.patch.json
 ```
 
 建议字段：
@@ -214,7 +218,7 @@ node-v1-to-v2.patch.json
 ```json
 {
   "schema_version": 1,
-  "patch_type": "node",
+  "patch_type": "socket",
   "device_type": 5,
   "old_version": 1,
   "new_version": 2,
