@@ -206,6 +206,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private bool _suppressSelectionSync;
     private string _gatewayStageSummary = "尚未收到 Gateway 阶段状态。";
     private string _gatewayStageColor = "#65758B";
+    private string _gatewayPackageSourceSummary = string.Empty;
+    private string _gatewayPackageSourceColor = "#65758B";
     private GatewayOtaStatus? _lastGatewayStatus;
     private int? _gatewayTaskSequence;
     private DateTimeOffset? _gatewayTaskStartedAt;
@@ -766,7 +768,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 DeviceDiscoveryStatus = value == GatewayTaskType
                     ? _gatewaySoftwareVersion.HasValue &&
                       string.Equals(_gatewayVersionGatewayId, GatewayId, StringComparison.Ordinal)
-                        ? $"Gateway 当前软件版本：v{_gatewaySoftwareVersion.Value}。"
+                        ? $"Gateway 当前软件版本：{ProtocolVersionFormatter.FormatWithPrefix(_gatewaySoftwareVersion.Value)}。"
                         : "尚未查询 Gateway 当前软件版本。"
                     : "尚未刷新在线 Extender。";
                 RefreshUpgradePatchChoices();
@@ -780,6 +782,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         set
         {
             if (!SetProperty(ref _oldVersion, value)) return;
+            OnPropertyChanged(nameof(OldVersionDisplay));
             NotifyUpgradeActionAvailability();
         }
     }
@@ -790,9 +793,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         set
         {
             if (!SetProperty(ref _newVersion, value)) return;
+            OnPropertyChanged(nameof(NewVersionDisplay));
             NotifyUpgradeActionAvailability();
         }
     }
+
+    public string OldVersionDisplay => ProtocolVersionFormatter.FormatRaw(OldVersion);
+
+    public string NewVersionDisplay => ProtocolVersionFormatter.FormatRaw(NewVersion);
 
     public string TargetIdList
     {
@@ -883,7 +891,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         ? "Gateway dev ID（请在 MQTT 订阅配置中填写）由 MQTT 配置页的主题订阅统一设置。"
         : _gatewaySoftwareVersion.HasValue &&
           string.Equals(_gatewayVersionGatewayId, GatewayId, StringComparison.Ordinal)
-            ? $"Gateway dev ID {GatewayId} · 当前软件版本 v{_gatewaySoftwareVersion.Value}。"
+            ? $"Gateway dev ID {GatewayId} · 当前软件版本 {ProtocolVersionFormatter.FormatWithPrefix(_gatewaySoftwareVersion.Value)}。"
             : $"Gateway dev ID {GatewayId}（在 MQTT 订阅配置中填写）由 MQTT 配置页的主题订阅统一设置。";
 
     public string MqttHost
@@ -1326,7 +1334,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public int DiscoveryFreshnessMinutes { get => _discoveryFreshnessMinutes; set => SetProperty(ref _discoveryFreshnessMinutes, Math.Clamp(value, 1, 1440)); }
 
-    public int MinimumNodeRssi { get => _minimumNodeRssi; set => SetProperty(ref _minimumNodeRssi, Math.Clamp(value, -127, 0)); }
+    public int MinimumNodeRssi { get => _minimumNodeRssi; set => SetProperty(ref _minimumNodeRssi, Math.Clamp(value, -200, 0)); }
 
     private PatchCapacityLimits GetPatchCapacityLimits()
         => new(NodePatchLimit, AsyncPatchLimit, SyncPatchLimit, GatewayPatchLimit);
@@ -1565,6 +1573,27 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         get => _gatewayStageColor;
         private set => SetProperty(ref _gatewayStageColor, value);
     }
+
+    public string GatewayPackageSourceSummary
+    {
+        get => _gatewayPackageSourceSummary;
+        private set
+        {
+            if (!SetProperty(ref _gatewayPackageSourceSummary, value)) return;
+            OnPropertyChanged(nameof(GatewayPackageSourceVisibility));
+        }
+    }
+
+    public string GatewayPackageSourceColor
+    {
+        get => _gatewayPackageSourceColor;
+        private set => SetProperty(ref _gatewayPackageSourceColor, value);
+    }
+
+    public Visibility GatewayPackageSourceVisibility =>
+        string.IsNullOrWhiteSpace(GatewayPackageSourceSummary)
+            ? Visibility.Collapsed
+            : Visibility.Visible;
 
     public string UpgradeRunModeText
     {
@@ -1887,6 +1916,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
         GatewayStages.Clear();
         GatewaySubtasks.Clear();
+        GatewayPackageSourceSummary = string.Empty;
         if (_lastGatewayStatus is not null)
         {
             UpdateGatewayStatus(_lastGatewayStatus);
@@ -1974,7 +2004,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             extender.DeviceType,
             extender.SoftwareVersion,
             extender.IsSelected,
-            extender.AsyncSoftwareVersion)).ToArray(),
+            extender.AsyncSoftwareVersion,
+            extender.AsyncAddress,
+            extender.SyncRssi,
+            extender.SyncSnr,
+            extender.OnlineCount,
+            extender.TotalCount)).ToArray(),
         DiscoveredNodeGroups = DiscoveredNodeGroups.Select(group => new DiscoveredNodeGroupSettings(
             group.ExtenderId,
             group.Nodes.Select(node => new DiscoveredNodeSettings(
@@ -1983,7 +2018,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 node.SoftwareVersion,
                 node.Rssi,
                 node.IsSelected)).ToArray(),
-            group.Error)).ToArray(),
+            group.Error,
+            group.ReportedCount)).ToArray(),
         NodeDiscoveryCompletedAt = _nodeDiscoveryCompletedAt,
         ShowArchivedReports = _showArchivedReports,
     };
@@ -2044,7 +2080,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             SyncPatchLimit = workspace.SyncPatchLimit is > 0 and < long.MaxValue ? workspace.SyncPatchLimit : PatchCapacityPolicy.SyncPatchLimit;
             GatewayPatchLimit = workspace.GatewayPatchLimit is > 0 and < long.MaxValue ? workspace.GatewayPatchLimit : PatchCapacityPolicy.GatewayPatchLimit;
             DiscoveryFreshnessMinutes = workspace.DiscoveryFreshnessMinutes > 0 ? workspace.DiscoveryFreshnessMinutes : 30;
-            MinimumNodeRssi = workspace.MinimumNodeRssi is >= -127 and <= 0 ? workspace.MinimumNodeRssi : -100;
+            MinimumNodeRssi = workspace.MinimumNodeRssi is >= -200 and <= 0 ? workspace.MinimumNodeRssi : -100;
             _nodeDiscoveryCompletedAt = workspace.NodeDiscoveryCompletedAt;
             RestoreDiscoveryCollections(workspace);
             _showArchivedReports = workspace.ShowArchivedReports;
@@ -2068,6 +2104,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 DiscoveredExtenders.Add(new SelectableExtenderItem(
                     extender.ExtenderId, extender.Detail, extender.DeviceType, extender.SoftwareVersion,
                     extender.AsyncSoftwareVersion,
+                    extender.AsyncAddress,
+                    extender.SyncRssi,
+                    extender.SyncSnr,
+                    extender.OnlineCount,
+                    extender.TotalCount,
                     extender.IsSelected, OnExtenderSelectionChanged));
             }
             DiscoveredNodeGroups.Clear();
@@ -2079,6 +2120,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     nodes.Select(node => new GatewayNodeInfo(node.NodeId, node.NodeType, node.SoftwareVersion, node.Rssi)).ToArray(),
                     nodes.Where(node => node.IsSelected).Select(node => node.NodeId).ToHashSet(),
                     group.Error,
+                    group.ReportedCount ?? nodes.Count,
                     OnNodeSelectionChanged));
             }
             RefreshNodeTypeOptions();
@@ -3160,6 +3202,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _gatewayStatusDeviceType = task.DeviceType;
         GatewayStages.Clear();
         GatewaySubtasks.Clear();
+        GatewayPackageSourceSummary = string.Empty;
         _gatewayTaskSequence = null;
         _gatewayTaskStartedAt = null;
         GatewayStageSummary = task.Mode == OtaMode.EcoLink
@@ -3603,7 +3646,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 var info = await _deviceDiscovery.QueryGatewayBasicInfoAsync(gatewayId.ToString());
                 _gatewaySoftwareVersion = info.SoftwareVersion;
                 _gatewayVersionGatewayId = gatewayId.ToString(System.Globalization.CultureInfo.InvariantCulture);
-                DeviceDiscoveryStatus = $"Gateway 当前软件版本：v{info.SoftwareVersion}。";
+                DeviceDiscoveryStatus = $"Gateway 当前软件版本：{ProtocolVersionFormatter.FormatWithPrefix(info.SoftwareVersion)}。";
                 OnPropertyChanged(nameof(GatewayIdTaskHint));
                 NotifyUpgradeActionAvailability();
                 await SaveSettingsAsync();
@@ -3626,24 +3669,26 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
             ClearDiscoveredExtenderResults();
             var extenders = await _deviceDiscovery.DiscoverExtendersAsync(gatewayId.ToString());
-            var asyncVersions = new Dictionary<uint, byte>();
-            var asyncVersionFailures = 0;
+            var extenderStatuses = new Dictionary<uint, GatewayExtenderStatus>();
+            var statusFailures = 0;
             if (SelectedTaskType == AsyncTaskType && extenders.Count > 0)
             {
                 DeviceDiscoveryStatus =
-                    $"已发现 {extenders.Count} 个在线 Extender，正在查询异步板软件版本…";
-                var versionResults = await _deviceDiscovery.DiscoverAsyncVersionsAsync(
+                    $"已发现 {extenders.Count} 个在线 Extender，正在查询 Sync/Async 状态…";
+                var statusResults = await _deviceDiscovery.DiscoverExtenderStatusesAsync(
                     gatewayId.ToString(),
                     extenders.Select(item => item.ExtenderId));
-                asyncVersions = versionResults
-                    .Where(item => item.IsSuccess && item.SoftwareVersion.HasValue)
-                    .ToDictionary(item => item.ExtenderId, item => item.SoftwareVersion!.Value);
-                asyncVersionFailures = versionResults.Count(item => !item.IsSuccess);
-                if (asyncVersions.Count == 0)
+                extenderStatuses = statusResults
+                    .Where(item => item.IsSuccess &&
+                                   item.Status is not null &&
+                                   ProtocolVersionFormatter.IsKnown(item.Status.AsyncSoftwareVersion))
+                    .ToDictionary(item => item.ExtenderId, item => item.Status!);
+                statusFailures = statusResults.Count - extenderStatuses.Count;
+                if (extenderStatuses.Count == 0)
                 {
                     ClearDiscoveredExtenderResults();
                     DeviceDiscoveryStatus =
-                        "刷新 Extender 失败：未收到异步板版本响应，请确认 Gateway、Sync 和 Async 固件支持 cmd=12/13。";
+                        "刷新 Extender 失败：所有 0x11 状态查询均超时；Async 固件可能尚未支持 cmd=100/0x10→0x11，已清空 Async 可升级目标。";
                     await SaveSettingsAsync();
                     return;
                 }
@@ -3651,8 +3696,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _suppressSelectionSync = true;
             foreach (var extender in extenders)
             {
-                asyncVersions.TryGetValue(extender.ExtenderId, out var asyncVersion);
-                if (SelectedTaskType == AsyncTaskType && asyncVersion is < 1 or > 254)
+                extenderStatuses.TryGetValue(extender.ExtenderId, out var status);
+                if (SelectedTaskType == AsyncTaskType &&
+                    (status is null || !ProtocolVersionFormatter.IsKnown(status.AsyncSoftwareVersion)))
                 {
                     continue;
                 }
@@ -3661,7 +3707,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     extender.Detail,
                     extender.DeviceType,
                     extender.SoftwareVersion,
-                    asyncVersion is >= 1 and <= 254 ? asyncVersion : null,
+                    status?.AsyncSoftwareVersion,
+                    status?.AsyncAddress,
+                    status?.SyncRssi,
+                    status?.SyncSnr,
+                    status?.OnlineCount,
+                    status?.TotalCount,
                     selectedIds.Contains(extender.ExtenderId),
                     OnExtenderSelectionChanged));
             }
@@ -3674,9 +3725,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _suppressSelectionSync = false;
             OnExtenderSelectionChanged();
             DeviceDiscoveryStatus = SelectedTaskType == AsyncTaskType
-                ? asyncVersionFailures == 0
-                    ? $"已发现 {extenders.Count} 个在线 Extender，异步板版本查询完成。"
-                    : $"已发现 {extenders.Count} 个在线 Extender；{asyncVersionFailures} 个异步板版本查询失败，当前可用 {DiscoveredExtenders.Count} 个。"
+                ? statusFailures == 0
+                    ? $"已发现 {extenders.Count} 个在线 Extender，Sync/Async 状态查询完成。"
+                    : $"已发现 {extenders.Count} 个在线 Extender；{statusFailures} 个状态查询失败，已保留 {DiscoveredExtenders.Count} 个成功结果。"
                 : $"已发现 {DiscoveredExtenders.Count} 个在线 Extender。";
             await SaveSettingsAsync();
         }
@@ -3784,6 +3835,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     result.Nodes,
                     selectedNodes ?? [],
                     result.Error,
+                    result.ReportedCount,
                     OnNodeSelectionChanged));
             }
             _nodeDiscoveryCompletedAt = DateTimeOffset.Now;
@@ -3793,13 +3845,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _suppressSelectionSync = false;
             OnNodeSelectionChanged();
             var failed = results.Count(item => !item.IsSuccess);
-            NodeDiscoveryStatus = failed switch
-            {
-                0 => $"Node 列表刷新完成，共 {results.Sum(item => item.Nodes.Count)} 个 Node。",
-                var count when count == results.Count =>
-                    "Node 列表刷新失败：所有 Extender 均未响应，请确认 Gateway、Sync 和 Async 固件支持 cmd=10/11。",
-                _ => $"Node 列表部分完成：{failed} 个 Extender 查询失败，其他结果已保留。",
-            };
+            var protocolTotal = results.Where(item => item.IsSuccess).Sum(item => item.ReportedCount);
+            var onlineVisible = results.Where(item => item.IsSuccess).Sum(item => item.Nodes.Count);
+            NodeDiscoveryStatus = failed == results.Count
+                ? "Node 列表刷新失败：所有 Extender 均未响应，请确认固件支持 cmd=100/0x0E→0x0F。"
+                : $"Node 列表刷新完成：协议返回 {protocolTotal} 个，在线显示 {onlineVisible} 个，失败 Extender {failed} 个。";
             await SaveSettingsAsync();
         }
         catch (OperationCanceledException)
@@ -3953,8 +4003,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             activeSubtask?.Result.Equals("FAILED", StringComparison.OrdinalIgnoreCase) == true
                 ? "FAILED"
                 : status.Status;
+        var usesCachedPackage = status.UsesCachedPackage;
+        GatewayPackageSourceSummary = OtaStatusDisplay.PackageSourceSummary(status);
+        GatewayPackageSourceColor = usesCachedPackage
+            ? "#168A55"
+            : string.Equals(status.PackageSource, "TRANSFER", StringComparison.OrdinalIgnoreCase)
+                ? "#2C68D8"
+                : "#65758B";
         var displayStage = status.Stage;
-        var progressPercent = displayStage.Equals("TRANSFER", StringComparison.OrdinalIgnoreCase)
+        var progressPercent = displayStage.Equals("TRANSFER", StringComparison.OrdinalIgnoreCase) && !usesCachedPackage
             ? transferProgressPercent
             : null;
         var progressText = status.Status.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) && progressPercent.HasValue
@@ -3971,7 +4028,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             : isNodePrepareTimeout
                 ? $" · Extender {activeSubtask.ExtenderId}"
                 : $" · Extender {activeSubtask.ExtenderId}：成功 {activeSubtask.SuccessCount}/{activeSubtask.TargetCount}";
-        GatewayStageSummary = $"{OtaStatusDisplay.State(displayState)} · {OtaStatusDisplay.StageSummary(displayStage, activeSubtask, _gatewayStatusDeviceType)}{progressText}{subtaskText} · 已用时 {DurationDisplay.Format(status.TaskElapsedMs ?? 0)}";
+        GatewayStageSummary = $"{OtaStatusDisplay.State(displayState)} · {OtaStatusDisplay.StageSummary(displayStage, activeSubtask, _gatewayStatusDeviceType, usesCachedPackage)}{progressText}{subtaskText} · 已用时 {DurationDisplay.Format(status.TaskElapsedMs ?? 0)}";
         GatewayStageColor = StatusColor.For(displayState);
         if (_gatewayTaskSequence != status.TaskSequence)
         {
@@ -3988,23 +4045,31 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         foreach (var stage in status.Stages.Where(stage =>
                      OtaStagePolicy.IsApplicable(_gatewayStatusDeviceType, stage.Stage)))
         {
-            var localStartTime = stage.State.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
+            var isCacheReuseTransfer = usesCachedPackage &&
+                stage.Stage.Equals("TRANSFER", StringComparison.OrdinalIgnoreCase);
+            var stageState = isCacheReuseTransfer ? "SKIPPED" : stage.State;
+            var stageReason = isCacheReuseTransfer ? "CACHE_REUSED" : stage.Reason;
+            var localStartTime = isCacheReuseTransfer
+                ? "—"
+                : stageState.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
                 ? "未开始"
                 : _gatewayTaskStartedAt?.AddMilliseconds(stage.StartOffsetMs).ToLocalTime().ToString("HH:mm:ss.fff")
                     ?? $"偏移 {stage.StartOffsetMs} ms";
             GatewayStages.Add(new GatewayStageViewItem(
                 stage.Stage,
                 _gatewayStatusDeviceType,
-                stage.State,
+                stageState,
                 stage.StartOffsetMs,
-                stage.DurationMs,
-                stage.Reason,
+                isCacheReuseTransfer ? 0 : stage.DurationMs,
+                stageReason,
                 localStartTime,
-                stage.State.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) &&
+                !isCacheReuseTransfer &&
+                stageState.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) &&
                 stage.Stage.Equals("TRANSFER", StringComparison.OrdinalIgnoreCase)
                     ? transferProgressPercent
                     : null,
-                freezeRunningAnimation));
+                freezeRunningAnimation,
+                usesCachedPackage));
         }
         GatewaySubtasks.Clear();
         foreach (var subtask in status.Subtasks)
@@ -4018,7 +4083,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 subtask.PreparedCount,
                 subtask.SuccessCount,
                 subtask.FailedCount,
-                subtask.Reason));
+                subtask.Reason,
+                subtask.CacheResult));
         }
     }
 
@@ -4409,6 +4475,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _gatewayStatusDeviceType = forward.DeviceType;
         GatewayStages.Clear();
         GatewaySubtasks.Clear();
+        GatewayPackageSourceSummary = string.Empty;
         _activeReport = new OtaReport { Task = forward, LogAnalysisConclusion = forward.Mode == OtaMode.Traditional ? "日志解析不支持" : null };
         _reportTaskIds.Clear();
         _reportTaskIds.Add(forward.Id);
@@ -5063,7 +5130,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                         extender.DeviceType,
                         extender.SoftwareVersion,
                         extender.IsSelected,
-                        extender.AsyncSoftwareVersion))
+                        extender.AsyncSoftwareVersion,
+                        extender.AsyncAddress,
+                        extender.SyncRssi,
+                        extender.SyncSnr,
+                        extender.OnlineCount,
+                        extender.TotalCount))
                     .ToArray(),
                 DiscoveredNodeGroups = DiscoveredNodeGroups
                     .Select(group => new DiscoveredNodeGroupSettings(
@@ -5074,7 +5146,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                             node.SoftwareVersion,
                             node.Rssi,
                             node.IsSelected)).ToArray(),
-                        group.Error))
+                        group.Error,
+                        group.ReportedCount))
                     .ToArray(),
                 NodeDiscoveryCompletedAt = _nodeDiscoveryCompletedAt,
             };
@@ -5797,7 +5870,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         return _gatewaySoftwareVersion.Value == expectedVersion
             ? null
-            : $"Gateway 当前版本 v{_gatewaySoftwareVersion.Value}，所选 Patch 要求旧版本 v{expectedVersion}。";
+            : $"Gateway 当前版本 {ProtocolVersionFormatter.FormatWithPrefix(_gatewaySoftwareVersion.Value)}，所选 Patch 要求旧版本 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}。";
     }
 
     private bool IsInCurrentPatchWorkspace(string filePath)
@@ -5897,7 +5970,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             oldVersion != manifest.OldVersion ||
             newVersion != manifest.NewVersion)
         {
-            return $"当前版本 {expectedOldVersion} → {expectedNewVersion} 与 Patch 元数据 v{manifest.OldVersion} → v{manifest.NewVersion} 不一致。";
+            return $"当前版本 {ProtocolVersionFormatter.FormatRaw(expectedOldVersion)} → {ProtocolVersionFormatter.FormatRaw(expectedNewVersion)} 与 Patch 元数据 {ProtocolVersionFormatter.Format(manifest.OldVersion)} → {ProtocolVersionFormatter.Format(manifest.NewVersion)} 不一致。";
         }
         var capacity = PatchCapacityPolicy.Check(deviceType, patch.Length, GetPatchCapacityLimits());
         if (!capacity.IsAllowed)
@@ -5928,8 +6001,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 var versionName = deviceType == DeviceType.Async ? "异步版本" : "同步版本";
                 return $"Extender {invalidExtender.ExtenderId} 的类型或底版本不匹配：" +
                        $"设备类型 {invalidExtender.DeviceType}、{versionName} " +
-                       $"{(actualVersion.HasValue ? $"v{actualVersion.Value}" : "未查询到")}，" +
-                       $"Patch 要求类型 {expectedType}、{versionName} v{manifest.OldVersion}。";
+                       $"{(actualVersion.HasValue ? ProtocolVersionFormatter.FormatWithPrefix(actualVersion.Value) : "未查询到")}，" +
+                       $"Patch 要求类型 {expectedType}、{versionName} {ProtocolVersionFormatter.FormatWithPrefix(manifest.OldVersion)}。";
             }
             return null;
         }
@@ -5960,7 +6033,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             node.SoftwareVersion != manifest.OldVersion);
         if (invalid is not null)
         {
-            return $"Node {invalid.NodeId} 不满足升级条件：类型 {NodeTypeCatalog.Format(invalid.NodeType)}、版本 v{invalid.SoftwareVersion}、RSSI {invalid.Rssi} dBm。";
+            return $"Node {invalid.NodeId} 不满足升级条件：类型 {NodeTypeCatalog.Format(invalid.NodeType)}、版本 {ProtocolVersionFormatter.FormatWithPrefix(invalid.SoftwareVersion)}、RSSI {invalid.Rssi} dBm。";
         }
         return null;
     }
@@ -6282,21 +6355,31 @@ public sealed class ReportListItem
             .Where(stage => OtaStagePolicy.IsApplicable(report.Task.DeviceType, stage.Stage))
             .Select(stage =>
             {
-                var startTime = !stage.State.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
+                var isCacheReuseTransfer = status.UsesCachedPackage &&
+                    stage.Stage.Equals("TRANSFER", StringComparison.OrdinalIgnoreCase);
+                var state = isCacheReuseTransfer ? "SKIPPED" : stage.State;
+                var reason = isCacheReuseTransfer ? "CACHE_REUSED" : stage.Reason;
+                var startTime = isCacheReuseTransfer
+                    ? "—"
+                    : !state.Equals("PENDING", StringComparison.OrdinalIgnoreCase)
                     ? report.StartedAt.AddMilliseconds(stage.StartOffsetMs).ToString("HH:mm:ss.fff")
                     : "未开始";
-                var duration = DurationDisplay.Format(stage.DurationMs);
-                var direction = OtaStagePresentation.Direction(stage.Stage, report.Task.DeviceType);
-                var directionOrReason = string.IsNullOrWhiteSpace(stage.Reason)
+                var duration = DurationDisplay.Format(isCacheReuseTransfer ? 0 : stage.DurationMs);
+                var direction = OtaStagePresentation.Direction(
+                    stage.Stage,
+                    report.Task.DeviceType,
+                    status.UsesCachedPackage);
+                var displayReason = OtaStatusDisplay.Reason(reason);
+                var directionOrReason = string.IsNullOrWhiteSpace(displayReason)
                     ? direction
-                    : $"{direction} · {stage.Reason}";
+                    : $"{direction} · {displayReason}";
                 return new ReportStageSummaryItem(
-                    OtaStagePresentation.Name(stage.Stage, report.Task.DeviceType),
-                    OtaStatusDisplay.State(stage.State),
+                    OtaStagePresentation.Name(stage.Stage, report.Task.DeviceType, status.UsesCachedPackage),
+                    OtaStatusDisplay.State(state),
                     startTime,
                     duration,
                     directionOrReason,
-                    StatusColor.For(stage.State));
+                    StatusColor.For(state));
             }).ToArray();
     }
 }
@@ -6327,6 +6410,11 @@ public sealed class SelectableExtenderItem : ObservableObject
         byte deviceType,
         byte softwareVersion,
         byte? asyncSoftwareVersion,
+        ushort? asyncAddress,
+        int? syncRssi,
+        sbyte? syncSnr,
+        byte? onlineCount,
+        byte? totalCount,
         bool isSelected,
         Action selectionChanged)
     {
@@ -6335,6 +6423,11 @@ public sealed class SelectableExtenderItem : ObservableObject
         DeviceType = deviceType;
         SoftwareVersion = softwareVersion;
         AsyncSoftwareVersion = asyncSoftwareVersion;
+        AsyncAddress = asyncAddress;
+        SyncRssi = syncRssi;
+        SyncSnr = syncSnr;
+        OnlineCount = onlineCount;
+        TotalCount = totalCount;
         _isSelected = isSelected;
         _selectionChanged = selectionChanged;
     }
@@ -6349,14 +6442,46 @@ public sealed class SelectableExtenderItem : ObservableObject
 
     public byte? AsyncSoftwareVersion { get; private set; }
 
+    public ushort? AsyncAddress { get; }
+
+    public int? SyncRssi { get; }
+
+    public sbyte? SyncSnr { get; }
+
+    public byte? OnlineCount { get; }
+
+    public byte? TotalCount { get; }
+
+    public string SyncVersionDisplay => ProtocolVersionFormatter.FormatWithPrefix(SoftwareVersion);
+
+    public string AsyncVersionDisplay => AsyncSoftwareVersion.HasValue
+        ? ProtocolVersionFormatter.FormatWithPrefix(AsyncSoftwareVersion.Value)
+        : "--";
+
+    public string AsyncAddressDisplay => AsyncAddress.HasValue
+        ? $"0x{AsyncAddress.Value:X4}"
+        : "--";
+
+    public string SyncSignalDisplay => SyncRssi.HasValue && SyncSnr.HasValue
+        ? $"{SyncRssi} dBm / {SyncSnr} dB"
+        : "--";
+
+    public string NodeCountDisplay => OnlineCount.HasValue && TotalCount.HasValue
+        ? $"Node {OnlineCount}/{TotalCount} 在线"
+        : "Node 状态未知";
+
     public string IdentityDisplay => AsyncSoftwareVersion.HasValue
-        ? $"扩展器 · 同步 v{SoftwareVersion} · 异步 v{AsyncSoftwareVersion.Value}"
+        ? $"扩展器 · 同步 {ProtocolVersionFormatter.FormatWithPrefix(SoftwareVersion)} · 异步 {ProtocolVersionFormatter.FormatWithPrefix(AsyncSoftwareVersion.Value)}"
         : DeviceType switch
         {
-            1 => $"扩展器-异步 · v{SoftwareVersion}",
-            2 => $"扩展器-同步 · v{SoftwareVersion}",
-            _ => $"未知类型 {DeviceType} · v{SoftwareVersion}",
+            1 => $"扩展器-异步 · {ProtocolVersionFormatter.FormatWithPrefix(SoftwareVersion)}",
+            2 => $"扩展器-同步 · {ProtocolVersionFormatter.FormatWithPrefix(SoftwareVersion)}",
+            _ => $"未知类型 {DeviceType} · {ProtocolVersionFormatter.FormatWithPrefix(SoftwareVersion)}",
         };
+
+    public string StatusDisplay => AsyncAddress.HasValue
+        ? $"Async 0x{AsyncAddress.Value:X4} · Sync RSSI {SyncRssi} dBm / SNR {SyncSnr} dB · 在线 {OnlineCount}/{TotalCount}"
+        : string.Empty;
 
     public byte? GetSoftwareVersion(DeviceType deviceType) => deviceType switch
     {
@@ -6370,6 +6495,7 @@ public sealed class SelectableExtenderItem : ObservableObject
         if (SoftwareVersion == softwareVersion) return;
         SoftwareVersion = softwareVersion;
         OnPropertyChanged(nameof(SoftwareVersion));
+        OnPropertyChanged(nameof(SyncVersionDisplay));
         OnPropertyChanged(nameof(IdentityDisplay));
     }
 
@@ -6386,6 +6512,7 @@ public sealed class SelectableExtenderItem : ObservableObject
         }
         AsyncSoftwareVersion = softwareVersion;
         OnPropertyChanged(nameof(AsyncSoftwareVersion));
+        OnPropertyChanged(nameof(AsyncVersionDisplay));
         OnPropertyChanged(nameof(IdentityDisplay));
     }
 
@@ -6426,8 +6553,8 @@ public sealed class SelectableNodeItem : ObservableObject
         NodeId = node.NodeId;
         NodeType = node.NodeType;
         SoftwareVersion = node.SoftwareVersion;
-        // 网关上报值可能使用正数表示信号强度绝对值，界面和门限判断统一使用 dBm 负值。
-        Rssi = node.Rssi > 0 ? (sbyte)-node.Rssi : node.Rssi;
+        // 兼容旧设置中的 RSSI 绝对值；新协议解析结果已经统一为 -200～0 dBm。
+        Rssi = node.Rssi > 0 ? -Math.Min(node.Rssi, 200) : Math.Max(node.Rssi, -200);
         SequenceNumber = sequenceNumber;
         _isSelected = isSelected;
         _selectionChanged = selectionChanged;
@@ -6445,16 +6572,19 @@ public sealed class SelectableNodeItem : ObservableObject
 
     public byte SoftwareVersion { get; private set; }
 
+    public string SoftwareVersionDisplay => ProtocolVersionFormatter.FormatWithPrefix(SoftwareVersion);
+
     public void ApplySoftwareVersion(byte softwareVersion)
     {
         if (SoftwareVersion == softwareVersion) return;
         SoftwareVersion = softwareVersion;
         OnPropertyChanged(nameof(SoftwareVersion));
+        OnPropertyChanged(nameof(SoftwareVersionDisplay));
     }
 
     public void RefreshNodeTypeDisplay() => OnPropertyChanged(nameof(NodeTypeDisplay));
 
-    public sbyte Rssi { get; }
+    public int Rssi { get; }
 
     public bool CanSelect
     {
@@ -6470,11 +6600,15 @@ public sealed class SelectableNodeItem : ObservableObject
 
     public void ApplyEligibility(int? requiredType, byte? requiredVersion)
     {
-        CanSelect = (!requiredType.HasValue || NodeType == requiredType.Value) &&
+        var hasKnownVersion = ProtocolVersionFormatter.IsKnown(SoftwareVersion);
+        CanSelect = hasKnownVersion &&
+                    (!requiredType.HasValue || NodeType == requiredType.Value) &&
                     (!requiredVersion.HasValue || SoftwareVersion == requiredVersion.Value);
         SelectionHint = CanSelect
             ? string.Empty
-            : $"Patch 要求类型 {NodeTypeCatalog.Format(requiredType ?? NodeType)}、底版本 v{requiredVersion}";
+            : !hasKnownVersion
+                ? "协议返回未知版本，不能升级"
+                : $"Patch 要求类型 {NodeTypeCatalog.Format(requiredType ?? NodeType)}、底版本 {ProtocolVersionFormatter.FormatWithPrefix(requiredVersion ?? SoftwareVersion)}";
         if (!CanSelect && IsSelected) IsSelected = false;
     }
 
@@ -6483,6 +6617,7 @@ public sealed class SelectableNodeItem : ObservableObject
         get => _isSelected;
         set
         {
+            if (value && !CanSelect) return;
             if (SetProperty(ref _isSelected, value)) _selectionChanged();
         }
     }
@@ -6497,10 +6632,12 @@ public sealed class NodeGroupItem : ObservableObject
         IReadOnlyList<GatewayNodeInfo> nodes,
         IReadOnlySet<ushort> selectedNodeIds,
         string? error,
+        int reportedCount,
         Action selectionChanged)
     {
         ExtenderId = extenderId;
         Error = error ?? string.Empty;
+        ReportedCount = Math.Max(nodes.Count, reportedCount);
         _selectionChanged = selectionChanged;
         Nodes = new ObservableCollection<SelectableNodeItem>(
             nodes.Select((node, index) => new SelectableNodeItem(
@@ -6517,7 +6654,7 @@ public sealed class NodeGroupItem : ObservableObject
 
     public bool HasError => !string.IsNullOrWhiteSpace(Error);
 
-    public Visibility NodeListVisibility => Nodes.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility NodeListVisibility => Visibility.Visible;
 
     public ObservableCollection<SelectableNodeItem> Nodes { get; }
 
@@ -6525,11 +6662,13 @@ public sealed class NodeGroupItem : ObservableObject
 
     public int TotalNodeCount => Nodes.Count;
 
+    public int ReportedCount { get; }
+
     public int VisibleNodeCount => VisibleNodes.Count;
 
-    public string NodeCountSummary => VisibleNodeCount == TotalNodeCount
-        ? $"共 {TotalNodeCount} 个 Node"
-        : $"显示 {VisibleNodeCount} / {TotalNodeCount} 个 Node";
+    public string NodeCountSummary => VisibleNodeCount == TotalNodeCount && TotalNodeCount == ReportedCount
+        ? $"共 {TotalNodeCount} 个在线 Node"
+        : $"在线显示 {VisibleNodeCount} / 协议返回 {ReportedCount}";
 
     public void SetFilter(string searchText, int? filterType)
     {
@@ -6552,7 +6691,7 @@ public sealed class NodeGroupItem : ObservableObject
 
     public void SetAll(bool selected)
     {
-        foreach (var node in Nodes) node.IsSelected = selected;
+        foreach (var node in Nodes) node.IsSelected = selected && node.CanSelect;
         _selectionChanged();
     }
 }
@@ -6709,15 +6848,16 @@ public sealed record GatewayStageViewItem(
     string Reason,
     string LocalStartTime,
     double? ProgressPercent,
-    bool FreezeRunningAnimation)
+    bool FreezeRunningAnimation,
+    bool UsesCachedPackage)
 {
     public string StateColor => StatusColor.For(State);
 
     public string DisplayDuration => DurationDisplay.Format(DurationMs);
 
-    public string DisplayStage => OtaStagePresentation.Name(Stage, DeviceType);
+    public string DisplayStage => OtaStagePresentation.Name(Stage, DeviceType, UsesCachedPackage);
 
-    public string Direction => OtaStagePresentation.Direction(Stage, DeviceType);
+    public string Direction => OtaStagePresentation.Direction(Stage, DeviceType, UsesCachedPackage);
 
     public string DisplayState => OtaStatusDisplay.State(State);
 
@@ -6751,7 +6891,8 @@ public sealed record GatewaySubtaskViewItem(
     int PreparedCount,
     int SuccessCount,
     int FailedCount,
-    string Reason)
+    string Reason,
+    string CacheResult)
 {
     public string StateColor => StatusColor.For(Result);
 
@@ -6769,20 +6910,31 @@ public sealed record GatewaySubtaskViewItem(
 
     public string DisplayReason => OtaStatusDisplay.Reason(Reason);
 
-    public string CountSummary => OtaStatusDisplay.IsNodePrepareTimeout(
-        Result,
-        Reason,
-        PreparedCount,
-        TargetCount)
-            ? $"已准备 {PreparedCount}/{TargetCount}，未响应 {TargetCount - PreparedCount}"
-            : $"目标 {TargetCount} / 成功 {SuccessCount} / 失败 {FailedCount}";
+    public string CountSummary
+    {
+        get
+        {
+            var countSummary = OtaStatusDisplay.IsNodePrepareTimeout(
+                Result,
+                Reason,
+                PreparedCount,
+                TargetCount)
+                    ? $"已准备 {PreparedCount}/{TargetCount}，未响应 {TargetCount - PreparedCount}"
+                    : $"目标 {TargetCount} / 成功 {SuccessCount} / 失败 {FailedCount}";
+            var cacheSummary = OtaStatusDisplay.CacheResult(CacheResult);
+            return string.IsNullOrWhiteSpace(cacheSummary)
+                ? countSummary
+                : $"缓存 {cacheSummary} · {countSummary}";
+        }
+    }
 }
 
 public static class OtaStagePresentation
 {
-    public static string Name(string stage, DeviceType deviceType)
+    public static string Name(string stage, DeviceType deviceType, bool usesCachedPackage = false)
         => stage.ToUpperInvariant() switch
         {
+            "TRANSFER" when usesCachedPackage => "缓存复用",
             "TRANSFER" => "数据传输",
             "REPAIR" when deviceType == DeviceType.Sync => "同步拓展器升级",
             "REPAIR" when deviceType == DeviceType.Async => "异步拓展器升级",
@@ -6790,12 +6942,13 @@ public static class OtaStagePresentation
             _ => OtaStatusDisplay.Stage(stage),
         };
 
-    public static string Direction(string stage, DeviceType deviceType)
+    public static string Direction(string stage, DeviceType deviceType, bool usesCachedPackage = false)
         => stage.ToUpperInvariant() switch
         {
             "REQUEST_ACCEPTED" => "MQTT to 网关",
             "PATCH_DOWNLOAD" => "HTTP to 网关",
             "PATCH_VERIFY" => "网关本地",
+            "TRANSFER" when usesCachedPackage => "Sync 本地缓存",
             "PREPARE" or "TRANSFER" => "网关 to Sync",
             "REPAIR" when deviceType == DeviceType.Sync => "Sync 本地",
             "REPAIR" when deviceType == DeviceType.Async => "Sync to Async",
@@ -6821,10 +6974,50 @@ public static class OtaStatusDisplay
 
     public static string Reason(string code) => ReasonDescription(code);
 
+    public static string CacheResult(string code) => (code ?? string.Empty).ToUpperInvariant() switch
+    {
+        "" => string.Empty,
+        "HIT" => "命中",
+        "MISS" => "未命中",
+        "BUSY" => "设备忙",
+        "ERROR" => "查询错误",
+        "TIMEOUT" => "查询超时",
+        "UNKNOWN" => "未知",
+        _ => code ?? string.Empty,
+    };
+
+    public static string PackageSourceSummary(GatewayOtaStatus status)
+    {
+        var source = status.UsesCachedPackage
+            ? "CACHE"
+            : (status.PackageSource ?? string.Empty).ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(source)) return string.Empty;
+
+        var parts = new List<string>
+        {
+            source switch
+            {
+                "CACHE" => "包来源：Sync 缓存",
+                "TRANSFER" => "包来源：Gateway 完整传输",
+                _ => $"包来源：{source}",
+            },
+        };
+        if (status.CacheHitCount.HasValue && status.CacheTargetTotal.HasValue)
+        {
+            parts.Add($"缓存命中 {status.CacheHitCount.Value}/{status.CacheTargetTotal.Value}");
+        }
+        if (status.CacheQueryElapsedMs.HasValue)
+        {
+            parts.Add($"查询耗时 {DurationDisplay.Format(status.CacheQueryElapsedMs.Value)}");
+        }
+        return string.Join(" · ", parts);
+    }
+
     public static string StageSummary(
         string stage,
         GatewayOtaSubtask? subtask,
-        DeviceType deviceType)
+        DeviceType deviceType,
+        bool usesCachedPackage = false)
     {
         if (deviceType == DeviceType.Node &&
             subtask is not null && IsNodePrepareTimeout(
@@ -6835,7 +7028,13 @@ public static class OtaStatusDisplay
         {
             return $"Node 准备超时（{subtask.PreparedCount}/{subtask.TargetCount}）";
         }
-        return OtaStagePresentation.Name(stage, deviceType);
+        if (usesCachedPackage && stage.Equals("TRANSFER", StringComparison.OrdinalIgnoreCase))
+        {
+            return subtask is null
+                ? "缓存复用"
+                : $"缓存复用完成 · {Stage(subtask.Stage)}";
+        }
+        return OtaStagePresentation.Name(stage, deviceType, usesCachedPackage);
     }
 
     public static bool IsNodePrepareTimeout(
@@ -6869,6 +7068,7 @@ public static class OtaStatusDisplay
     {
         "SUCCESS" or "SUCCEEDED" or "COMPLETED" => "成功",
         "PASSED" => "已通过",
+        "SKIPPED" => "已跳过",
         "FAILED" => "失败",
         "CANCELLED" => "已取消",
         "TIMEDOUT" => "已超时",
@@ -6883,6 +7083,7 @@ public static class OtaStatusDisplay
         "" => string.Empty,
         "TIMEOUT" => "超时",
         "CANCELLED" => "已取消",
+        "CACHE_REUSED" => "已复用缓存，跳过 Gateway to Sync 数据传输",
         "DOWNSTREAM_FAILED" => "下游升级失败",
         "OFFLINE" => "目标离线或未注册",
         "VERSION_MISMATCH" => "版本不匹配",
@@ -6898,7 +7099,7 @@ public static class StatusColor
 {
     public static string For(string state) => state.ToUpperInvariant() switch
     {
-        "SUCCESS" or "SUCCEEDED" or "COMPLETED" or "PASSED" => "#168A55",
+        "SUCCESS" or "SUCCEEDED" or "COMPLETED" or "PASSED" or "SKIPPED" => "#168A55",
         "FAILED" or "CANCELLED" or "TIMEDOUT" => "#C73A3A",
         "RUNNING" or "ACTIVE" => "#2C68D8",
         "PENDING" => "#8A96A8",

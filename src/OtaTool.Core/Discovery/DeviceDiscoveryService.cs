@@ -8,26 +8,30 @@ namespace OtaTool.Core.Discovery;
 public sealed record ExtenderNodeDiscoveryResult(
     uint ExtenderId,
     IReadOnlyList<GatewayNodeInfo> Nodes,
+    int ReportedCount,
     string? Error)
 {
     public bool IsSuccess => string.IsNullOrWhiteSpace(Error);
 }
 
-public sealed record ExtenderAsyncVersionDiscoveryResult(
+public sealed record ExtenderStatusDiscoveryResult(
     uint ExtenderId,
-    byte? SoftwareVersion,
+    GatewayExtenderStatus? Status,
     string? Error)
 {
-    public bool IsSuccess => SoftwareVersion is >= 1 and <= 254 && string.IsNullOrWhiteSpace(Error);
+    public bool IsSuccess => Status is not null && string.IsNullOrWhiteSpace(Error);
 }
 
 public sealed record DeviceDiscoveryOptions(
     TimeSpan ResponseTimeout,
     TimeSpan AuthListQuietPeriod,
-    int NodeGroupAttempts = 2)
+    int NodeGroupAttempts = 2,
+    TimeSpan? ResponseDrainPeriod = null)
 {
     public static DeviceDiscoveryOptions Default { get; } = new(
         TimeSpan.FromSeconds(5),
+        TimeSpan.FromMilliseconds(500),
+        2,
         TimeSpan.FromMilliseconds(500));
 }
 
@@ -35,6 +39,7 @@ public sealed class DeviceDiscoveryService
 {
     private readonly IMqttTransport _mqtt;
     private readonly DeviceDiscoveryOptions _options;
+    private readonly ConcurrentDictionary<uint, SemaphoreSlim> _extenderQueryLocks = new();
     private int _sequence = Math.Max(1, Environment.TickCount & 0x3fffffff);
 
     public DeviceDiscoveryService(IMqttTransport mqtt, DeviceDiscoveryOptions? options = null)
@@ -43,7 +48,8 @@ public sealed class DeviceDiscoveryService
         _options = options ?? DeviceDiscoveryOptions.Default;
         if (_options.ResponseTimeout <= TimeSpan.Zero ||
             _options.AuthListQuietPeriod <= TimeSpan.Zero ||
-            _options.NodeGroupAttempts < 1)
+            _options.NodeGroupAttempts < 1 ||
+            (_options.ResponseDrainPeriod.HasValue && _options.ResponseDrainPeriod.Value < TimeSpan.Zero))
         {
             throw new ArgumentOutOfRangeException(nameof(options));
         }
@@ -166,14 +172,23 @@ public sealed class DeviceDiscoveryService
             {
                 try
                 {
+                    var response = await ExecuteExtenderQueryAsync(
+                        extenderId,
+                        token => RequestNodeListAsync(gatewayId, extenderId, token),
+                        cancellationToken);
+                    var onlineNodes = response.Nodes
+                        .Where(node => node.IsOnline)
+                        .OrderBy(node => node.NodeId)
+                        .ToArray();
                     return new ExtenderNodeDiscoveryResult(
                         extenderId,
-                        await QueryNodeGroupWithRetryAsync(gatewayId, extenderId, cancellationToken),
+                        onlineNodes,
+                        response.Nodes.Count,
                         null);
                 }
                 catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
                 {
-                    return new ExtenderNodeDiscoveryResult(extenderId, [], exception.Message);
+                    return new ExtenderNodeDiscoveryResult(extenderId, [], 0, exception.Message);
                 }
             })
             .ToArray();
@@ -184,7 +199,7 @@ public sealed class DeviceDiscoveryService
         return await Task.WhenAll(tasks);
     }
 
-    public async Task<IReadOnlyList<ExtenderAsyncVersionDiscoveryResult>> DiscoverAsyncVersionsAsync(
+    public async Task<IReadOnlyList<ExtenderStatusDiscoveryResult>> DiscoverExtenderStatusesAsync(
         string gatewayId,
         IEnumerable<uint> extenderIds,
         CancellationToken cancellationToken = default)
@@ -197,25 +212,15 @@ public sealed class DeviceDiscoveryService
             {
                 try
                 {
-                    var response = await RequestAsyncVersionAsync(
-                        gatewayId,
+                    var response = await ExecuteExtenderQueryAsync(
                         extenderId,
+                        token => RequestExtenderStatusAsync(gatewayId, extenderId, token),
                         cancellationToken);
-                    if (!response.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
-                    {
-                        return new ExtenderAsyncVersionDiscoveryResult(
-                            extenderId,
-                            null,
-                            $"Gateway 返回 {response.Result}/{response.Reason}。");
-                    }
-                    return new ExtenderAsyncVersionDiscoveryResult(
-                        extenderId,
-                        response.SoftwareVersion,
-                        null);
+                    return new ExtenderStatusDiscoveryResult(extenderId, response, null);
                 }
                 catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
                 {
-                    return new ExtenderAsyncVersionDiscoveryResult(extenderId, null, exception.Message);
+                    return new ExtenderStatusDiscoveryResult(extenderId, null, exception.Message);
                 }
             })
             .ToArray();
@@ -226,90 +231,79 @@ public sealed class DeviceDiscoveryService
         return await Task.WhenAll(tasks);
     }
 
-    private async Task<IReadOnlyList<GatewayNodeInfo>> QueryNodeGroupWithRetryAsync(
-        string gatewayId,
+    private async Task<T> ExecuteExtenderQueryAsync<T>(
         uint extenderId,
+        Func<CancellationToken, Task<T>> query,
         CancellationToken cancellationToken)
     {
-        Exception? firstError = null;
-        for (var attempt = 0; attempt < _options.NodeGroupAttempts; attempt++)
+        var queryLock = _extenderQueryLocks.GetOrAdd(extenderId, static _ => new SemaphoreSlim(1, 1));
+        await queryLock.WaitAsync(cancellationToken);
+        try
         {
-            try
+            Exception? lastError = null;
+            for (var attempt = 1; attempt <= _options.NodeGroupAttempts; attempt++)
             {
-                return await QueryNodeGroupOnceAsync(gatewayId, extenderId, cancellationToken);
+                try
+                {
+                    return await query(cancellationToken);
+                }
+                catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+                {
+                    lastError = exception;
+                    if (attempt < _options.NodeGroupAttempts)
+                    {
+                        var drainPeriod = _options.ResponseDrainPeriod ?? TimeSpan.FromMilliseconds(500);
+                        if (drainPeriod > TimeSpan.Zero)
+                        {
+                            await Task.Delay(drainPeriod, cancellationToken);
+                        }
+                    }
+                }
             }
-            catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
-            {
-                firstError ??= exception;
-            }
+            throw new InvalidOperationException(
+                $"Extender {extenderId} 查询重试后仍失败：{lastError?.Message}",
+                lastError);
         }
-        throw new InvalidOperationException(
-            $"Extender {extenderId} 的 Node 分页查询重试后仍失败：{firstError?.Message}");
+        finally
+        {
+            queryLock.Release();
+        }
     }
 
-    private async Task<IReadOnlyList<GatewayNodeInfo>> QueryNodeGroupOnceAsync(
+    private async Task<GatewayNodeList> RequestNodeListAsync(
         string gatewayId,
         uint extenderId,
-        CancellationToken cancellationToken)
-    {
-        var pages = new Dictionary<int, GatewayNodeListPage>();
-        var first = await RequestNodePageAsync(gatewayId, extenderId, 0, cancellationToken);
-        ValidatePage(first, extenderId, 0, null);
-        pages[0] = first;
-        for (var pageIndex = 1; pageIndex < first.PageCount; pageIndex++)
-        {
-            var page = await RequestNodePageAsync(gatewayId, extenderId, pageIndex, cancellationToken);
-            ValidatePage(page, extenderId, pageIndex, first);
-            pages[pageIndex] = page;
-        }
-
-        var nodesById = new Dictionary<ushort, GatewayNodeInfo>();
-        foreach (var node in pages.OrderBy(pair => pair.Key).SelectMany(pair => pair.Value.Nodes))
-        {
-            if (nodesById.TryGetValue(node.NodeId, out var existing) && existing.NodeType != node.NodeType)
-            {
-                throw new InvalidDataException($"Node {node.NodeId} 在分页中出现冲突类型。");
-            }
-            nodesById[node.NodeId] = node;
-        }
-        var nodes = nodesById.Values.OrderBy(node => node.NodeId).ToArray();
-        if (nodes.Length != first.TotalCount)
-        {
-            throw new InvalidDataException(
-                $"分页总数不一致，声明 {first.TotalCount}，实际 {nodes.Length}。");
-        }
-
-        // 部分固件会把注册表中的空槽或失效记录一并放进 Node 列表，
-        // 这类记录的版本和 RSSI 都为 0，不能作为真实在线 Node 提供给升级任务。
-        return nodes
-            .Where(node => node.SoftwareVersion != 0 || node.Rssi != 0)
-            .ToArray();
-    }
-
-    private async Task<GatewayNodeListPage> RequestNodePageAsync(
-        string gatewayId,
-        uint extenderId,
-        int pageIndex,
         CancellationToken cancellationToken)
     {
         var sequence = NextSequence();
-        var completion = new TaskCompletionSource<GatewayNodeListPage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completion = new TaskCompletionSource<GatewayNodeList>(TaskCreationOptions.RunContinuationsAsynchronously);
 
         void Handler(object? _, MqttApplicationMessage message)
         {
-            if (!MatchesUpstreamTopic(message.Topic, gatewayId, sequence) ||
-                !OtaMessageCodec.TryParseNodeListPage(message.GetPayloadAsUtf8(), out var page) ||
-                page is null || page.QuerySequence != sequence)
+            if (!MatchesGatewayUpstreamTopic(message.Topic, gatewayId))
             {
                 return;
             }
-            completion.TrySetResult(page);
+            if (!OtaMessageCodec.TryParseAsyncNodeListResponse(
+                    message.GetPayloadAsUtf8(),
+                    extenderId,
+                    out var response,
+                    out var protocolError))
+            {
+                if (!string.IsNullOrWhiteSpace(protocolError))
+                {
+                    completion.TrySetException(new InvalidDataException(protocolError));
+                }
+                return;
+            }
+            if (response is null || response.ExtenderId != extenderId) return;
+            completion.TrySetResult(response);
         }
 
         _mqtt.MessageReceived += Handler;
         try
         {
-            var request = OtaMessageCodec.CreateNodeListQuery(gatewayId, sequence, extenderId, pageIndex);
+            var request = OtaMessageCodec.CreateAsyncNodeListQuery(gatewayId, sequence, extenderId);
             await _mqtt.PublishAsync(
                 new MqttApplicationMessage(request.Topic, System.Text.Encoding.UTF8.GetBytes(request.JsonPayload), request.QualityOfService),
                 cancellationToken);
@@ -321,7 +315,7 @@ public sealed class DeviceDiscoveryService
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new TimeoutException($"等待 Extender {extenderId} 的第 {pageIndex + 1} 页 Node 列表响应超时。");
+                throw new TimeoutException($"等待 Extender {extenderId} 的 0x0F Node 列表响应超时。");
             }
         }
         finally
@@ -330,34 +324,41 @@ public sealed class DeviceDiscoveryService
         }
     }
 
-    private async Task<GatewayAsyncVersion> RequestAsyncVersionAsync(
+    private async Task<GatewayExtenderStatus> RequestExtenderStatusAsync(
         string gatewayId,
         uint extenderId,
         CancellationToken cancellationToken)
     {
         var sequence = NextSequence();
-        var completion = new TaskCompletionSource<GatewayAsyncVersion>(
+        var completion = new TaskCompletionSource<GatewayExtenderStatus>(
             TaskCreationOptions.RunContinuationsAsynchronously);
 
         void Handler(object? _, MqttApplicationMessage message)
         {
-            if (!MatchesUpstreamTopic(message.Topic, gatewayId, sequence) ||
-                !OtaMessageCodec.TryParseAsyncVersionResponse(
-                    message.GetPayloadAsUtf8(),
-                    out var response) ||
-                response is null ||
-                response.QuerySequence != sequence ||
-                response.ExtenderId != extenderId)
+            if (!MatchesGatewayUpstreamTopic(message.Topic, gatewayId))
             {
                 return;
             }
+            if (!OtaMessageCodec.TryParseAsyncStatusResponse(
+                    message.GetPayloadAsUtf8(),
+                    extenderId,
+                    out var response,
+                    out var protocolError))
+            {
+                if (!string.IsNullOrWhiteSpace(protocolError))
+                {
+                    completion.TrySetException(new InvalidDataException(protocolError));
+                }
+                return;
+            }
+            if (response is null) return;
             completion.TrySetResult(response);
         }
 
         _mqtt.MessageReceived += Handler;
         try
         {
-            var request = OtaMessageCodec.CreateAsyncVersionQuery(
+            var request = OtaMessageCodec.CreateAsyncStatusQuery(
                 gatewayId,
                 sequence,
                 extenderId);
@@ -376,41 +377,12 @@ public sealed class DeviceDiscoveryService
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
-                    $"等待 Extender {extenderId} 的异步板版本响应超时。");
+                    $"等待 Extender {extenderId} 的 0x11 状态响应超时。");
             }
         }
         finally
         {
             _mqtt.MessageReceived -= Handler;
-        }
-    }
-
-    private static void ValidatePage(
-        GatewayNodeListPage page,
-        uint extenderId,
-        int pageIndex,
-        GatewayNodeListPage? first)
-    {
-        if (!page.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException($"Gateway 返回 {page.Result}/{page.Reason}。");
-        }
-        if (page.ExtenderId != extenderId || page.PageIndex != pageIndex ||
-            page.PageCount is < 1 or > 5 || page.TotalCount is < 0 or > 256 ||
-            page.Nodes.Count > 56 || page.Nodes.Any(node => node.NodeId == 0))
-        {
-            throw new InvalidDataException("Node 分页字段非法。");
-        }
-        var expectedPageCount = Math.Max(1, (page.TotalCount + 55) / 56);
-        var expectedItemCount = Math.Min(56, Math.Max(0, page.TotalCount - pageIndex * 56));
-        if (page.PageCount != expectedPageCount || page.Nodes.Count != expectedItemCount)
-        {
-            throw new InvalidDataException("Node 分页数量与元数据不一致。");
-        }
-        if (first is not null &&
-            (page.PageCount != first.PageCount || page.TotalCount != first.TotalCount))
-        {
-            throw new InvalidDataException("Node 分页元数据不一致。");
         }
     }
 
@@ -420,17 +392,6 @@ public sealed class DeviceDiscoveryService
         if (value > 0) return value;
         Interlocked.Exchange(ref _sequence, 1);
         return 1;
-    }
-
-    private static bool MatchesUpstreamTopic(string topic, string gatewayId, int sequence)
-    {
-        var segments = topic.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return segments.Length >= 5 &&
-               segments[0] == "ucchip" &&
-               segments[1] == "up" &&
-               segments[2] == "sgw" &&
-               segments[3] == gatewayId &&
-               segments[^1] == sequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
     }
 
     private static bool MatchesGatewayUpstreamTopic(string topic, string gatewayId)

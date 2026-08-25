@@ -1,78 +1,78 @@
-# EcoLink 异步板版本查询协议
+# EcoLink `cmd=100` 异步查询协议
 
-## 背景
+## 查询职责
 
-Gateway 鉴权列表中的 `software_version` 表示 Extender 同步板版本，不能用于判断同一块 Extender 上异步板的当前版本。桌面工具在“拓展器-异步升级”模式刷新 Extender 时，需要在取得鉴权列表后逐个查询异步板版本；同步升级仍只读取鉴权列表。
+- Gateway `cmd=3` 鉴权列表仍用于取得 Sync 完整 WIoTa ID，以及 Sync 升级所需的原始版本字节。
+- Node 列表使用 `cmd=100 + 0x0E/0x0F`。
+- Sync/Async 状态使用 `cmd=100 + 0x10/0x11`；Async 升级以响应中的 `async_version` 为准。
+- 工具不再发送或解析旧的 `cmd=10～13`，也不在新查询失败时回退旧协议。
 
-## MQTT 请求
+## MQTT 透传封装
 
-- 命令：`cmd=12`
-- 下行主题：`ucchip/down/sgw/{gateway_id}/{query_seq}`
-- `query_seq`：工具生成的正整数事务号。
-- `extender_id`：鉴权列表中对应 Extender 的设备 ID。
-
-```json
-{
-  "cmd": 12,
-  "ver": "v2.0",
-  "src": 0,
-  "dst": 0,
-  "async_version": {
-    "query_seq": 2038,
-    "extender_id": 1821373
-  }
-}
-```
-
-Gateway 应将查询转发到目标 Sync，再由 Sync 通过内部串口向 Async 查询当前 `SOFTWARE_VERSION`。
-
-## MQTT 响应
-
-- 命令：`cmd=13`
-- 上行主题：`ucchip/up/sgw/{gateway_id}/{query_seq}`
-- `query_seq` 和 `extender_id` 必须原样返回，工具据此关联并发查询。
-- 成功时 `software_version` 必须为 `1～254`。
+Node 列表请求：
 
 ```json
 {
-  "cmd": 13,
+  "cmd": 100,
   "ver": "v2.0",
   "src": 0,
-  "dst": 0,
-  "async_version": {
-    "query_seq": 2038,
-    "extender_id": 1821373,
-    "result": "OK",
-    "reason": "NONE",
-    "software_version": 2
-  }
+  "dst": 1821373,
+  "fmt": "hex",
+  "uc": "C00104"
 }
 ```
 
-失败响应不携带有效版本，示例：
+状态请求仅将 `uc` 改为 `000204`。`dst` 必须是鉴权列表中的完整 Sync ID；MQTT 主题末尾序号只用于发布，不能作为响应事务号。
 
-```json
-{
-  "cmd": 13,
-  "ver": "v2.0",
-  "src": 0,
-  "dst": 0,
-  "async_version": {
-    "query_seq": 2038,
-    "extender_id": 1821373,
-    "result": "FAILED",
-    "reason": "TIMEOUT",
-    "software_version": 0
-  }
-}
+工具兼容 Gateway 直接返回单个 JSON 对象，以及 MQTT 服务将一个或多个上行项包装为 JSON 数组的格式；数组会逐项解析。只处理同时包含 `cmd=100`、`src`、`fmt` 和 `data` 的上行项，仅含 `uc.res` 的发送 ACK 会被忽略。响应允许 `fmt=hex` 或 `fmt=base64`，拒绝 `string`、奇数长度 Hex 和非法 Base64。
+
+## 应用帧校验
+
+三字节 Header 按小端 24 位整数解析：
+
+- `Property`：bit 0～4，响应固定为 `0x09`。
+- `Cmd`：bit 5～11，设备列表为 `0x0F`，状态为 `0x11`。
+- `SrcType`：bit 12～17，响应固定为 `1`。
+- `DestType`：bit 18～23，响应固定为 `0`。
+
+Header 后依次为 Async 应用地址（小端 16 位）、一字节 `DataLen` 和数据区。工具要求 `DataLen` 与实际帧长度完全相等，不接受截断和尾随字节。
+
+### `0x0F` Node 列表
+
+数据区为：
+
+```text
+设备数 + N × (Node 类型 + Node ID LE16 + RSSI 绝对值 + 软件版本)
 ```
 
-## 工具行为
+- 单帧最多 50 项；51 项及以上明确作为协议容量错误，不截断。
+- Node ID 必须非零且不重复，类型范围为 2～63。
+- RSSI 绝对值范围为 0～200；`0` 表示未上线，解析时保留语义，在返回界面前过滤。
+- 软件版本 `0/255` 作为“未知版本”显示，不能参与升级。
 
-1. 同步升级：刷新鉴权列表后直接使用同步板版本，不发送 `cmd=12`。
-2. 异步升级：先刷新鉴权列表，再对在线 Extender 并发发送 `cmd=12`。
-3. 仅版本查询成功的 Extender 可进入异步升级目标列表；部分失败会明确提示失败数量。
-4. 所有查询均失败时清空发现列表，避免把同步版本误认为异步版本。
-5. 正向、反向按钮高亮、启动前校验和成功后的本地版本更新均使用与升级类型对应的版本。
+### `0x11` Sync/Async 状态
 
-> 当前仓库完成的是桌面工具端协议和处理逻辑。Gateway、Sync、Async 固件也必须实现上述 `cmd=12/13` 转发与应答，旧固件不会返回异步板版本。
+数据区固定 6 字节：
+
+```text
+sync_version + sync_rssi_abs + sync_snr_i8 + async_version + online_count + total_count
+```
+
+界面显示 Sync/Async 版本、Sync RSSI/SNR，以及在线数/总数。原始版本字节继续用于 Patch 校验和 MQTT 下发；显示时按十进制一位小数转换，例如 `1 → 0.1`、`23 → 2.3`。
+
+## 调度与失败处理
+
+- 同一完整 Extender ID 的 `0x0E` 与 `0x10` 使用同一把查询锁，严格串行。
+- 不同 Extender 并行查询。
+- 响应按 Gateway 上行主题、顶层 `src` 和应用层 Cmd 关联。
+- 每次等待 5 秒，最多两次；重试前保留 500 ms 过期响应排空期。
+- 完成、超时或取消后立即注销处理器，重复响应不能覆盖已完成结果。
+- 单板失败不丢弃其他 Extender 的成功结果；全部 `0x11` 查询失败时清空 Async 可升级目标。
+
+## 固件联调前提
+
+Gateway、Sync、Async 和工具必须成套升级：
+
+1. Async 的 `0x0F` 必须返回文档规定的 5 字节设备项，并输出 RSSI 绝对值。
+2. Async 必须实现 `0x10 → 0x11` 固定 6 字节状态组包。
+3. 未完成上述固件修改时，工具会严格超时并禁止 Async 升级，不会生成伪造结果或回退旧协议。

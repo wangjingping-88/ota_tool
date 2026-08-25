@@ -228,16 +228,22 @@ public sealed record DiscoveredExtenderSettings(
     byte DeviceType,
     byte SoftwareVersion,
     bool IsSelected,
-    byte? AsyncSoftwareVersion = null);
+    byte? AsyncSoftwareVersion = null,
+    ushort? AsyncAddress = null,
+    int? SyncRssi = null,
+    sbyte? SyncSnr = null,
+    byte? OnlineCount = null,
+    byte? TotalCount = null);
 
 public sealed record NodeTypeDefinitionSettings(int Value, string Name);
 
-public sealed record DiscoveredNodeSettings(ushort NodeId, byte NodeType, byte SoftwareVersion, sbyte Rssi, bool IsSelected);
+public sealed record DiscoveredNodeSettings(ushort NodeId, byte NodeType, byte SoftwareVersion, int Rssi, bool IsSelected);
 
 public sealed record DiscoveredNodeGroupSettings(
     uint ExtenderId,
     IReadOnlyList<DiscoveredNodeSettings> Nodes,
-    string Error);
+    string Error,
+    int? ReportedCount = null);
 
 public sealed class JsonSettingsStore
 {

@@ -37,7 +37,10 @@ public sealed record GatewayOtaSubtask(
     int PreparedCount,
     int SuccessCount,
     int FailedCount,
-    string Reason);
+    string Reason)
+{
+    public string CacheResult { get; init; } = string.Empty;
+}
 
 public sealed record GatewayOtaStatus(
     int QuerySequence,
@@ -53,7 +56,23 @@ public sealed record GatewayOtaStatus(
     int? TargetSuccess,
     int? TargetFailed,
     IReadOnlyList<GatewayOtaStage> Stages,
-    IReadOnlyList<GatewayOtaSubtask> Subtasks);
+    IReadOnlyList<GatewayOtaSubtask> Subtasks)
+{
+    public string PackageSource { get; init; } = string.Empty;
+
+    public int? CacheTargetTotal { get; init; }
+
+    public int? CacheHitCount { get; init; }
+
+    public long? CacheQueryElapsedMs { get; init; }
+
+    public bool UsesCachedPackage =>
+        string.Equals(PackageSource, "CACHE", StringComparison.OrdinalIgnoreCase) ||
+        Stages.Any(stage =>
+            string.Equals(stage.Stage, "TRANSFER", StringComparison.OrdinalIgnoreCase) &&
+            (string.Equals(stage.State, "SKIPPED", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(stage.Reason, "CACHE_REUSED", StringComparison.OrdinalIgnoreCase)));
+}
 
 public sealed record GatewayExtenderInfo(
     uint ExtenderId,
@@ -66,24 +85,25 @@ public sealed record GatewayBasicInfo(
     byte SoftwareVersion,
     string RawSoftwareVersion);
 
-public sealed record GatewayNodeInfo(ushort NodeId, byte NodeType, byte SoftwareVersion, sbyte Rssi);
+public sealed record GatewayNodeInfo(ushort NodeId, byte NodeType, byte SoftwareVersion, int Rssi)
+{
+    public bool IsOnline => Rssi < 0;
+}
 
-public sealed record GatewayNodeListPage(
-    int QuerySequence,
+public sealed record GatewayNodeList(
     uint ExtenderId,
-    int PageIndex,
-    int PageCount,
-    int TotalCount,
-    string Result,
-    string Reason,
+    ushort AsyncAddress,
     IReadOnlyList<GatewayNodeInfo> Nodes);
 
-public sealed record GatewayAsyncVersion(
-    int QuerySequence,
+public sealed record GatewayExtenderStatus(
     uint ExtenderId,
-    string Result,
-    string Reason,
-    byte SoftwareVersion);
+    ushort AsyncAddress,
+    byte SyncSoftwareVersion,
+    int SyncRssi,
+    sbyte SyncSnr,
+    byte AsyncSoftwareVersion,
+    byte OnlineCount,
+    byte TotalCount);
 
 public static class OtaMessageCodec
 {
@@ -91,10 +111,15 @@ public static class OtaMessageCodec
     public const int UpgradeCompletionCommand = 6;
     public const int StatusQueryCommand = 8;
     public const int StatusResponseCommand = 9;
-    public const int NodeListQueryCommand = 10;
-    public const int NodeListResponseCommand = 11;
-    public const int AsyncVersionQueryCommand = 12;
-    public const int AsyncVersionResponseCommand = 13;
+    public const int UserDataCommand = 100;
+    public const byte AsyncNodeListQueryCommand = 0x0E;
+    public const byte AsyncNodeListResponseCommand = 0x0F;
+    public const byte AsyncStatusQueryCommand = 0x10;
+    public const byte AsyncStatusResponseCommand = 0x11;
+    public const int MaxNodeListItemCount = 50;
+
+    private const string AsyncNodeListQueryHex = "C00104";
+    private const string AsyncStatusQueryHex = "000204";
 
     public static OutboundOtaMessage CreateUpgradeRequest(OtaTask task, int sequence, OtaProtocolOptions? options = null)
     {
@@ -259,63 +284,32 @@ public static class OtaMessageCodec
             sequence);
     }
 
-    public static OutboundOtaMessage CreateNodeListQuery(
+    public static OutboundOtaMessage CreateAsyncNodeListQuery(
         string gatewayId,
         int querySequence,
         uint extenderId,
-        int pageIndex,
         OtaProtocolOptions? options = null)
     {
-        options ??= new OtaProtocolOptions();
-        ArgumentException.ThrowIfNullOrWhiteSpace(gatewayId);
-        if (querySequence <= 0) throw new ArgumentOutOfRangeException(nameof(querySequence));
-        if (extenderId == 0) throw new ArgumentOutOfRangeException(nameof(extenderId));
-        if (pageIndex is < 0 or > byte.MaxValue) throw new ArgumentOutOfRangeException(nameof(pageIndex));
-        var root = new JsonObject
-        {
-            ["cmd"] = NodeListQueryCommand,
-            ["ver"] = "v2.0",
-            ["src"] = 0,
-            ["dst"] = 0,
-            ["node_list"] = new JsonObject
-            {
-                ["query_seq"] = querySequence,
-                ["extender_id"] = extenderId,
-                ["page_index"] = pageIndex,
-            },
-        };
-        return new OutboundOtaMessage(
-            BuildDownstreamTopic(gatewayId, querySequence, options),
-            root.ToJsonString(),
-            querySequence);
+        return CreateUserDataQuery(
+            gatewayId,
+            querySequence,
+            extenderId,
+            AsyncNodeListQueryHex,
+            options);
     }
 
-    public static OutboundOtaMessage CreateAsyncVersionQuery(
+    public static OutboundOtaMessage CreateAsyncStatusQuery(
         string gatewayId,
         int querySequence,
         uint extenderId,
         OtaProtocolOptions? options = null)
     {
-        options ??= new OtaProtocolOptions();
-        ArgumentException.ThrowIfNullOrWhiteSpace(gatewayId);
-        if (querySequence <= 0) throw new ArgumentOutOfRangeException(nameof(querySequence));
-        if (extenderId == 0) throw new ArgumentOutOfRangeException(nameof(extenderId));
-        var root = new JsonObject
-        {
-            ["cmd"] = AsyncVersionQueryCommand,
-            ["ver"] = "v2.0",
-            ["src"] = 0,
-            ["dst"] = 0,
-            ["async_version"] = new JsonObject
-            {
-                ["query_seq"] = querySequence,
-                ["extender_id"] = extenderId,
-            },
-        };
-        return new OutboundOtaMessage(
-            BuildDownstreamTopic(gatewayId, querySequence, options),
-            root.ToJsonString(),
-            querySequence);
+        return CreateUserDataQuery(
+            gatewayId,
+            querySequence,
+            extenderId,
+            AsyncStatusQueryHex,
+            options);
     }
 
     public static bool TryParseGatewayAuthListPage(
@@ -419,145 +413,201 @@ public static class OtaMessageCodec
         }
     }
 
-    public static bool TryParseNodeListPage(string json, out GatewayNodeListPage? page)
+    public static bool TryParseAsyncNodeListResponse(string json, out GatewayNodeList? nodeList)
+        => TryParseAsyncNodeListResponse(json, out nodeList, out _, out _);
+
+    public static bool TryParseAsyncNodeListResponse(
+        string json,
+        out GatewayNodeList? nodeList,
+        out uint sourceExtenderId,
+        out string? protocolError)
+        => TryParseAsyncNodeListResponse(
+            json,
+            null,
+            out nodeList,
+            out sourceExtenderId,
+            out protocolError);
+
+    public static bool TryParseAsyncNodeListResponse(
+        string json,
+        uint expectedExtenderId,
+        out GatewayNodeList? nodeList,
+        out string? protocolError)
     {
-        page = null;
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            var root = document.RootElement;
-            if (!root.TryGetProperty("cmd", out var command) ||
-                command.GetInt32() != NodeListResponseCommand ||
-                !root.TryGetProperty("node_list", out var nodeList))
-            {
-                return false;
-            }
-            var nodes = new List<GatewayNodeInfo>();
-            if (nodeList.TryGetProperty("nodes", out var nodeArray) &&
-                nodeArray.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var node in nodeArray.EnumerateArray())
-                {
-                    if (!node.TryGetProperty("node_id", out var nodeIdElement) ||
-                        !nodeIdElement.TryGetUInt16(out var nodeId) ||
-                        !node.TryGetProperty("node_type", out var nodeTypeElement) ||
-                        !nodeTypeElement.TryGetByte(out var nodeType) ||
-                        !node.TryGetProperty("software_version", out var softwareVersionElement) ||
-                        !softwareVersionElement.TryGetByte(out var softwareVersion) ||
-                        !node.TryGetProperty("rssi", out var rssiElement) ||
-                        !rssiElement.TryGetSByte(out var rssi))
-                    {
-                        return false;
-                    }
-                    nodes.Add(new GatewayNodeInfo(nodeId, nodeType, softwareVersion, rssi));
-                }
-            }
-            var itemCount = GetOptionalInt(nodeList, "item_count") ?? -1;
-            if (itemCount != nodes.Count || itemCount is < 0 or > 56)
-            {
-                return false;
-            }
-            page = new GatewayNodeListPage(
-                GetInt(nodeList, "query_seq"),
-                GetOptionalUInt(nodeList, "extender_id") ?? 0,
-                GetOptionalInt(nodeList, "page_index") ?? -1,
-                GetOptionalInt(nodeList, "page_count") ?? 0,
-                GetOptionalInt(nodeList, "total_count") ?? 0,
-                GetString(nodeList, "result"),
-                GetString(nodeList, "reason"),
-                nodes);
-            return page.QuerySequence > 0 && page.ExtenderId > 0;
-        }
-        catch (Exception exception) when (IsMalformedPayloadException(exception))
+        if (expectedExtenderId == 0) throw new ArgumentOutOfRangeException(nameof(expectedExtenderId));
+        return TryParseAsyncNodeListResponse(
+            json,
+            expectedExtenderId,
+            out nodeList,
+            out _,
+            out protocolError);
+    }
+
+    private static bool TryParseAsyncNodeListResponse(
+        string json,
+        uint? expectedExtenderId,
+        out GatewayNodeList? nodeList,
+        out uint sourceExtenderId,
+        out string? protocolError)
+    {
+        nodeList = null;
+        sourceExtenderId = 0;
+        protocolError = null;
+        if (!TryParseUserDataFrame(
+                json,
+                AsyncNodeListResponseCommand,
+                expectedExtenderId,
+                out sourceExtenderId,
+                out var asyncAddress,
+                out var data,
+                out protocolError))
         {
             return false;
         }
-    }
 
-    public static bool TryParseAsyncVersionResponse(
-        string json,
-        out GatewayAsyncVersion? version)
-    {
-        version = null;
-        try
+        if (data.Length < 1)
         {
-            using var document = JsonDocument.Parse(json);
-            var root = document.RootElement;
-            if (!root.TryGetProperty("cmd", out var command) ||
-                command.GetInt32() != AsyncVersionResponseCommand ||
-                !root.TryGetProperty("async_version", out var asyncVersion) ||
-                asyncVersion.ValueKind != JsonValueKind.Object)
+            protocolError = "0x0F 设备列表缺少设备数量字段。";
+            return false;
+        }
+        var count = data[0];
+        if (count > MaxNodeListItemCount)
+        {
+            protocolError = $"0x0F 设备列表包含 {count} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
+            return false;
+        }
+        if (data.Length != 1 + count * 5)
+        {
+            protocolError = $"0x0F 数据结构长度错误：声明 {count} 项，实际数据 {data.Length} 字节。";
+            return false;
+        }
+
+        var nodes = new List<GatewayNodeInfo>(count);
+        var nodeIds = new HashSet<ushort>();
+        for (var index = 0; index < count; index++)
+        {
+            var offset = 1 + index * 5;
+            var nodeType = data[offset];
+            var nodeId = (ushort)(data[offset + 1] | data[offset + 2] << 8);
+            var rssiAbsolute = data[offset + 3];
+            var softwareVersion = data[offset + 4];
+            if (nodeType is < 2 or > 63 || rssiAbsolute > 200)
             {
+                protocolError = "0x0F 包含非法 Node 类型或 RSSI。";
                 return false;
             }
-
-            var result = GetString(asyncVersion, "result");
-            var softwareVersion = asyncVersion.TryGetProperty("software_version", out var versionElement) &&
-                                  versionElement.TryGetByte(out var parsedVersion)
-                ? parsedVersion
-                : (byte)0;
-            version = new GatewayAsyncVersion(
-                GetInt(asyncVersion, "query_seq"),
-                GetOptionalUInt(asyncVersion, "extender_id") ?? 0,
-                result,
-                GetString(asyncVersion, "reason"),
-                softwareVersion);
-            return version.QuerySequence > 0 &&
-                   version.ExtenderId > 0 &&
-                   (!result.Equals("OK", StringComparison.OrdinalIgnoreCase) ||
-                    softwareVersion is >= 1 and <= 254);
+            if (nodeId == 0)
+            {
+                protocolError = "0x0F 包含零 Node ID。";
+                return false;
+            }
+            if (!nodeIds.Add(nodeId))
+            {
+                protocolError = $"0x0F 包含重复 Node ID {nodeId}。";
+                return false;
+            }
+            nodes.Add(new GatewayNodeInfo(
+                nodeId,
+                nodeType,
+                softwareVersion,
+                rssiAbsolute == 0 ? 0 : -rssiAbsolute));
         }
-        catch (Exception exception) when (IsMalformedPayloadException(exception))
+
+        nodeList = new GatewayNodeList(sourceExtenderId, asyncAddress, nodes);
+        return true;
+    }
+
+    public static bool TryParseAsyncStatusResponse(string json, out GatewayExtenderStatus? status)
+        => TryParseAsyncStatusResponse(json, null, out status, out _);
+
+    public static bool TryParseAsyncStatusResponse(
+        string json,
+        uint expectedExtenderId,
+        out GatewayExtenderStatus? status,
+        out string? protocolError)
+    {
+        if (expectedExtenderId == 0) throw new ArgumentOutOfRangeException(nameof(expectedExtenderId));
+        return TryParseAsyncStatusResponse(json, (uint?)expectedExtenderId, out status, out protocolError);
+    }
+
+    private static bool TryParseAsyncStatusResponse(
+        string json,
+        uint? expectedExtenderId,
+        out GatewayExtenderStatus? status,
+        out string? protocolError)
+    {
+        status = null;
+        protocolError = null;
+        if (!TryParseUserDataFrame(
+                json,
+                AsyncStatusResponseCommand,
+                expectedExtenderId,
+                out var extenderId,
+                out var asyncAddress,
+                out var data,
+                out protocolError))
         {
             return false;
         }
+        if (data.Length != 6)
+        {
+            protocolError = $"0x11 状态数据长度错误：预期 6 字节，实际 {data.Length} 字节。";
+            return false;
+        }
+
+        var syncRssiAbsolute = data[1];
+        var syncSnr = unchecked((sbyte)data[2]);
+        var onlineCount = data[4];
+        var totalCount = data[5];
+        if (syncRssiAbsolute > 200 ||
+            syncSnr is < -30 or > 30 ||
+            onlineCount > totalCount ||
+            totalCount > MaxNodeListItemCount)
+        {
+            protocolError = "0x11 包含非法 RSSI、SNR 或 Node 数量。";
+            return false;
+        }
+
+        status = new GatewayExtenderStatus(
+            extenderId,
+            asyncAddress,
+            data[0],
+            syncRssiAbsolute == 0 ? 0 : -syncRssiAbsolute,
+            syncSnr,
+            data[3],
+            onlineCount,
+            totalCount);
+        return true;
     }
 
-    public static bool TryParseAsyncVersionQuery(
-        string json,
-        out uint extenderId)
+    public static bool TryParseUserDataQuery(string json, out uint extenderId, out byte applicationCommand)
     {
         extenderId = 0;
+        applicationCommand = 0;
         try
         {
             using var document = JsonDocument.Parse(json);
             var root = document.RootElement;
             if (!root.TryGetProperty("cmd", out var command) ||
-                command.GetInt32() != AsyncVersionQueryCommand ||
-                !root.TryGetProperty("async_version", out var asyncVersion) ||
-                asyncVersion.ValueKind != JsonValueKind.Object)
+                !command.TryGetInt32(out var commandValue) ||
+                commandValue != UserDataCommand ||
+                !root.TryGetProperty("dst", out var destination) ||
+                !destination.TryGetUInt32(out extenderId) ||
+                extenderId == 0 ||
+                !root.TryGetProperty("fmt", out var format) ||
+                format.ValueKind != JsonValueKind.String ||
+                !string.Equals(format.GetString(), "hex", StringComparison.OrdinalIgnoreCase) ||
+                !root.TryGetProperty("uc", out var userData) ||
+                userData.ValueKind != JsonValueKind.String)
             {
                 return false;
             }
-            extenderId = GetOptionalUInt(asyncVersion, "extender_id") ?? 0;
-            return extenderId > 0;
-        }
-        catch (Exception exception) when (IsMalformedPayloadException(exception))
-        {
-            return false;
-        }
-    }
-
-    public static bool TryParseNodeListQuery(
-        string json,
-        out uint extenderId,
-        out int pageIndex)
-    {
-        extenderId = 0;
-        pageIndex = -1;
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            var root = document.RootElement;
-            if (!root.TryGetProperty("cmd", out var command) ||
-                command.GetInt32() != NodeListQueryCommand ||
-                !root.TryGetProperty("node_list", out var nodeList))
+            var bytes = Convert.FromHexString(userData.GetString() ?? string.Empty);
+            if (bytes.Length != 3 || !TryParseApplicationHeader(bytes, out _, out applicationCommand, out _, out _))
             {
                 return false;
             }
-            extenderId = GetOptionalUInt(nodeList, "extender_id") ?? 0;
-            pageIndex = GetOptionalInt(nodeList, "page_index") ?? -1;
-            return extenderId > 0 && pageIndex >= 0;
+            return applicationCommand is AsyncNodeListQueryCommand or AsyncStatusQueryCommand;
         }
         catch (Exception exception) when (IsMalformedPayloadException(exception))
         {
@@ -625,7 +675,13 @@ public static class OtaMessageCodec
                 GetOptionalInt(otaStatus, "target_success"),
                 GetOptionalInt(otaStatus, "target_failed"),
                 stages,
-                subtasks);
+                subtasks)
+            {
+                PackageSource = GetString(otaStatus, "package_source"),
+                CacheTargetTotal = GetOptionalNonNegativeInt(otaStatus, "cache_target_total"),
+                CacheHitCount = GetOptionalNonNegativeInt(otaStatus, "cache_hit_count"),
+                CacheQueryElapsedMs = GetOptionalNonNegativeLong(otaStatus, "cache_query_elapsed_ms"),
+            };
             return true;
         }
         catch (Exception exception) when (IsMalformedPayloadException(exception))
@@ -651,6 +707,12 @@ public static class OtaMessageCodec
     private static int? GetOptionalInt(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : null;
 
     private static long? GetOptionalLong(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt64(out var number) ? number : null;
+
+    private static int? GetOptionalNonNegativeInt(JsonElement element, string name)
+        => GetOptionalInt(element, name) is { } value && value >= 0 ? value : null;
+
+    private static long? GetOptionalNonNegativeLong(JsonElement element, string name)
+        => GetOptionalLong(element, name) is { } value && value >= 0 ? value : null;
 
     private static IReadOnlyList<GatewayOtaStage> ParseStages(JsonElement otaStatus)
     {
@@ -691,7 +753,10 @@ public static class OtaMessageCodec
                 GetOptionalInt(subtask, "prepared_count") ?? 0,
                 GetOptionalInt(subtask, "success_count") ?? 0,
                 GetOptionalInt(subtask, "failed_count") ?? 0,
-                GetString(subtask, "reason")));
+                GetString(subtask, "reason"))
+            {
+                CacheResult = GetString(subtask, "cache_result"),
+            });
         }
         return result;
     }
@@ -727,6 +792,226 @@ public static class OtaMessageCodec
 
     private static bool IsMalformedPayloadException(Exception exception)
         => exception is JsonException or InvalidOperationException or FormatException or OverflowException;
+
+    private static OutboundOtaMessage CreateUserDataQuery(
+        string gatewayId,
+        int querySequence,
+        uint extenderId,
+        string userDataHex,
+        OtaProtocolOptions? options)
+    {
+        options ??= new OtaProtocolOptions();
+        ArgumentException.ThrowIfNullOrWhiteSpace(gatewayId);
+        if (querySequence <= 0) throw new ArgumentOutOfRangeException(nameof(querySequence));
+        if (extenderId == 0) throw new ArgumentOutOfRangeException(nameof(extenderId));
+        var root = new JsonObject
+        {
+            ["cmd"] = UserDataCommand,
+            ["ver"] = "v2.0",
+            ["src"] = 0,
+            ["dst"] = extenderId,
+            ["fmt"] = "hex",
+            ["uc"] = userDataHex,
+        };
+        return new OutboundOtaMessage(
+            BuildDownstreamTopic(gatewayId, querySequence, options),
+            root.ToJsonString(),
+            querySequence);
+    }
+
+    private static bool TryParseUserDataFrame(
+        string json,
+        byte expectedCommand,
+        uint? expectedExtenderId,
+        out uint extenderId,
+        out ushort asyncAddress,
+        out byte[] data,
+        out string? protocolError)
+    {
+        extenderId = 0;
+        asyncAddress = 0;
+        data = Array.Empty<byte>();
+        protocolError = null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                var parsed = TryParseUserDataFrameElement(
+                    root,
+                    expectedCommand,
+                    out extenderId,
+                    out asyncAddress,
+                    out data,
+                    out protocolError);
+                if (expectedExtenderId.HasValue && extenderId != expectedExtenderId.Value)
+                {
+                    extenderId = 0;
+                    asyncAddress = 0;
+                    data = Array.Empty<byte>();
+                    protocolError = null;
+                    return false;
+                }
+                return parsed;
+            }
+
+            if (root.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+
+            uint firstErrorSource = 0;
+            string? firstProtocolError = null;
+            foreach (var element in root.EnumerateArray())
+            {
+                if (TryParseUserDataFrameElement(
+                        element,
+                        expectedCommand,
+                        out var elementSource,
+                        out var elementAddress,
+                        out var elementData,
+                        out var elementError))
+                {
+                    if (expectedExtenderId.HasValue && elementSource != expectedExtenderId.Value)
+                    {
+                        continue;
+                    }
+                    extenderId = elementSource;
+                    asyncAddress = elementAddress;
+                    data = elementData;
+                    return true;
+                }
+
+                if ((!expectedExtenderId.HasValue || elementSource == expectedExtenderId.Value) &&
+                    firstProtocolError is null &&
+                    elementSource != 0 &&
+                    !string.IsNullOrWhiteSpace(elementError))
+                {
+                    firstErrorSource = elementSource;
+                    firstProtocolError = elementError;
+                }
+            }
+
+            extenderId = firstErrorSource;
+            protocolError = firstProtocolError;
+            return false;
+        }
+        catch (Exception exception) when (IsMalformedPayloadException(exception))
+        {
+            return false;
+        }
+    }
+
+    private static bool TryParseUserDataFrameElement(
+        JsonElement root,
+        byte expectedCommand,
+        out uint extenderId,
+        out ushort asyncAddress,
+        out byte[] data,
+        out string? protocolError)
+    {
+        extenderId = 0;
+        asyncAddress = 0;
+        data = Array.Empty<byte>();
+        protocolError = null;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("cmd", out var command) ||
+                !command.TryGetInt32(out var commandValue) ||
+                commandValue != UserDataCommand ||
+                !root.TryGetProperty("src", out var source) ||
+                !source.TryGetUInt32(out extenderId) ||
+                extenderId == 0 ||
+                !root.TryGetProperty("data", out var payload) ||
+                payload.ValueKind != JsonValueKind.String ||
+                !root.TryGetProperty("fmt", out var format) ||
+                format.ValueKind != JsonValueKind.String)
+        {
+            return false;
+        }
+
+        var encoded = payload.GetString() ?? string.Empty;
+        var formatValue = format.GetString();
+        byte[] frame;
+        try
+        {
+            if (string.Equals(formatValue, "hex", StringComparison.OrdinalIgnoreCase))
+            {
+                if (encoded.Length == 0 || (encoded.Length & 1) != 0)
+                {
+                    protocolError = "cmd=100 包含空数据或奇数长度 Hex。";
+                    return false;
+                }
+                frame = Convert.FromHexString(encoded);
+            }
+            else if (string.Equals(formatValue, "base64", StringComparison.OrdinalIgnoreCase))
+            {
+                frame = Convert.FromBase64String(encoded);
+            }
+            else
+            {
+                protocolError = $"cmd=100 不支持 fmt={formatValue}。";
+                return false;
+            }
+        }
+        catch (FormatException)
+        {
+            protocolError = $"cmd=100 包含非法 {formatValue} 数据。";
+            return false;
+        }
+
+        if (frame.Length < 6 ||
+            !TryParseApplicationHeader(frame, out var property, out var applicationCommand, out var sourceType, out var destinationType) ||
+            property != 0x09 ||
+            applicationCommand != expectedCommand ||
+            sourceType != 1 ||
+            destinationType != 0)
+        {
+            protocolError = "cmd=100 应用帧 Header、Cmd 或地址类型不符合预期。";
+            return false;
+        }
+        asyncAddress = (ushort)(frame[3] | frame[4] << 8);
+        var dataLength = frame[5];
+        if (asyncAddress == 0 || frame.Length != 6 + dataLength)
+        {
+            if (expectedCommand == AsyncNodeListResponseCommand &&
+                frame.Length >= 7 &&
+                frame[6] > MaxNodeListItemCount)
+            {
+                protocolError = $"0x0F 设备列表包含 {frame[6]} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
+            }
+            else
+            {
+                protocolError = $"cmd=100 应用帧 DataLen={dataLength}，实际数据长度为 {Math.Max(0, frame.Length - 6)}。";
+            }
+            return false;
+        }
+        data = frame[6..];
+        return true;
+    }
+
+    private static bool TryParseApplicationHeader(
+        ReadOnlySpan<byte> frame,
+        out byte property,
+        out byte command,
+        out byte sourceType,
+        out byte destinationType)
+    {
+        property = 0;
+        command = 0;
+        sourceType = 0;
+        destinationType = 0;
+        if (frame.Length < 3)
+        {
+            return false;
+        }
+        var header = frame[0] | frame[1] << 8 | frame[2] << 16;
+        property = (byte)(header & 0x1F);
+        command = (byte)((header >> 5) & 0x7F);
+        sourceType = (byte)((header >> 12) & 0x3F);
+        destinationType = (byte)((header >> 18) & 0x3F);
+        return true;
+    }
 
     private static string BuildDownstreamTopic(string gatewayId, int sequence, OtaProtocolOptions options)
         => options.DownstreamTopicTemplate

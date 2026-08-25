@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\win-x64'),
-    [string]$Version = '0.1.4',
+    [string]$Version = '0.1.5',
     [string]$SourceRevisionId = ''
 )
 
@@ -28,6 +28,28 @@ if ($Version -notmatch '^\d+\.\d+\.\d+$') {
 }
 
 $informationalVersion = $Version
+
+if (Test-Path -LiteralPath $OutputPath) {
+    $outputPathPrefix = $OutputPath.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+    $runningOutputProcesses = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            $processPath = $_.Path
+            if (-not [string]::IsNullOrWhiteSpace($processPath) -and
+                [System.IO.Path]::GetFullPath($processPath).StartsWith(
+                    $outputPathPrefix,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                "$($_.ProcessName) (PID $($_.Id))"
+            }
+        } catch {
+            # 某些系统进程不允许读取可执行文件路径，不影响目标目录占用检查。
+        }
+    })
+    if ($runningOutputProcesses.Count -gt 0) {
+        throw "发布目录仍有运行中的程序：$($runningOutputProcesses -join '、')。请关闭这些程序，或通过 -OutputPath 发布到其他目录；本次未清理任何文件。"
+    }
+}
 
 if (Test-Path -LiteralPath $OutputPath) {
     Remove-Item -LiteralPath $OutputPath -Recurse -Force

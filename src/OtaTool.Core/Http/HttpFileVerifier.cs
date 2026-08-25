@@ -54,21 +54,12 @@ public static class HttpFileVerifier
             return new HttpFileVerificationResult(true, "HTTP HEAD 和 Range 验证通过。", expectedLength);
         }
 
-        using var fullResponse = await SendWithTransientRetryAsync(
+        return await VerifyFullContentWithTransientRetryAsync(
             client,
-            () => new HttpRequestMessage(HttpMethod.Get, uri),
-            HttpCompletionOption.ResponseHeadersRead,
+            uri,
+            expectedLength,
+            expectedMd5,
             cancellationToken);
-        if (!fullResponse.IsSuccessStatusCode)
-        {
-            return new HttpFileVerificationResult(false, $"HTTP GET 返回 {(int)fullResponse.StatusCode}。", fullResponse.Content.Headers.ContentLength);
-        }
-
-        await using var stream = await fullResponse.Content.ReadAsStreamAsync(cancellationToken);
-        var md5 = Convert.ToHexString(await MD5.HashDataAsync(stream, cancellationToken)).ToLowerInvariant();
-        return md5.Equals(expectedMd5, StringComparison.OrdinalIgnoreCase)
-            ? new HttpFileVerificationResult(true, "HTTP HEAD、Range 和完整 MD5 验证通过。", expectedLength, md5)
-            : new HttpFileVerificationResult(false, "完整下载后的 MD5 与本地 Patch 不一致。", expectedLength, md5);
     }
 
     private static async Task<HttpResponseMessage> SendWithTransientRetryAsync(
@@ -103,5 +94,60 @@ public static class HttpFileVerifier
     {
         var numericStatusCode = (int)statusCode;
         return numericStatusCode is 408 or 425 or 429 or 500 or 502 or 503 or 504;
+    }
+
+    private static async Task<HttpFileVerificationResult> VerifyFullContentWithTransientRetryAsync(
+        HttpClient client,
+        Uri uri,
+        long expectedLength,
+        string expectedMd5,
+        CancellationToken cancellationToken)
+    {
+        const int maximumAttempts = 4;
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+                using var response = await client.SendAsync(
+                    request,
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken);
+                if (!response.IsSuccessStatusCode)
+                {
+                    if (IsTransient(response.StatusCode) && attempt < maximumAttempts)
+                    {
+                        await Task.Delay(TimeSpan.FromMilliseconds(300 * attempt), cancellationToken);
+                        continue;
+                    }
+                    return new HttpFileVerificationResult(
+                        false,
+                        $"HTTP GET 返回 {(int)response.StatusCode}。",
+                        response.Content.Headers.ContentLength);
+                }
+
+                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+                var md5 = Convert.ToHexString(
+                    await MD5.HashDataAsync(stream, cancellationToken)).ToLowerInvariant();
+                return md5.Equals(expectedMd5, StringComparison.OrdinalIgnoreCase)
+                    ? new HttpFileVerificationResult(
+                        true,
+                        "HTTP HEAD、Range 和完整 MD5 验证通过。",
+                        expectedLength,
+                        md5)
+                    : new HttpFileVerificationResult(
+                        false,
+                        "完整下载后的 MD5 与本地 Patch 不一致。",
+                        expectedLength,
+                        md5);
+            }
+            catch (Exception exception) when (
+                attempt < maximumAttempts &&
+                !cancellationToken.IsCancellationRequested &&
+                exception is HttpRequestException or IOException or OperationCanceledException)
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(300 * attempt), cancellationToken);
+            }
+        }
     }
 }

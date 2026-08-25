@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using OtaTool.Core.Protocols;
 
 namespace OtaTool.Core.Models;
 
@@ -60,7 +61,9 @@ public sealed record FirmwareIdentity(
         _ => $"未知类型（{DeviceTypeCode}）",
     };
 
-    public string VersionText => Version.HasValue ? $"v{Version.Value}" : "未知";
+    public string VersionText => Version.HasValue
+        ? ProtocolVersionFormatter.FormatWithPrefix(Version.Value)
+        : "未知版本";
 
     public string SuggestedPatchNameTo(FirmwareIdentity target)
     {
