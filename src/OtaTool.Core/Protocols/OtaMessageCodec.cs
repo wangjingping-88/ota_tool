@@ -114,12 +114,12 @@ public static class OtaMessageCodec
     public const int UserDataCommand = 100;
     public const byte AsyncNodeListQueryCommand = 0x0E;
     public const byte AsyncNodeListResponseCommand = 0x0F;
-    public const byte AsyncStatusQueryCommand = 0x10;
-    public const byte AsyncStatusResponseCommand = 0x11;
+    public const byte AsyncStatusQueryCommand = 0x17;
+    public const byte AsyncStatusResponseCommand = 0x18;
     public const int MaxNodeListItemCount = 50;
 
     private const string AsyncNodeListQueryHex = "C00104";
-    private const string AsyncStatusQueryHex = "000204";
+    private const string AsyncStatusQueryHex = "E00204";
 
     public static OutboundOtaMessage CreateUpgradeRequest(OtaTask task, int sequence, OtaProtocolOptions? options = null)
     {
@@ -551,7 +551,7 @@ public static class OtaMessageCodec
         }
         if (data.Length != 6)
         {
-            protocolError = $"0x11 状态数据长度错误：预期 6 字节，实际 {data.Length} 字节。";
+            protocolError = $"0x18 状态数据长度错误：预期 6 字节，实际 {data.Length} 字节。";
             return false;
         }
 
@@ -564,7 +564,7 @@ public static class OtaMessageCodec
             onlineCount > totalCount ||
             totalCount > MaxNodeListItemCount)
         {
-            protocolError = "0x11 包含非法 RSSI、SNR 或 Node 数量。";
+            protocolError = "0x18 包含非法 RSSI、SNR 或 Node 数量。";
             return false;
         }
 

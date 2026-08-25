@@ -377,7 +377,7 @@ public sealed class DeviceDiscoveryService
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
-                    $"等待 Extender {extenderId} 的 0x11 状态响应超时。");
+                    $"等待 Extender {extenderId} 的 0x18 状态响应超时。");
             }
         }
         finally

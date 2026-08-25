@@ -532,7 +532,7 @@ static void VerifyStatusPanelLayout()
     Assert(viewModel.Contains("var expectedType = (byte)FirmwareDeviceType.ExtenderS;", StringComparison.Ordinal)
         && !viewModel.Contains("deviceType == DeviceType.Sync ? (byte)2 : (byte)1", StringComparison.Ordinal)
         && viewModel.Contains("DiscoverExtenderStatusesAsync", StringComparison.Ordinal)
-        && viewModel.Contains("所有 0x11 状态查询均超时", StringComparison.Ordinal)
+        && viewModel.Contains("所有 0x18 状态查询均超时", StringComparison.Ordinal)
         && viewModel.Contains("个状态查询失败，已保留", StringComparison.Ordinal)
         && viewModel.Contains("item.GetSoftwareVersion(deviceType) != manifest.OldVersion", StringComparison.Ordinal)
         && viewModel.Contains("task.DeviceType is DeviceType.Sync or DeviceType.Async", StringComparison.Ordinal),
@@ -1338,8 +1338,8 @@ static async Task VerifyDeviceDiscoveryAsync()
     var statusQuery = OtaMessageCodec.CreateAsyncStatusQuery("704027", 8, 101);
     Assert(OtaMessageCodec.TryParseUserDataQuery(statusQuery.JsonPayload, out queryExtenderId, out queryCommand) &&
            queryExtenderId == 101 && queryCommand == OtaMessageCodec.AsyncStatusQueryCommand &&
-           statusQuery.JsonPayload.Contains("\"uc\":\"000204\"", StringComparison.Ordinal),
-        "cmd=100/0x10 状态请求编码错误。");
+           statusQuery.JsonPayload.Contains("\"uc\":\"E00204\"", StringComparison.Ordinal),
+        "cmd=100/0x17 状态请求编码错误。");
 
     const string documentedNodeFrameHex = "E9110034120B0203011041170402200001";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(
@@ -1356,15 +1356,19 @@ static async Task VerifyDeviceDiscoveryAsync()
                 "base64"),
             out var base64Nodes) && base64Nodes?.Nodes.Count == 2,
         "文档 Base64 Node 响应解析错误。");
-    const string documentedStatusFrameHex = "2912003412060146FB010203";
+    const string documentedStatusFrameHex = "0913003412060146FB010203";
     Assert(OtaMessageCodec.TryParseAsyncStatusResponse(
             CreateUserDataResponse(101, documentedStatusFrameHex, "hex"),
             out var documentedStatus) && documentedStatus is not null &&
            documentedStatus.SyncSoftwareVersion == 1 && documentedStatus.SyncRssi == -70 &&
            documentedStatus.SyncSnr == -5 && documentedStatus.AsyncSoftwareVersion == 1 &&
            documentedStatus.OnlineCount == 2 && documentedStatus.TotalCount == 3,
-        "文档 0x11 状态示例解析错误。");
-    const string actualArrayStatusResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":1821373,\"fmt\":\"hex\",\"data\":\"291200BDCA06000000010508\"}]";
+        "文档 0x18 状态示例解析错误。");
+    Assert(!OtaMessageCodec.TryParseAsyncStatusResponse(
+            CreateUserDataResponse(101, "2912003412060146FB010203", "hex"),
+            out _),
+        "旧 0x11 状态响应不得被误当成 0x18 响应。");
+    const string actualArrayStatusResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":1821373,\"fmt\":\"hex\",\"data\":\"091300BDCA06000000010508\"}]";
     Assert(OtaMessageCodec.TryParseAsyncStatusResponse(actualArrayStatusResponse, out var arrayStatus) &&
            arrayStatus is not null &&
            arrayStatus.ExtenderId == 1821373 &&
@@ -1372,7 +1376,7 @@ static async Task VerifyDeviceDiscoveryAsync()
            arrayStatus.AsyncSoftwareVersion == 1 &&
            arrayStatus.OnlineCount == 5 &&
            arrayStatus.TotalCount == 8,
-        "Gateway 数组包装的真实 0x11 上行响应解析错误。");
+        "Gateway 数组包装的真实 0x18 上行响应解析错误。");
     const string actualArrayNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":1821373,\"fmt\":\"hex\",\"data\":\"E91100BDCA290805B0D23A010581FB000005F2FA3A01058EFC3B0105B9FC3B01074B8C000007F687000005D5034701\"}]";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(actualArrayNodeResponse, out var arrayNodes) &&
            arrayNodes is not null &&
@@ -1564,7 +1568,7 @@ static async Task VerifyDeviceDiscoveryAsync()
     Assert(statuses.Count == 2 &&
            statuses.Single(item => item.ExtenderId == 101).Status?.AsyncSoftwareVersion == 2 &&
            !statuses.Single(item => item.ExtenderId == 202).IsSuccess,
-        "0x11 状态查询应按顶层 src 关联响应，并隔离单板超时。");
+        "0x18 状态查询应按顶层 src 关联响应，并隔离单板超时。");
     var results = await discovery.DiscoverNodesAsync("704027", [101U, 202U, 303U, 404U]);
     Assert(results.Count == 4 && results[0].IsSuccess && results[0].ReportedCount == 2 &&
            results[0].Nodes.Count == 1 && results[0].Nodes[0].NodeId == 20,
@@ -1583,7 +1587,7 @@ static async Task VerifyDeviceDiscoveryAsync()
     await Task.WhenAll(sameExtenderNodeTask, sameExtenderStatusTask);
     Assert(maxActiveForSameExtender == 1 &&
            sameExtenderNodeTask.Result.Single().Nodes.Single().SoftwareVersion == 0,
-        "同一 Extender 的 0x0E/0x10 必须严格串行，未知版本项仍应保留供 UI 禁用显示。");
+        "同一 Extender 的 0x0E/0x17 必须严格串行，未知版本项仍应保留供 UI 禁用显示。");
     Assert(mqtt.Published
             .Select(message => JsonDocument.Parse(message.GetPayloadAsUtf8()).RootElement)
             .Where(root => root.TryGetProperty("cmd", out _))

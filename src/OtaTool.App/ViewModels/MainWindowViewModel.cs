@@ -3688,7 +3688,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 {
                     ClearDiscoveredExtenderResults();
                     DeviceDiscoveryStatus =
-                        "刷新 Extender 失败：所有 0x11 状态查询均超时；Async 固件可能尚未支持 cmd=100/0x10→0x11，已清空 Async 可升级目标。";
+                        "刷新 Extender 失败：所有 0x18 状态查询均超时；Async 固件可能尚未支持 cmd=100/0x17→0x18，已清空 Async 可升级目标。";
                     await SaveSettingsAsync();
                     return;
                 }
