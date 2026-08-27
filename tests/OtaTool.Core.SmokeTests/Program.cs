@@ -32,6 +32,8 @@ try
     VerifyNodeTypePresentation();
     VerifyStageApplicability();
     VerifyGeneratedMetadataPresentation();
+    VerifyProtocolIdentifierFormatting();
+    VerifyNodeTargetCoverage();
     VerifyPatchCenterTitleCapitalization();
     VerifyMqttConfigurationTabs();
     await VerifyPatchAndTaskRulesAsync(workspace);
@@ -42,6 +44,7 @@ try
     await VerifyDeviceDiscoveryAsync();
     await VerifyCycleRunnerAsync(workspace);
     await VerifyReportsAsync(workspace);
+    await VerifyNativePatchVerifierAsync(workspace);
     await VerifyDiffManifestGateAsync(workspace);
     Console.WriteLine("全部核心冒烟测试通过。");
 }
@@ -82,6 +85,34 @@ static void VerifyStageApplicability()
         "未知的新协议阶段不应被静默隐藏。");
 }
 
+static void VerifyProtocolIdentifierFormatting()
+{
+    Assert(ProtocolIdentifierFormatter.Format((ushort)51901) == "51901（0xCABD）"
+        && ProtocolIdentifierFormatter.Format((ushort)981) == "981（0x03D5）"
+        && ProtocolIdentifierFormatter.Format(0x80000039u) == "2147483705（0x80000039）",
+        "Extender、Async 地址和 Node ID 应统一显示十进制及大写十六进制。");
+}
+
+static void VerifyNodeTargetCoverage()
+{
+    var complete = NodeTargetCoveragePolicy.Check(
+        [1001U, 1002U],
+        [new OtaExtenderTarget("1001", ["11"]), new OtaExtenderTarget("1002", ["22"])]);
+    Assert(complete.IsValid, "每个已选 Extender 都有 Node 目标时应允许升级。");
+
+    var missing = NodeTargetCoveragePolicy.Check(
+        [1001U, 1002U],
+        [new OtaExtenderTarget("1001", ["11"]), new OtaExtenderTarget("1002", [])]);
+    Assert(!missing.IsValid && missing.MissingExtenderIds.SequenceEqual([1002U]),
+        "已选 Extender 没有在线 Node 时必须阻止升级。");
+
+    var stale = NodeTargetCoveragePolicy.Check(
+        [1001U],
+        [new OtaExtenderTarget("1001", ["11"]), new OtaExtenderTarget("1002", ["22"])]);
+    Assert(!stale.IsValid && stale.UnexpectedExtenderIds.SequenceEqual([1002U]),
+        "未勾选 Extender 的残留 Node 目标必须阻止升级。");
+}
+
 static void VerifyStaticResourceReferences()
 {
     var assetDirectory = Path.Combine(AppContext.BaseDirectory, "TestAssets");
@@ -114,7 +145,6 @@ static void VerifyPatchCenterWorkflow()
     var assetDirectory = Path.Combine(AppContext.BaseDirectory, "TestAssets");
     var xaml = File.ReadAllText(Path.Combine(assetDirectory, "PatchPage.xaml"));
     var viewModel = File.ReadAllText(Path.Combine(assetDirectory, "MainWindowViewModel.cs"));
-    var restoreScript = File.ReadAllText(Path.Combine(assetDirectory, "TestPatchWithOtaTool.ps1"));
 
     Assert(
         xaml.Contains("ItemsSource=\"{Binding PatchRestoreChoices}\"", StringComparison.Ordinal)
@@ -152,31 +182,36 @@ static void VerifyPatchCenterWorkflow()
         && viewModel.Contains("!IsEcoLink || item.ManifestVerified", StringComparison.Ordinal)
         && viewModel.Contains("item.OtaDeviceType == selectedDeviceType", StringComparison.Ordinal),
         "EcoLink choices must accept Gateway full images while differential patches remain verified and match the selected device type.");
+    var nativeGate = viewModel.IndexOf("engine.VerifyAsync(oldImagePath, patchPath, newImagePath)", StringComparison.Ordinal);
     Assert(
-        restoreScript.Contains("[int]$SkippedBootloaderBytes = 28672", StringComparison.Ordinal)
-        && restoreScript.Contains("[System.Array]::Copy($oldBytes, 0, $expectedBytes, 0, $SkippedBootloaderBytes)", StringComparison.Ordinal)
-        && restoreScript.Contains("expected_restored_sha256", StringComparison.Ordinal),
-        "Patch restore verification must preserve and exclude the 28 KiB bootloader partition.");
-    Assert(
-        restoreScript.Contains("function Get-FileDigest", StringComparison.Ordinal)
-        && !restoreScript.Contains("Get-FileHash", StringComparison.Ordinal),
-        "Patch restore verification must calculate hashes without relying on the optional Get-FileHash cmdlet.");
-    Assert(
-        restoreScript.Contains("Tools\\OTA_TOOL\\OTA_TOOL.exe", StringComparison.Ordinal)
-        && !restoreScript.Contains("D:\\tools\\OTA_TOOL", StringComparison.Ordinal)
-        && viewModel.Contains("Path.Combine(AppContext.BaseDirectory, \"Tools\", \"OTA_TOOL\", \"OTA_TOOL.exe\")", StringComparison.Ordinal),
-        "Patch restore verification must use the tool bundled with the desktop application instead of a machine-local installation.");
+        nativeGate >= 0
+        && viewModel.Contains("已制作并通过原生还原验证", StringComparison.Ordinal)
+        && viewModel.Contains("原生还原验证通过", StringComparison.Ordinal)
+        && viewModel.Contains("PatchCapacityPolicy.Check", StringComparison.Ordinal)
+        && !viewModel.Contains("RunOtaToolPatchTestAsync", StringComparison.Ordinal)
+        && !viewModel.Contains("OTA_TOOL.exe", StringComparison.Ordinal),
+        "Patch 制作和导入必须通过原生还原及容量校验，且不得再依赖 OTA_TOOL 或 UI Automation。");
 }
 
 static void VerifyWindowChromeWorkAreaBounds()
 {
     var source = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml.cs"));
+    var xaml = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindow.xaml"));
     var viewModel = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "TestAssets", "MainWindowViewModel.cs"));
     Assert(
         source.Contains("WmGetMinMaxInfo", StringComparison.Ordinal)
         && source.Contains("MonitorFromWindow", StringComparison.Ordinal)
         && source.Contains("monitorInfo.WorkArea", StringComparison.Ordinal),
         "Custom window maximize handling must constrain the window to the current monitor work area.");
+    Assert(source.Contains("FitWindowToCurrentWorkArea(windowHandle);", StringComparison.Ordinal)
+        && source.Contains("VisualTreeHelper.GetDpi(this)", StringComparison.Ordinal)
+        && source.Contains("CompactLayoutWidth = 1400", StringComparison.Ordinal)
+        && source.Contains("ShortLayoutHeight = 820", StringComparison.Ordinal)
+        && source.Contains("ApplyResponsiveLayout();", StringComparison.Ordinal)
+        && xaml.Contains("MinWidth=\"900\" MinHeight=\"560\"", StringComparison.Ordinal)
+        && xaml.Contains("SizeChanged=\"OnWindowSizeChanged\"", StringComparison.Ordinal)
+        && xaml.Contains("DpiChanged=\"OnWindowDpiChanged\"", StringComparison.Ordinal),
+        "窗口应按当前显示器工作区与 DPI 限制启动尺寸，并在窗口尺寸或 DPI 改变时重新应用响应式布局。");
     Assert(source.Contains("protected override void OnClosing(CancelEventArgs eventArgs)", StringComparison.Ordinal)
         && source.Contains("viewModel.RequestCloseApplicationConfirmation()", StringComparison.Ordinal)
         && source.Contains("viewModel.CloseApplicationRequested += OnCloseApplicationRequested;", StringComparison.Ordinal)
@@ -304,8 +339,15 @@ static void VerifyStatusPanelLayout()
             taskLayout,
             "<ScrollViewer[^>]*VerticalScrollBarVisibility=\"Visible\"").Count == 2,
         "升级配置和升级状态机应分别使用独立且稳定占位的滚动条。");
-    Assert(taskLayout.Contains("<Grid.ColumnDefinitions><ColumnDefinition Width=\"*\" /><ColumnDefinition Width=\"16\" /><ColumnDefinition Width=\"*\" /></Grid.ColumnDefinitions>", StringComparison.Ordinal),
-        "升级配置和升级状态机应使用等宽双栏布局。");
+    Assert(taskLayout.Contains("x:Name=\"TaskConfigurationColumn\" Width=\"*\"", StringComparison.Ordinal)
+        && taskLayout.Contains("x:Name=\"TaskLayoutGutterColumn\" Width=\"16\"", StringComparison.Ordinal)
+        && taskLayout.Contains("x:Name=\"TaskStatusColumn\" Width=\"*\"", StringComparison.Ordinal)
+        && taskLayout.Contains("x:Name=\"CompactTaskViewSelector\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Content=\"任务配置\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Content=\"升级状态\"", StringComparison.Ordinal)
+        && codeBehind.Contains("TaskStatusScrollViewer.Visibility = _showCompactTaskStatus", StringComparison.Ordinal)
+        && codeBehind.Contains("TaskLayoutGutterColumn.Width = new GridLength(0);", StringComparison.Ordinal),
+        "升级任务宽屏应使用等宽双栏，紧凑屏幕应通过配置/状态切换器复用完整内容宽度。");
     Assert(taskLayout.Contains("IsEnabled=\"{Binding CanStartCycleUpgrade}\"", StringComparison.Ordinal),
         "循环升级按钮应根据反向 Patch 前置条件更新可用状态。");
     Assert(taskLayout.Contains("Text=\"循环升级设置\"", StringComparison.Ordinal)
@@ -333,6 +375,9 @@ static void VerifyStatusPanelLayout()
         && taskLayout.Contains("Text=\"{Binding SyncVersionDisplay}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding AsyncVersionDisplay}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding AsyncAddressDisplay}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding ExtenderIdDisplay}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding ExtenderIdDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding NodeIdDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding SyncSignalDisplay}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding NodeCountDisplay}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding Detail}\" TextWrapping=\"Wrap\"", StringComparison.Ordinal)
@@ -701,6 +746,10 @@ static void VerifyNodeTypePresentation()
         && viewModel.Contains("协议返回未知版本，不能升级", StringComparison.Ordinal)
         && viewModel.Contains("Math.Clamp(value, -200, 0)", StringComparison.Ordinal),
         "Node 原始版本 0/255 应显示为未知并禁止选择，RSSI 门限必须覆盖 -200～0 dBm。");
+    Assert(viewModel.Contains("ValidateSelectedExtenderNodeCoverage", StringComparison.Ordinal)
+        && viewModel.Contains("NodeTargetCoveragePolicy.Check", StringComparison.Ordinal)
+        && viewModel.Contains(".Where(group => selectedExtenderIds.Contains(group.ExtenderId))", StringComparison.Ordinal),
+        "Node 升级必须要求每个已勾选 Extender 都包含可升级目标，并清除未勾选 Extender 的残留目标。");
     var restoredNodeGroups = viewModel.IndexOf("foreach (var group in workspace.DiscoveredNodeGroups ?? [])", StringComparison.Ordinal);
     var restoredNodeTypeOptions = viewModel.IndexOf("RefreshNodeTypeOptions();", restoredNodeGroups, StringComparison.Ordinal);
     var restoredNodeEligibility = viewModel.IndexOf("RefreshNodeEligibility();", restoredNodeGroups, StringComparison.Ordinal);
@@ -1884,6 +1933,87 @@ static async Task VerifyDiffManifestGateAsync(string workspace)
     Assert(importedLegacyManifest.PatchType == "node" && importedLegacyManifest.DeviceTypeCode == (byte)FirmwareDeviceType.Socket,
         "历史 node 前缀的 Patch 元数据应保持可导入兼容。");
     Assert(File.Exists(output) && !manifest.PatchVerified, "Manifest 导出或 PatchTest 门禁错误。");
+}
+
+static async Task VerifyNativePatchVerifierAsync(string workspace)
+{
+    var testRoot = Path.Combine(workspace, "native-patch-verifier");
+    Directory.CreateDirectory(testRoot);
+    var oldPath = Path.Combine(testRoot, "old.bin");
+    var newPath = Path.Combine(testRoot, "new.bin");
+    var patchPath = Path.Combine(testRoot, "valid.patch");
+    var corruptedPatchPath = Path.Combine(testRoot, "corrupted.patch");
+    var truncatedPatchPath = Path.Combine(testRoot, "truncated.patch");
+    var oldImage = CreatePartitionedFirmwareImage(version: 1, changed: false);
+    var newImage = CreatePartitionedFirmwareImage(version: 2, changed: true);
+    await File.WriteAllBytesAsync(oldPath, oldImage);
+    await File.WriteAllBytesAsync(newPath, newImage);
+
+    var engine = new NativeBsdiffEngine();
+    Assert(engine.GetInfo().StatusMessage.Contains("原生还原验证器已就绪", StringComparison.Ordinal),
+        "原生 Patch 验证器未被差分引擎识别。 ");
+    var generation = await engine.GenerateAsync(
+        new DiffRequest(oldPath, newPath, patchPath, DeviceType.Node, "1", "2"));
+    Assert(generation.IsSuccess && File.Exists(patchPath) && new FileInfo(patchPath).Length > 0,
+        $"原生验证器测试 Patch 制作失败：{generation.Message}");
+
+    var verification = await engine.VerifyAsync(oldPath, patchPath, newPath);
+    Assert(verification.IsSuccess,
+        $"原生 Patch 还原验证失败：{verification.Message}");
+
+    var corruptedPatch = await File.ReadAllBytesAsync(patchPath);
+    corruptedPatch[^1] ^= 0x5A;
+    await File.WriteAllBytesAsync(corruptedPatchPath, corruptedPatch);
+    Assert(!(await engine.VerifyAsync(oldPath, corruptedPatchPath, newPath)).IsSuccess,
+        "原生验证器必须拒绝内容损坏的 Patch。 ");
+
+    await File.WriteAllBytesAsync(truncatedPatchPath, corruptedPatch.AsSpan(0, 15).ToArray());
+    Assert(!(await engine.VerifyAsync(oldPath, truncatedPatchPath, newPath)).IsSuccess,
+        "原生验证器必须拒绝截断的 Patch。 ");
+}
+
+static byte[] CreatePartitionedFirmwareImage(byte version, bool changed)
+{
+    const int secondPartitionLength = 8 * 1024;
+    const int thirdPartitionLength = 8 * 1024;
+    const int fourthPartitionLength = 16 * 1024;
+    var image = Enumerable.Repeat(
+        (byte)0x11,
+        FirmwareIdentityReader.BootloaderLength
+        + secondPartitionLength
+        + thirdPartitionLength
+        + fourthPartitionLength).ToArray();
+
+    if (changed)
+    {
+        for (var index = FirmwareIdentityReader.BootloaderLength; index < image.Length; index += 97)
+        {
+            image[index] = (byte)((index / 97) & 0xFF);
+        }
+        for (var index = FirmwareIdentityReader.BootloaderLength + secondPartitionLength;
+             index < image.Length;
+             index += 211)
+        {
+            image[index] ^= 0xA5;
+        }
+    }
+
+    image[FirmwareIdentityReader.IdentityOffset] = version;
+    image[FirmwareIdentityReader.EcoMagicOffset] = (byte)'e';
+    image[FirmwareIdentityReader.EcoMagicOffset + 1] = (byte)'c';
+    image[FirmwareIdentityReader.EcoMagicOffset + 2] = (byte)'o';
+    image[FirmwareIdentityReader.EcoMagicOffset + 3] = (byte)FirmwareDeviceType.Socket;
+
+    var tableOffset = FirmwareIdentityReader.BootloaderLength - 128;
+    image[tableOffset] = (byte)'U';
+    image[tableOffset + 1] = (byte)'C';
+    image[tableOffset + 2] = 4;
+    image[tableOffset + 3] = (byte)'F';
+    BitConverter.TryWriteBytes(image.AsSpan(tableOffset + 4, 4), FirmwareIdentityReader.BootloaderLength);
+    BitConverter.TryWriteBytes(image.AsSpan(tableOffset + 8, 4), secondPartitionLength);
+    BitConverter.TryWriteBytes(image.AsSpan(tableOffset + 12, 4), thirdPartitionLength);
+    BitConverter.TryWriteBytes(image.AsSpan(tableOffset + 16, 4), fourthPartitionLength);
+    return image;
 }
 
 static byte[] CreateFirmwareImage(FirmwareDeviceType deviceType, byte version, byte fill)

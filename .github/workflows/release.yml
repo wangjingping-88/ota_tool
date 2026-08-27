@@ -40,6 +40,7 @@ jobs:
       - name: 恢复并运行全部测试
         shell: pwsh
         run: |
+          .\scripts\Build-NativePatchVerifier.ps1
           dotnet restore OtaTool.sln
           dotnet build OtaTool.sln -c Release --no-restore
           dotnet run --project tests/OtaTool.Core.SmokeTests/OtaTool.Core.SmokeTests.csproj -c Release --no-build

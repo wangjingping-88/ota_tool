@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\win-x64'),
-    [string]$Version = '0.1.7',
+    [string]$Version = '0.1.8',
     [string]$SourceRevisionId = ''
 )
 
@@ -64,6 +64,9 @@ dotnet publish $projectPath `
     --self-contained true `
     -o $OutputPath `
     -p:Version=$Version `
+    -p:VersionPrefix=$Version `
+    -p:AssemblyVersion="$Version.0" `
+    -p:FileVersion="$Version.0" `
     -p:InformationalVersion=$informationalVersion `
     -p:SourceRevisionId=$SourceRevisionId
 
@@ -73,6 +76,9 @@ dotnet publish $updaterProjectPath `
     --self-contained true `
     -o $updaterOutputPath `
     -p:Version=$Version `
+    -p:VersionPrefix=$Version `
+    -p:AssemblyVersion="$Version.0" `
+    -p:FileVersion="$Version.0" `
     -p:InformationalVersion=$informationalVersion `
     -p:SourceRevisionId=$SourceRevisionId
 
@@ -82,10 +88,8 @@ $requiredFiles = @(
     'OtaTool.App.exe',
     'OtaTool.Updater.exe',
     'bsdiff_cmd.exe',
-    'Tools\OTA_TOOL\OTA_TOOL.exe',
-    'Tools\OTA_TOOL\Qt5Core.dll',
-    'Tools\OTA_TOOL\platforms\qwindows.dll',
-    'Scripts\TestPatchWithOtaTool.ps1',
+    'partition_patch_verify.exe',
+    'Licenses\partition_patch_verify.md',
     'analyze_ota_logs.py'
 )
 foreach ($requiredFile in $requiredFiles) {

@@ -6,10 +6,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\..\scripts\TestPatchWithOtaTool.ps1" Link="Scripts\TestPatchWithOtaTool.ps1">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </Content>
     <Content Include="..\..\scripts\analyze_ota_logs.py" Link="analyze_ota_logs.py">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
@@ -22,10 +18,14 @@
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
     </Content>
-    <Content Include="..\..\assets\native\OTA_TOOL\**\*" Link="Tools\OTA_TOOL\%(RecursiveDir)%(Filename)%(Extension)">
+    <Content Include="..\..\assets\native\partition_patch_verify.exe" Link="partition_patch_verify.exe">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
       <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+    </Content>
+    <Content Include="..\..\native\patch_verify\THIRD_PARTY_NOTICES.md" Link="Licenses\partition_patch_verify.md">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
 

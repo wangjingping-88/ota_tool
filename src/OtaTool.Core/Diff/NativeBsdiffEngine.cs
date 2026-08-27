@@ -8,16 +8,17 @@ namespace OtaTool.Core.Diff;
 /// </summary>
 public sealed class NativeBsdiffEngine : IDiffEngine
 {
-    private const string ExecutableName = "bsdiff_cmd.exe";
+    private const string GeneratorExecutableName = "bsdiff_cmd.exe";
+    private const string VerifierExecutableName = "partition_patch_verify.exe";
 
     public DiffEngineInfo GetInfo() => new(
         "partition-bsdiff-lzzip",
-        "1.0.0",
+        "1.1.0-native-verify",
         string.Empty,
         true,
         IsAvailable
-            ? "差分引擎已就绪，可制作正向和反向 Patch。"
-            : "差分引擎文件缺失，请重新安装 OTA 测试平台。");
+            ? "差分引擎和原生还原验证器已就绪。"
+            : MissingComponentMessage);
 
     public async Task<DiffResult> GenerateAsync(DiffRequest request, CancellationToken cancellationToken = default)
     {
@@ -40,7 +41,7 @@ public sealed class NativeBsdiffEngine : IDiffEngine
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = ExecutablePath,
+                FileName = GeneratorExecutablePath,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
@@ -69,10 +70,84 @@ public sealed class NativeBsdiffEngine : IDiffEngine
         return new DiffResult(true, "Patch 制作完成。", patch);
     }
 
-    public Task<PatchVerifyResult> VerifyAsync(string oldImagePath, string patchPath, string expectedNewImagePath, CancellationToken cancellationToken = default)
-        => Task.FromResult(new PatchVerifyResult(false, "当前差分引擎未集成反向还原校验命令。"));
+    public async Task<PatchVerifyResult> VerifyAsync(
+        string oldImagePath,
+        string patchPath,
+        string expectedNewImagePath,
+        CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(VerifierExecutablePath))
+        {
+            return new PatchVerifyResult(false, "缺少原生 Patch 还原验证器，请重新安装 OTA 测试平台。");
+        }
+        if (!File.Exists(oldImagePath)) return new PatchVerifyResult(false, "还原源镜像不存在。");
+        if (!File.Exists(patchPath)) return new PatchVerifyResult(false, "待验证 Patch 不存在。");
+        if (!File.Exists(expectedNewImagePath)) return new PatchVerifyResult(false, "还原目标镜像不存在。");
 
-    private static string ExecutablePath => Path.Combine(AppContext.BaseDirectory, ExecutableName);
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = VerifierExecutablePath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            },
+        };
+        process.StartInfo.ArgumentList.Add(Path.GetFullPath(oldImagePath));
+        process.StartInfo.ArgumentList.Add(Path.GetFullPath(patchPath));
+        process.StartInfo.ArgumentList.Add(Path.GetFullPath(expectedNewImagePath));
 
-    private static bool IsAvailable => File.Exists(ExecutablePath);
+        try
+        {
+            process.Start();
+            var standardOutput = process.StandardOutput.ReadToEndAsync();
+            var standardError = process.StandardError.ReadToEndAsync();
+            try
+            {
+                await process.WaitForExitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+                throw;
+            }
+
+            var outputText = (await standardOutput).Trim();
+            var errorText = (await standardError).Trim();
+            if (process.ExitCode != 0)
+            {
+                var detail = string.IsNullOrWhiteSpace(errorText) ? outputText : errorText;
+                if (string.IsNullOrWhiteSpace(detail)) detail = "验证器未返回具体原因。";
+                return new PatchVerifyResult(
+                    false,
+                    $"原生还原验证失败（退出码 {process.ExitCode}）：{detail}");
+            }
+
+            return new PatchVerifyResult(
+                true,
+                string.IsNullOrWhiteSpace(outputText)
+                    ? "原生 Patch 还原验证通过。"
+                    : $"原生 Patch 还原验证通过：{outputText}");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            return new PatchVerifyResult(false, $"原生还原验证器启动失败：{exception.Message}");
+        }
+    }
+
+    private static string GeneratorExecutablePath => Path.Combine(AppContext.BaseDirectory, GeneratorExecutableName);
+
+    private static string VerifierExecutablePath => Path.Combine(AppContext.BaseDirectory, VerifierExecutableName);
+
+    private static bool IsAvailable => File.Exists(GeneratorExecutablePath) && File.Exists(VerifierExecutablePath);
+
+    private static string MissingComponentMessage => !File.Exists(GeneratorExecutablePath)
+        ? "差分制作引擎缺失，请重新安装 OTA 测试平台。"
+        : "原生 Patch 还原验证器缺失，请重新安装 OTA 测试平台。";
 }

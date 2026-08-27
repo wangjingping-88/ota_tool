@@ -448,11 +448,9 @@ static class TestData
                 [UpdatePaths.ApplicationFileName] = Encoding.UTF8.GetBytes("new"),
                 [UpdatePaths.UpdaterFileName] = Encoding.UTF8.GetBytes("updater"),
                 ["bsdiff_cmd.exe"] = [1],
-                ["Tools/OTA_TOOL/OTA_TOOL.exe"] = [2],
-                ["Tools/OTA_TOOL/Qt5Core.dll"] = [3],
-                ["Tools/OTA_TOOL/platforms/qwindows.dll"] = [4],
-                ["Scripts/TestPatchWithOtaTool.ps1"] = [5],
-                ["analyze_ota_logs.py"] = [6],
+                ["partition_patch_verify.exe"] = [2],
+                ["Licenses/partition_patch_verify.md"] = [3],
+                ["analyze_ota_logs.py"] = [4],
             };
             foreach (var file in files)
             {

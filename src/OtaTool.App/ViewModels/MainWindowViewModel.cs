@@ -2639,16 +2639,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        PatchStatus = "Patch 已生成，正在自动执行正向和反向还原校验…";
-        var role = _oldFirmwareIdentity.PatchPrefix switch
-        {
-            "ext-a" => "async",
-            "ext-s" => "sync",
-            "gateway" => "gateway",
-            _ => "node",
-        };
-        await RunOtaToolPatchTestAsync("正向 Patch", _oldImagePath, _newImagePath, _patchPath, role, forwardCapacity.Limit);
-        await RunOtaToolPatchTestAsync("反向 Patch", _newImagePath, _oldImagePath, _reversePatchPath, role, reverseCapacity.Limit);
+        PatchStatus = "Patch 已生成，正在执行原生还原验证…";
+        await RunNativePatchVerificationAsync(
+            "正向 Patch",
+            engine,
+            _oldImagePath,
+            _newImagePath,
+            _patchPath);
+        await RunNativePatchVerificationAsync(
+            "反向 Patch",
+            engine,
+            _newImagePath,
+            _oldImagePath,
+            _reversePatchPath);
 
         var forwardManifest = await PackageManifestFactory.CreateAsync(engine.GetInfo(), forwardRequest, forwardMetadata, true);
         var reverseManifest = await PackageManifestFactory.CreateAsync(engine.GetInfo(), reverseRequest, reverseMetadata, true);
@@ -2671,7 +2674,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         PatchUrl = IsHttpServiceRunning ? GetLocalPatchUrl(_patchPath) : string.Empty;
         _reversePatchUrl = IsHttpServiceRunning ? GetLocalPatchUrl(_reversePatchPath) : string.Empty;
         _patchManifestVerified = true;
-        PatchStatus = $"已制作并通过双向还原校验：{Path.GetFileName(_patchPath)}、{Path.GetFileName(_reversePatchPath)}。";
+        PatchStatus = $"已制作并通过原生还原验证：{Path.GetFileName(_patchPath)}、{Path.GetFileName(_reversePatchPath)}。";
         TaskStatusMessage = IsHttpServiceRunning
             ? "正向和反向 Patch 已生成并放入本地 HTTP 服务目录。"
             : "正向和反向 Patch 已生成；启动本地 HTTP Range 服务后即可提供下载。";
@@ -2746,16 +2749,22 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         try
         {
             var identity = await FirmwareIdentityReader.ReadAsync(sourceImage);
-            var role = identity.PatchPrefix switch
-            {
-                "ext-a" => "async",
-                "ext-s" => "sync",
-                "gateway" => "gateway",
-                _ => "node",
-            };
-            var limit = GetPatchCapacityLimits().For(identity.OtaDeviceType);
-            await RunOtaToolPatchTestAsync(testName, sourceImage, expectedImage, patch.FilePath, role, limit);
             var metadata = await PatchMetadata.FromFileAsync(patch.FilePath);
+            var capacity = PatchCapacityPolicy.Check(
+                identity.OtaDeviceType,
+                metadata.Length,
+                GetPatchCapacityLimits());
+            if (!capacity.IsAllowed)
+            {
+                throw new InvalidOperationException(capacity.Message);
+            }
+            var engine = new NativeBsdiffEngine();
+            await RunNativePatchVerificationAsync(
+                testName,
+                engine,
+                sourceImage,
+                expectedImage,
+                patch.FilePath);
             var request = new DiffRequest(
                 sourceImage,
                 expectedImage,
@@ -2763,7 +2772,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 identity.OtaDeviceType,
                 isReverse ? NewVersion : OldVersion,
                 isReverse ? OldVersion : NewVersion);
-            var manifest = await PackageManifestFactory.CreateAsync(new NativeBsdiffEngine().GetInfo(), request, metadata, true);
+            var manifest = await PackageManifestFactory.CreateAsync(engine.GetInfo(), request, metadata, true);
             await PackageManifestExporter.ExportAsync(manifest, patch.FilePath + ".json");
             RegisterPatch(
                 patch.Source,
@@ -2777,7 +2786,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 newVersion: manifest.NewVersion);
             await ApplySidecarManifestAsync(patch.FilePath);
             RefreshUpgradePatchChoices();
-            PatchRestoreTestStatus = $"{testName} 导入验证通过。";
+            PatchRestoreTestStatus = $"{testName} 原生还原验证通过。";
             TaskStatusMessage = PatchRestoreTestStatus;
         }
         catch (Exception exception)
@@ -2787,74 +2796,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
-    private static async Task RunOtaToolPatchTestAsync(
+    private static async Task RunNativePatchVerificationAsync(
         string name,
+        NativeBsdiffEngine engine,
         string oldImagePath,
         string newImagePath,
-        string patchPath,
-        string role,
-        long patchLimitBytes)
+        string patchPath)
     {
-        var scriptPath = Path.Combine(AppContext.BaseDirectory, "Scripts", "TestPatchWithOtaTool.ps1");
-        var otaToolPath = Path.Combine(AppContext.BaseDirectory, "Tools", "OTA_TOOL", "OTA_TOOL.exe");
-        if (!File.Exists(scriptPath)) throw new FileNotFoundException("缺少 PatchTest 脚本，请重新安装桌面工具。", scriptPath);
-        if (!File.Exists(otaToolPath)) throw new FileNotFoundException("发布包缺少内置 Patch 还原工具，请重新安装 OTA 测试平台。", otaToolPath);
-
-        var testRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "OtaTool", "patch-restore-tests", Guid.NewGuid().ToString("N"));
-        var firmwareDirectory = Path.Combine(testRoot, "firmware");
-        var workDirectory = Path.Combine(testRoot, "work");
-        var packageDirectory = Path.Combine(testRoot, "package");
-        Directory.CreateDirectory(firmwareDirectory);
-        File.Copy(oldImagePath, Path.Combine(firmwareDirectory, $"{role}-old.bin"));
-        File.Copy(newImagePath, Path.Combine(firmwareDirectory, $"{role}-new.bin"));
-
-        using var process = new Process
+        var nativeResult = await engine.VerifyAsync(oldImagePath, patchPath, newImagePath);
+        if (!nativeResult.IsSuccess)
         {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "powershell.exe",
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            },
-        };
-        process.StartInfo.ArgumentList.Add("-NoProfile");
-        process.StartInfo.ArgumentList.Add("-ExecutionPolicy");
-        process.StartInfo.ArgumentList.Add("Bypass");
-        process.StartInfo.ArgumentList.Add("-File");
-        process.StartInfo.ArgumentList.Add(scriptPath);
-        process.StartInfo.ArgumentList.Add("-Role");
-        process.StartInfo.ArgumentList.Add(role);
-        process.StartInfo.ArgumentList.Add("-FirmwareDirectory");
-        process.StartInfo.ArgumentList.Add(firmwareDirectory);
-        process.StartInfo.ArgumentList.Add("-PackageDirectory");
-        process.StartInfo.ArgumentList.Add(packageDirectory);
-        process.StartInfo.ArgumentList.Add("-WorkDirectory");
-        process.StartInfo.ArgumentList.Add(workDirectory);
-        process.StartInfo.ArgumentList.Add("-OtaToolPath");
-        process.StartInfo.ArgumentList.Add(otaToolPath);
-        process.StartInfo.ArgumentList.Add("-PatchToTest");
-        process.StartInfo.ArgumentList.Add(patchPath);
-        process.StartInfo.ArgumentList.Add("-SkippedBootloaderBytes");
-        process.StartInfo.ArgumentList.Add(FirmwareIdentityReader.BootloaderLength.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (patchLimitBytes < long.MaxValue)
-        {
-            process.StartInfo.ArgumentList.Add("-PatchLimitBytes");
-            process.StartInfo.ArgumentList.Add(patchLimitBytes.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        }
-        process.StartInfo.ArgumentList.Add("-TimeoutSeconds");
-        process.StartInfo.ArgumentList.Add("90");
-
-        process.Start();
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync();
-        if (process.ExitCode != 0)
-        {
-            var detail = (await error).Trim();
-            if (string.IsNullOrWhiteSpace(detail)) detail = (await output).Trim();
-            throw new InvalidOperationException($"{name}：{detail}");
+            throw new InvalidOperationException($"{name}：{nativeResult.Message}");
         }
     }
 
@@ -2862,13 +2814,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         if (string.IsNullOrWhiteSpace(detail)) return "未返回具体原因。";
         var normalized = detail.Replace("\r", string.Empty, StringComparison.Ordinal).Trim();
-        var mismatchIndex = normalized.IndexOf("PatchTest output mismatch:", StringComparison.OrdinalIgnoreCase);
-        if (mismatchIndex >= 0)
-        {
-            var mismatch = normalized[mismatchIndex..].Split('\n', StringSplitOptions.RemoveEmptyEntries)[0].Trim();
-            return mismatch.Length <= 280 ? mismatch : mismatch[..280] + "…";
-        }
-
         var firstLine = normalized.Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault(line => !line.TrimStart().StartsWith("at ", StringComparison.OrdinalIgnoreCase))?.Trim() ?? normalized;
         return firstLine.Length <= 280 ? firstLine : firstLine[..280] + "…";
@@ -2994,6 +2939,22 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var directionText = reverse ? "反向" : "正向";
         if (!canStartDirection)
         {
+            if (CanStartUpgrade && SelectedTaskType == NodeTaskType)
+            {
+                try
+                {
+                    if (ValidateSelectedExtenderNodeCoverage(ParseNodeTargets(NodeTargetsText)) is { } currentCoverageError)
+                    {
+                        TaskStatusMessage = $"任务未启动：{currentCoverageError}";
+                        return;
+                    }
+                }
+                catch (Exception exception)
+                {
+                    TaskStatusMessage = $"任务未启动：{exception.Message}";
+                    return;
+                }
+            }
             TaskStatusMessage = CanStartUpgrade
                 ? $"{directionText}升级不可用：请确认对应 Patch、版本方向和所选目标当前版本。"
                 : "已有升级任务正在确认或执行中，不能重复启动。";
@@ -3019,6 +2980,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         catch (Exception exception)
         {
             TaskStatusMessage = $"任务未启动：{exception.Message}";
+            return;
+        }
+        if (deviceType == DeviceType.Node && ValidateSelectedExtenderNodeCoverage(extenderTargets) is { } coverageError)
+        {
+            TaskStatusMessage = $"任务未启动：{coverageError}";
             return;
         }
         if (deviceType == DeviceType.Node && ValidateDiscoveredNodeTypes(extenderTargets, NodeType) is { } nodeTypeError)
@@ -3900,6 +3866,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 DiscoveredExtenders.Where(item => item.IsSelected)
                     .Select(item => item.ExtenderId));
         }
+        else if (SelectedTaskType == NodeTaskType)
+        {
+            OnNodeSelectionChanged();
+            OnPropertyChanged(nameof(ExtenderSelectionToggleText));
+            return;
+        }
         OnPropertyChanged(nameof(ExtenderSelectionToggleText));
         NotifyUpgradeActionAvailability();
         ScheduleSettingsAutoSave();
@@ -3911,9 +3883,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             return;
         }
+        var selectedExtenderIds = DiscoveredExtenders
+            .Where(item => item.IsSelected)
+            .Select(item => item.ExtenderId)
+            .ToHashSet();
         NodeTargetsText = string.Join(
             Environment.NewLine,
             DiscoveredNodeGroups
+                .Where(group => selectedExtenderIds.Contains(group.ExtenderId))
                 .Select(group => new
                 {
                     group.ExtenderId,
@@ -4325,6 +4302,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         IReadOnlyList<OtaExtenderTarget> extenderTargets;
         try { extenderTargets = deviceType == DeviceType.Node ? ParseNodeTargets(NodeTargetsText) : []; }
         catch (Exception exception) { TaskStatusMessage = $"循环任务未启动：{exception.Message}"; return; }
+        if (deviceType == DeviceType.Node && ValidateSelectedExtenderNodeCoverage(extenderTargets) is { } coverageError)
+        {
+            TaskStatusMessage = $"循环任务未启动：{coverageError}";
+            return;
+        }
         if (deviceType == DeviceType.Node && ValidateDiscoveredNodeTypes(extenderTargets, NodeType) is { } nodeTypeError)
         {
             TaskStatusMessage = $"循环任务未启动：{nodeTypeError}";
@@ -5791,6 +5773,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             return false;
         }
+        if (ValidateSelectedExtenderNodeCoverage(nodeTargets) is not null)
+        {
+            return false;
+        }
         var targetKeys = nodeTargets
             .SelectMany(target => target.NodeIds
                 .Where(nodeId => ushort.TryParse(nodeId, out _))
@@ -5950,6 +5936,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var preview = string.Join("；", mismatches.Take(3));
         var remainder = mismatches.Count > 3 ? $"；另有 {mismatches.Count - 3} 个" : string.Empty;
         return $"Node 类型 {NodeTypeCatalog.Format(expectedNodeType)} 与已发现目标不一致：{preview}{remainder}。请按刷新 Node 后显示的实际类型选择。";
+    }
+
+    private string? ValidateSelectedExtenderNodeCoverage(IReadOnlyList<OtaExtenderTarget> targets)
+    {
+        var selectedExtenderIds = DiscoveredExtenders
+            .Where(item => item.IsSelected)
+            .Select(item => item.ExtenderId)
+            .ToArray();
+        var coverage = NodeTargetCoveragePolicy.Check(selectedExtenderIds, targets);
+        if (coverage.SelectedExtenderCount == 0)
+        {
+            return "请至少勾选一个 Extender。";
+        }
+        if (coverage.MissingExtenderIds.Count > 0)
+        {
+            var identifiers = string.Join("、", coverage.MissingExtenderIds.Select(ProtocolIdentifierFormatter.Format));
+            return $"已选 Extender {identifiers} 没有在线且满足当前类型、版本条件的已选 Node。请恢复 Node 在线并刷新，或取消勾选该 Extender。";
+        }
+        if (coverage.UnexpectedExtenderIds.Count > 0)
+        {
+            var identifiers = string.Join("、", coverage.UnexpectedExtenderIds.Select(ProtocolIdentifierFormatter.Format));
+            return $"Node 目标中包含未勾选的 Extender {identifiers}，请重新刷新 Node 后选择目标。";
+        }
+        return null;
     }
 
     private string? ValidateUpgradePreflight(
@@ -6434,6 +6444,8 @@ public sealed class SelectableExtenderItem : ObservableObject
 
     public uint ExtenderId { get; }
 
+    public string ExtenderIdDisplay => ProtocolIdentifierFormatter.Format(ExtenderId);
+
     public string Detail { get; }
 
     public byte DeviceType { get; }
@@ -6459,7 +6471,7 @@ public sealed class SelectableExtenderItem : ObservableObject
         : "--";
 
     public string AsyncAddressDisplay => AsyncAddress.HasValue
-        ? $"0x{AsyncAddress.Value:X4}"
+        ? ProtocolIdentifierFormatter.Format(AsyncAddress.Value)
         : "--";
 
     public string SyncSignalDisplay => SyncRssi.HasValue && SyncSnr.HasValue
@@ -6480,7 +6492,7 @@ public sealed class SelectableExtenderItem : ObservableObject
         };
 
     public string StatusDisplay => AsyncAddress.HasValue
-        ? $"Async 0x{AsyncAddress.Value:X4} · Sync RSSI {SyncRssi} dBm / SNR {SyncSnr} dB · 在线 {OnlineCount}/{TotalCount}"
+        ? $"Async {ProtocolIdentifierFormatter.Format(AsyncAddress.Value)} · Sync RSSI {SyncRssi} dBm / SNR {SyncSnr} dB · 在线 {OnlineCount}/{TotalCount}"
         : string.Empty;
 
     public byte? GetSoftwareVersion(DeviceType deviceType) => deviceType switch
@@ -6566,6 +6578,8 @@ public sealed class SelectableNodeItem : ObservableObject
 
     public ushort NodeId { get; }
 
+    public string NodeIdDisplay => ProtocolIdentifierFormatter.Format(NodeId);
+
     public byte NodeType { get; }
 
     public string NodeTypeDisplay => NodeTypeCatalog.Format(NodeType);
@@ -6649,6 +6663,8 @@ public sealed class NodeGroupItem : ObservableObject
     }
 
     public uint ExtenderId { get; }
+
+    public string ExtenderIdDisplay => ProtocolIdentifierFormatter.Format(ExtenderId);
 
     public string Error { get; }
 

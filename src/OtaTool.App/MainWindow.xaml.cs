@@ -15,8 +15,12 @@ public partial class MainWindow : Window
 {
     private const int WmGetMinMaxInfo = 0x0024;
     private const uint MonitorDefaultToNearest = 0x00000002;
+    private const double CompactLayoutWidth = 1400;
+    private const double ShortLayoutHeight = 820;
     private bool _followGlobalLog = true;
     private bool _followMqttMessages = true;
+    private bool _responsiveLayoutReady;
+    private bool _showCompactTaskStatus;
     private MainWindowViewModel? _mqttMessageSource;
     private HwndSource? _windowSource;
     private UpdateWindow? _updateWindow;
@@ -26,6 +30,8 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _responsiveLayoutReady = true;
+        ApplyResponsiveLayout();
         var viewModel = new MainWindowViewModel();
         viewModel.ApplicationUpdate.UpdateAvailable += OnUpdateAvailable;
         viewModel.CloseApplicationRequested += OnCloseApplicationRequested;
@@ -36,6 +42,7 @@ public partial class MainWindow : Window
     {
         if (_startupCompleted || DataContext is not MainWindowViewModel viewModel) return;
         _startupCompleted = true;
+        ApplyResponsiveLayout();
         try
         {
             await viewModel.Initialization;
@@ -85,6 +92,97 @@ public partial class MainWindow : Window
         var windowHandle = new WindowInteropHelper(this).Handle;
         _windowSource = HwndSource.FromHwnd(windowHandle);
         _windowSource?.AddHook(WindowProcedure);
+        FitWindowToCurrentWorkArea(windowHandle);
+        ApplyResponsiveLayout();
+    }
+
+    private void OnWindowSizeChanged(object sender, SizeChangedEventArgs eventArgs)
+        => ApplyResponsiveLayout();
+
+    private void OnWindowDpiChanged(object sender, DpiChangedEventArgs eventArgs)
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            var windowHandle = new WindowInteropHelper(this).Handle;
+            if (windowHandle != IntPtr.Zero) FitWindowToCurrentWorkArea(windowHandle);
+            ApplyResponsiveLayout();
+        }, DispatcherPriority.Loaded);
+    }
+
+    private void OnCompactTaskConfigurationChecked(object sender, RoutedEventArgs eventArgs)
+    {
+        if (!_responsiveLayoutReady) return;
+        _showCompactTaskStatus = false;
+        ApplyResponsiveLayout();
+    }
+
+    private void OnCompactTaskStatusChecked(object sender, RoutedEventArgs eventArgs)
+    {
+        if (!_responsiveLayoutReady) return;
+        _showCompactTaskStatus = true;
+        ApplyResponsiveLayout();
+    }
+
+    private void ApplyResponsiveLayout()
+    {
+        if (!_responsiveLayoutReady) return;
+
+        var layoutWidth = ActualWidth > 0 ? ActualWidth : Width;
+        var layoutHeight = ActualHeight > 0 ? ActualHeight : Height;
+        var isCompact = layoutWidth < CompactLayoutWidth;
+        var isShort = layoutHeight < ShortLayoutHeight;
+
+        NavigationColumn.Width = new GridLength(isCompact ? 176 : 220);
+        HeaderRow.Height = new GridLength(isCompact ? 84 : 100);
+        GlobalLogRow.Height = new GridLength(isShort ? 112 : isCompact ? 156 : 204);
+        FooterRow.Height = new GridLength(isCompact ? 30 : 34);
+        HeaderContentGrid.Margin = isCompact ? new Thickness(18, 0, 18, 0) : new Thickness(28, 0, 28, 0);
+        ContentHostGrid.Margin = isCompact ? new Thickness(16, 14, 16, 14) : new Thickness(28, 24, 28, 24);
+        GlobalLogBorder.Padding = isCompact ? new Thickness(18, 7, 18, 5) : new Thickness(28, 8, 28, 6);
+        FooterBorder.Padding = isCompact ? new Thickness(18, 0, 18, 0) : new Thickness(28, 0, 28, 0);
+        GlobalLogTitleText.Text = isCompact
+            ? "全局运行日志（最近 300 行）"
+            : "全局运行日志（仅保留本次运行最近 300 行，滚轮可暂停查看，按 Enter 回到最新日志）";
+        FooterShortcutText.Visibility = isCompact ? Visibility.Collapsed : Visibility.Visible;
+        CompactTaskViewSelector.Visibility = isCompact ? Visibility.Visible : Visibility.Collapsed;
+
+        if (isCompact)
+        {
+            TaskConfigurationColumn.Width = new GridLength(1, GridUnitType.Star);
+            TaskLayoutGutterColumn.Width = new GridLength(0);
+            TaskStatusColumn.Width = new GridLength(0);
+            Grid.SetColumn(TaskConfigurationScrollViewer, 0);
+            Grid.SetColumn(TaskStatusScrollViewer, 0);
+            TaskConfigurationScrollViewer.Visibility = _showCompactTaskStatus ? Visibility.Collapsed : Visibility.Visible;
+            TaskStatusScrollViewer.Visibility = _showCompactTaskStatus ? Visibility.Visible : Visibility.Collapsed;
+            return;
+        }
+
+        TaskConfigurationColumn.Width = new GridLength(1, GridUnitType.Star);
+        TaskLayoutGutterColumn.Width = new GridLength(16);
+        TaskStatusColumn.Width = new GridLength(1, GridUnitType.Star);
+        Grid.SetColumn(TaskConfigurationScrollViewer, 0);
+        Grid.SetColumn(TaskStatusScrollViewer, 2);
+        TaskConfigurationScrollViewer.Visibility = Visibility.Visible;
+        TaskStatusScrollViewer.Visibility = Visibility.Visible;
+    }
+
+    private void FitWindowToCurrentWorkArea(IntPtr windowHandle)
+    {
+        var monitorHandle = MonitorFromWindow(windowHandle, MonitorDefaultToNearest);
+        if (monitorHandle == IntPtr.Zero) return;
+
+        var monitorInfo = new MonitorInfo
+        {
+            Size = Marshal.SizeOf<MonitorInfo>(),
+        };
+        if (!GetMonitorInfo(monitorHandle, ref monitorInfo)) return;
+
+        var dpi = VisualTreeHelper.GetDpi(this);
+        var workAreaWidth = (monitorInfo.WorkArea.Right - monitorInfo.WorkArea.Left) / dpi.DpiScaleX;
+        var workAreaHeight = (monitorInfo.WorkArea.Bottom - monitorInfo.WorkArea.Top) / dpi.DpiScaleY;
+        Width = Math.Min(Width, Math.Max(MinWidth, workAreaWidth));
+        Height = Math.Min(Height, Math.Max(MinHeight, workAreaHeight));
     }
 
     private void OnMinimizeClick(object sender, RoutedEventArgs eventArgs)

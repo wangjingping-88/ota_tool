@@ -211,18 +211,17 @@ Manifest 记录：
 
 ### 5.3 当前差分引擎约束
 
-已确认 `OTA_TOOL.exe` 没有可直接调用的 DLL 或命令行 API，算法静态编入已经剥离符号的
-Qt 程序。当前实现不再要求用户在固定目录预装该工具，而是将已验证的完整 Qt 运行时快照
-放入 `assets/native/OTA_TOOL`，发布时复制到 `Tools/OTA_TOOL`。Patch 还原校验只启动发布包
-内置实例并在完成后关闭，避免复用机器上其他版本的同名进程。
+当前实现使用 `bsdiff_cmd.exe` 生成分区 Patch，并使用无界面的
+`partition_patch_verify.exe` 完成还原验证。原生验证器直接解析 16 字节分块头、自定义
+BSDiff 控制流、LZzip 数据和 CRC16-USB，不再启动或分发 `OTA_TOOL.exe`、Qt 运行时及
+UI Automation 脚本。
 
 当前边界：
 
-- 不逆向或修改 OTA_TOOL。
-- `partition-bsdiff-lzzip` 命令行引擎负责生成 Patch；内置 OTA_TOOL 仅承担正反向还原校验。
-- 桌面端通过最小化启动和 UI Automation 驱动内置实例，不依赖 `D:\tools\OTA_TOOL` 等机器路径。
-- 发布脚本和在线更新包均校验 `OTA_TOOL.exe`、`Qt5Core.dll` 与 `platforms/qwindows.dll` 等必要运行文件。
-- 仍允许导入外部 Patch，但必须通过同一内置还原校验后才能进入发布和升级流程。
+- `partition-bsdiff-lzzip` 命令行引擎负责生成 Patch，原生验证器承担正反向还原校验。
+- 发布脚本和在线更新包必须校验 `partition_patch_verify.exe` 及第三方许可证声明。
+- 仍允许导入外部 Patch，但必须通过原生还原、CRC、目标镜像和容量校验后才能进入发布和升级流程。
+- 原生验证失败时不得写入 `restore_verified=true`，也不得发布或启动升级。
 
 新引擎必须通过：
 
@@ -313,7 +312,7 @@ int partition_diff_verify(const char *old_bin, const char *patch,
 
 “差分引擎未验证”在下列验收全部通过前仍然成立；通过后，首版可启用一键生成：
 
-1. 使用 OTA_TOOL 已成功升级的每个设备类型、每个方向各保留至少一组旧 BIN、新 BIN、
+1. 使用已经实机升级成功的每个设备类型、每个方向各保留至少一组旧 BIN、新 BIN、
    官方 Patch 的黄金样本，并记录 Patch SHA256。
 2. 原生引擎对黄金样本生成的 Patch 必须逐字节一致；若业务确认允许压缩策略变化，则
    至少要求块头、恢复结果和真实 Bootloader 验证均一致，并在 Manifest 标记引擎版本。
@@ -736,8 +735,7 @@ V1 → V2 → V1
 - EcoLink 模式支持 Gateway、Sync、Async、Node；Gateway 不主动周期上报进度，工具使用 `cmd=8` 查询、Gateway 使用 `cmd=9` 响应，并保留 `cmd=6` 最终结果协议。
 - EcoLink 查询只读取 Gateway 已有事实，不触发下游查询；传统模式不实现该查询。
 - 支持导入 Patch 和通过已认证的 `partition-bsdiff-lzzip` 引擎一键生成，二者都必须通过内置还原校验。
-- 不逆向 OTA_TOOL。
-- 不依赖机器预装 OTA_TOOL；还原校验运行时随桌面发布包交付。
+- 不再分发或调用 OTA_TOOL、Qt 和 UI Automation 脚本；还原校验由原生验证器完成。
 - 不负责构建、烧录和串口日志采集。
 - 同一工具实例同一时刻只执行一个父 OTA 任务。
 
@@ -758,7 +756,7 @@ V1 → V2 → V1
 - 正反向 Patch 双向循环、SQLite 报告索引、HTML/JSON 导出和 EcoLink 外部日志分析入口；
 - JSON 普通设置与 Windows Credential Manager 密码/口令分离保存。
 
-`partition-bsdiff-lzzip` 仍保持“未认证不可生成”状态。这不是功能遗漏，而是第 5.4.3
-节的强制发布门禁：在没有黄金样本逐字节比对、宿主恢复和真实 Bootloader 验证前，工具只能
-导入已有 Patch，绝不生成可能损坏设备的 Patch。获得验收样本后，应在原生项目中实现第
-5.4.2 节 C ABI，并解除该门禁。
+`partition-bsdiff-lzzip` 已集成 Patch 生成和无界面原生还原验证。制作正向、反向 Patch
+以及验证外部 Patch 时，均必须完成分块边界、LZzip/BSDiff 还原、CRC16-USB、容量和目标
+镜像一致性校验；任一检查失败时不得生成已验证 Manifest、发布或启动升级。旧
+`OTA_TOOL.exe`、Qt 运行时和 UI Automation 脚本不再属于桌面端或在线更新包依赖。

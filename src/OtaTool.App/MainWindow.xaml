@@ -8,9 +8,11 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title=""
-        Width="1560" Height="960" MinWidth="1180" MinHeight="720"
+        Width="1560" Height="960" MinWidth="900" MinHeight="560"
         WindowStartupLocation="CenterScreen" Background="{StaticResource CanvasBrush}"
         WindowStyle="None" ResizeMode="CanResize"
+        SizeChanged="OnWindowSizeChanged"
+        DpiChanged="OnWindowDpiChanged"
         Loaded="OnLoaded"
         Closed="OnClosed">
     <WindowChrome.WindowChrome>
@@ -79,7 +81,7 @@
             </Style>
         </Border.Style>
     <Grid>
-        <Grid.ColumnDefinitions><ColumnDefinition Width="220" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+        <Grid.ColumnDefinitions><ColumnDefinition x:Name="NavigationColumn" Width="220" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
 
         <Border Grid.Column="0" Background="{StaticResource NavBrush}">
             <DockPanel>
@@ -117,7 +119,7 @@
         </Border>
 
         <Grid Grid.Column="1">
-            <Grid.RowDefinitions><RowDefinition Height="100" /><RowDefinition Height="*" /><RowDefinition Height="204" /><RowDefinition Height="34" /></Grid.RowDefinitions>
+            <Grid.RowDefinitions><RowDefinition x:Name="HeaderRow" Height="100" /><RowDefinition Height="*" /><RowDefinition x:Name="GlobalLogRow" Height="204" /><RowDefinition x:Name="FooterRow" Height="34" /></Grid.RowDefinitions>
             <Border Grid.Row="0" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="*" /></Grid.RowDefinitions>
@@ -137,7 +139,7 @@
                         </Button>
                         <Button Style="{StaticResource CloseCaptionButton}" Content="×" ToolTip="关闭" Click="OnCloseClick" shell:WindowChrome.IsHitTestVisibleInChrome="True" />
                     </StackPanel>
-                    <Grid Grid.Row="1" Margin="28,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <Grid x:Name="HeaderContentGrid" Grid.Row="1" Margin="28,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                         <StackPanel VerticalAlignment="Center"><TextBlock FontSize="20" FontWeight="SemiBold" Text="{Binding CurrentPageTitle}" /><TextBlock Margin="0,3,0,0" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="{Binding CurrentPageSubtitle}" /></StackPanel>
                         <Border Grid.Column="1" Background="#F0F3F8" CornerRadius="6" Padding="3" VerticalAlignment="Center" Margin="0,0,18,0"><StackPanel Orientation="Horizontal">
                             <RadioButton GroupName="Mode" IsChecked="{Binding IsTraditional, Mode=TwoWay}" Style="{StaticResource ModeRadio}" Content="传统模式" />
@@ -147,7 +149,7 @@
                 </Grid>
             </Border>
 
-            <Grid Grid.Row="1" Margin="28,24,28,24">
+            <Grid x:Name="ContentHostGrid" Grid.Row="1" Margin="28,24,28,24">
                 <!-- 环境服务 -->
                 <Grid Visibility="{Binding EnvironmentPageVisibility}">
                     <Grid>
@@ -372,8 +374,36 @@
 
                 <!-- 升级任务 -->
                 <Grid Visibility="{Binding TaskPageVisibility}">
-                    <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="16" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                    <ScrollViewer x:Name="TaskConfigurationScrollViewer" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition x:Name="TaskConfigurationColumn" Width="*" />
+                        <ColumnDefinition x:Name="TaskLayoutGutterColumn" Width="16" />
+                        <ColumnDefinition x:Name="TaskStatusColumn" Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Border x:Name="CompactTaskViewSelector"
+                            Grid.Row="0"
+                            Grid.ColumnSpan="3"
+                            Margin="0,0,0,10"
+                            Padding="3"
+                            HorizontalAlignment="Left"
+                            Background="#E8EDF5"
+                            CornerRadius="6"
+                            Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton x:Name="CompactTaskConfigurationOption"
+                                         GroupName="CompactTaskView"
+                                         IsChecked="True"
+                                         Style="{StaticResource ModeRadio}"
+                                         Content="任务配置"
+                                         Checked="OnCompactTaskConfigurationChecked" />
+                            <RadioButton x:Name="CompactTaskStatusOption"
+                                         GroupName="CompactTaskView"
+                                         Style="{StaticResource ModeRadio}"
+                                         Content="升级状态"
+                                         Checked="OnCompactTaskStatusChecked" />
+                        </StackPanel>
+                    </Border>
+                    <ScrollViewer x:Name="TaskConfigurationScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
                         <Border Style="{StaticResource Card}"><StackPanel>
                             <Grid><StackPanel><TextBlock FontSize="18" FontWeight="SemiBold" Text="升级任务配置" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,4,0,0" Text="同一套目标和版本参数可启动单次升级，也可按正向 → 反向执行循环升级。" TextWrapping="Wrap" /></StackPanel></Grid>
                             <Grid Margin="0,20,0,0">
@@ -416,7 +446,7 @@
                                                                 <CheckBox VerticalAlignment="Center" IsChecked="{Binding IsSelected, Mode=TwoWay}">
                                                                     <StackPanel Orientation="Horizontal">
                                                                         <TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="EXTENDER" VerticalAlignment="Center" />
-                                                                        <TextBlock Margin="7,0,0,0" FontFamily="Cascadia Mono" FontSize="13" FontWeight="SemiBold" Text="{Binding ExtenderId}" VerticalAlignment="Center" />
+                                                                        <TextBlock Margin="7,0,0,0" FontFamily="Cascadia Mono" FontSize="13" FontWeight="SemiBold" Text="{Binding ExtenderIdDisplay}" VerticalAlignment="Center" />
                                                                     </StackPanel>
                                                                 </CheckBox>
                                                                 <Border Grid.Column="1" Padding="8,3" Background="{StaticResource GreenSoftBrush}" CornerRadius="10">
@@ -482,7 +512,7 @@
                                             <Expander Margin="0,3" IsExpanded="True">
                                                 <Expander.Header>
                                                     <StackPanel Orientation="Horizontal">
-                                                        <TextBlock FontWeight="SemiBold"><Run Text="Extender " /><Run Text="{Binding ExtenderId, Mode=OneWay}" /></TextBlock>
+                                                        <TextBlock FontWeight="SemiBold"><Run Text="Extender " /><Run Text="{Binding ExtenderIdDisplay, Mode=OneWay}" /></TextBlock>
                                                         <Border Margin="10,-1,0,0" Padding="7,2" Background="{StaticResource BlueSoftBrush}" CornerRadius="8">
                                                             <TextBlock FontSize="10" Foreground="{StaticResource BlueBrush}" Text="{Binding NodeCountSummary, Mode=OneWay}" />
                                                         </Border>
@@ -533,7 +563,7 @@
                                                                 <Grid>
                                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                                                     <TextBlock Foreground="{StaticResource MutedInkBrush}" FontFamily="Cascadia Mono" Text="{Binding SequenceDisplay, Mode=OneWay}" />
-                                                                    <TextBlock Grid.Column="1" FontFamily="Cascadia Mono"><Run Text="{Binding NodeId, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding NodeTypeDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding SoftwareVersionDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Rssi, Mode=OneWay}" /><Run Text=" dBm" /></TextBlock>
+                                                                    <TextBlock Grid.Column="1" FontFamily="Cascadia Mono"><Run Text="{Binding NodeIdDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding NodeTypeDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding SoftwareVersionDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Rssi, Mode=OneWay}" /><Run Text=" dBm" /></TextBlock>
                                                                 </Grid>
                                                             </CheckBox>
                                                         </DataTemplate>
@@ -582,7 +612,7 @@
                             </StackPanel>
                         </StackPanel></Border>
                     </ScrollViewer>
-                    <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                    <ScrollViewer x:Name="TaskStatusScrollViewer" Grid.Row="1" Grid.Column="2" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
                             <Border Style="{StaticResource Card}">
                                 <StackPanel>
                                     <Grid>
@@ -979,18 +1009,18 @@
                 </Border>
             </Border>
 
-            <Border Grid.Row="2" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="28,8,28,6">
+            <Border x:Name="GlobalLogBorder" Grid.Row="2" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="28,8,28,6">
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Grid>
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                        <TextBlock VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Text="全局运行日志（仅保留本次运行最近 300 行，滚轮可暂停查看，按 Enter 回到最新日志）" />
+                        <TextBlock x:Name="GlobalLogTitleText" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Text="全局运行日志（仅保留本次运行最近 300 行，滚轮可暂停查看，按 Enter 回到最新日志）" ToolTip="滚轮可暂停查看，按 Enter 回到最新日志" />
                         <Button Grid.Column="1" Height="24" MinWidth="56" Padding="10,0" Style="{StaticResource QuietButton}" Content="清空" Command="{Binding ClearGlobalLogCommand}" ToolTip="清空当前内存中的全局运行日志" />
                     </Grid>
                     <TextBox x:Name="GlobalLogTextBox" Grid.Row="1" Margin="0,5,0,0" Background="White" Foreground="Black" FontFamily="Cascadia Mono" FontSize="11" IsReadOnly="True" VerticalContentAlignment="Top" Text="{Binding GlobalLogText, Mode=OneWay}" TextWrapping="NoWrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" PreviewMouseWheel="OnGlobalLogPreviewMouseWheel" PreviewKeyDown="OnGlobalLogPreviewKeyDown" TextChanged="OnGlobalLogTextChanged" />
                 </Grid>
             </Border>
-            <Border Grid.Row="3" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="28,0"><DockPanel><TextBlock DockPanel.Dock="Left" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding TaskStatusMessage}" /><TextBlock DockPanel.Dock="Right" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="Ctrl+D PATCH 中心  ·  Ctrl+T 升级任务" /></DockPanel></Border>
+            <Border x:Name="FooterBorder" Grid.Row="3" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,1,0,0" Padding="28,0"><DockPanel><TextBlock DockPanel.Dock="Left" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding TaskStatusMessage}" /><TextBlock x:Name="FooterShortcutText" DockPanel.Dock="Right" VerticalAlignment="Center" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="Ctrl+D PATCH 中心  ·  Ctrl+T 升级任务" /></DockPanel></Border>
         </Grid>
     </Grid>
     </Border>

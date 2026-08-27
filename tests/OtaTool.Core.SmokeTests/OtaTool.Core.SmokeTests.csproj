@@ -29,8 +29,11 @@
     <None Include="..\..\src\OtaTool.App\ViewModels\MainWindowViewModel.cs"
           Link="TestAssets\MainWindowViewModel.cs"
           CopyToOutputDirectory="PreserveNewest" />
-    <None Include="..\..\scripts\TestPatchWithOtaTool.ps1"
-          Link="TestAssets\TestPatchWithOtaTool.ps1"
+    <None Include="..\..\assets\native\bsdiff_cmd.exe"
+          Link="bsdiff_cmd.exe"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\assets\native\partition_patch_verify.exe"
+          Link="partition_patch_verify.exe"
           CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
