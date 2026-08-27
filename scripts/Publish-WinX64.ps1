@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\win-x64'),
-    [string]$Version = '0.1.8',
+    [string]$Version = '0.1.9',
     [string]$SourceRevisionId = ''
 )
 
@@ -84,6 +84,29 @@ dotnet publish $updaterProjectPath `
 
 Copy-Item -LiteralPath (Join-Path $updaterOutputPath 'OtaTool.Updater.exe') -Destination $OutputPath -Force
 
+# v0.1.2～v0.1.7 的更新器会在解压后检查这些旧版路径。仅 v0.1.9 热修复包
+# 保留零字节占位文件用于跨版本更新；v0.1.9 及后续更新器不再检查这些文件。
+$legacyUpdaterCompatibilityFiles = @(
+    'Tools\OTA_TOOL\OTA_TOOL.exe',
+    'Tools\OTA_TOOL\Qt5Core.dll',
+    'Tools\OTA_TOOL\platforms\qwindows.dll',
+    'Scripts\TestPatchWithOtaTool.ps1'
+)
+if ($Version -eq '0.1.9') {
+    foreach ($compatibilityFile in $legacyUpdaterCompatibilityFiles) {
+        $compatibilityPath = Join-Path $OutputPath $compatibilityFile
+        $compatibilityDirectory = Split-Path -Parent $compatibilityPath
+        New-Item -ItemType Directory -Path $compatibilityDirectory -Force | Out-Null
+        [System.IO.File]::WriteAllBytes($compatibilityPath, [byte[]]@())
+    }
+
+    $compatibilityNoticePath = Join-Path $OutputPath 'Tools\OTA_TOOL\README.txt'
+    Set-Content -LiteralPath $compatibilityNoticePath -Encoding UTF8 -Value @'
+这些文件仅用于兼容 v0.1.2～v0.1.7 更新器的历史文件清单检查。
+当前版本使用 partition_patch_verify.exe 完成原生 Patch 还原验证，不会加载此目录中的占位文件。
+'@
+}
+
 $requiredFiles = @(
     'OtaTool.App.exe',
     'OtaTool.Updater.exe',
@@ -92,6 +115,9 @@ $requiredFiles = @(
     'Licenses\partition_patch_verify.md',
     'analyze_ota_logs.py'
 )
+if ($Version -eq '0.1.9') {
+    $requiredFiles += $legacyUpdaterCompatibilityFiles + @('Tools\OTA_TOOL\README.txt')
+}
 foreach ($requiredFile in $requiredFiles) {
     $requiredPath = Join-Path $OutputPath $requiredFile
     if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
