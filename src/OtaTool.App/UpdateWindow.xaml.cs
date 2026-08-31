@@ -33,6 +33,12 @@ public partial class UpdateWindow : Window, INotifyPropertyChanged
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    protected override void OnSourceInitialized(EventArgs eventArgs)
+    {
+        base.OnSourceInitialized(eventArgs);
+        NativeWindowShadow.Apply(this);
+    }
+
     public string VersionTitle => $"发现 v{_release.Version}";
 
     public string VersionSummary => $"当前 {_mainViewModel.ApplicationUpdate.CurrentVersion} · 发布于 {(_release.PublishedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "未知时间")}";

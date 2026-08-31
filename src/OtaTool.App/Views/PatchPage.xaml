@@ -12,7 +12,23 @@
         <Border Style="{StaticResource Card}">
             <ScrollViewer VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
             <StackPanel Margin="0,0,24,0">
-                <TextBlock FontSize="20" FontWeight="SemiBold" Text="Patch 制作" />
+                <Border x:Name="PatchBuildPanel" Style="{StaticResource FunctionalPanel}">
+                <StackPanel>
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="Patch 制作" />
+                    <Border Grid.Column="1"
+                            Padding="8,3"
+                            Background="{StaticResource GreenSoftBrush}"
+                            CornerRadius="9">
+                        <TextBlock FontSize="11"
+                                   Foreground="{StaticResource GreenBrush}"
+                                   Text="{Binding PatchOperationStatusText, Mode=OneWay}" />
+                    </Border>
+                </Grid>
                 <TextBlock Margin="0,5,0,12" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="导入 A/B 固件后生成 Patch 正向和 Patch 反向；导入的 Patch 与制作结果分别保存和显示。" />
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
@@ -69,8 +85,8 @@
                 </StackPanel>
                 <TextBlock Margin="0,7,29,0"
                            FontSize="11"
-                           Foreground="{StaticResource MutedInkBrush}"
-                           Text="{Binding PatchStatus}"
+                           Foreground="{StaticResource GreenBrush}"
+                           Text="{Binding PatchStatus, Mode=OneWay}"
                            TextWrapping="Wrap" />
                 <Grid Margin="0,10,29,0">
                     <Grid.ColumnDefinitions>
@@ -99,15 +115,19 @@
                             Command="{Binding TestPatchRestoreCommand}"
                             IsEnabled="{Binding CanTestSelectedPatchRestore}" />
                 </Grid>
-                <TextBlock Margin="0,6,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding PatchRestoreTestStatus}" TextWrapping="Wrap" />
-                <TextBlock Margin="0,10,0,0" FontSize="14" FontWeight="SemiBold" Text="Patch 详情" />
+                <TextBlock Margin="0,6,0,0" FontSize="11" Foreground="{StaticResource GreenBrush}" Text="{Binding PatchRestoreTestStatus}" TextWrapping="Wrap" />
+                </StackPanel>
+                </Border>
+                <Border x:Name="PatchCatalogPanel" Margin="0,12,0,0" Style="{StaticResource FunctionalPanel}">
+                <StackPanel>
+                <TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="Patch 详情" />
                 <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="勾选本次需要发布的 Patch；取消勾选不会删除源文件。裸 Patch 完成还原验证后才能用于升级和发布。" TextWrapping="Wrap" />
                 <ScrollViewer Margin="0,7,0,12" MaxHeight="240" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
                     <Border Padding="0,0,12,8">
                     <ItemsControl ItemsSource="{Binding PatchCatalog}">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
-                                <Border Margin="0,0,0,6" Padding="9" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                                <Border Margin="0,0,0,6" Padding="9" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
                                     <Grid>
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                         <CheckBox Margin="0,1,9,0"
@@ -127,6 +147,8 @@
                     </ItemsControl>
                     </Border>
                 </ScrollViewer>
+                </StackPanel>
+                </Border>
             </StackPanel>
             </ScrollViewer>
         </Border>
@@ -136,11 +158,11 @@
             <StackPanel Margin="0,0,24,0">
                 <TextBlock FontSize="20" FontWeight="SemiBold" Text="Patch 发布" />
                 <TextBlock Margin="0,4,0,10" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="本地发布由 HTTP Range 服务提供下载；公网发布通过 SFTP 上传，再以 HTTP 文件地址校验。" />
-                <Border Padding="12" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                <Border x:Name="LocalPatchPublishPanel" Style="{StaticResource FunctionalPanel}">
                     <StackPanel>
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="本地发布" />
+                            <TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="本地发布" />
                             <Border Grid.Column="1" Padding="8,3" Background="{StaticResource GreenSoftBrush}" CornerRadius="9"><TextBlock FontSize="11" Foreground="{StaticResource GreenBrush}" Text="{Binding HttpServiceStatus}" /></Border>
                         </Grid>
                         <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="监听端口" />
@@ -150,15 +172,15 @@
                         <Button Margin="0,8,0,0" HorizontalAlignment="Left" Style="{StaticResource PrimaryButton}" Content="{Binding HttpServiceToggleText}" Command="{Binding ToggleHttpServiceCommand}" />
                     </StackPanel>
                 </Border>
-                <Border Margin="0,10,0,0" Padding="12" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                <Border x:Name="PublicPatchPublishPanel" Margin="0,10,0,0" Style="{StaticResource FunctionalPanel}">
                     <StackPanel>
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                            <TextBlock FontSize="16" FontWeight="SemiBold" Text="公网发布" />
+                            <TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="公网发布" />
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
                                 <StackPanel Orientation="Horizontal" Visibility="{Binding PublishProgressVisibility}">
-                                    <ProgressBar Width="46" Height="5" Margin="0,0,7,0" VerticalAlignment="Center" IsIndeterminate="True" />
-                                    <TextBlock FontSize="11" Foreground="{StaticResource BlueBrush}" VerticalAlignment="Center" Text="发布中" />
+                                    <ProgressBar Width="46" Height="5" Margin="0,0,7,0" VerticalAlignment="Center" Foreground="{StaticResource GreenBrush}" IsIndeterminate="True" />
+                                    <TextBlock FontSize="11" Foreground="{StaticResource GreenBrush}" VerticalAlignment="Center" Text="发布中" />
                                 </StackPanel>
                                 <Border Visibility="{Binding PublishSuccessVisibility}" Background="{StaticResource GreenSoftBrush}" CornerRadius="9" Padding="8,3">
                                     <TextBlock FontSize="11" Foreground="{StaticResource GreenBrush}" Text="已发布" />
@@ -171,14 +193,31 @@
                             <StackPanel Margin="0,0,10,0"><TextBlock Style="{StaticResource FieldLabel}" Text="SFTP 主机" /><TextBox Margin="0,4,0,0" Text="{Binding SftpHost, UpdateSourceTrigger=PropertyChanged}" /></StackPanel>
                             <StackPanel Grid.Column="1"><TextBlock Style="{StaticResource FieldLabel}" Text="端口" /><TextBox Margin="0,4,0,0" Text="{Binding SftpPort, UpdateSourceTrigger=PropertyChanged}" /></StackPanel>
                         </Grid>
-                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="用户名" /><TextBox Margin="0,4,0,0" Text="{Binding SftpUserName, UpdateSourceTrigger=PropertyChanged}" />
-                        <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="密码" /><controls:PasswordInput Margin="0,4,0,0" Password="{Binding SftpPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <Grid Margin="0,7,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <StackPanel Margin="0,0,10,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="用户名" />
+                                <TextBox Margin="0,4,0,0" Text="{Binding SftpUserName, UpdateSourceTrigger=PropertyChanged}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="密码" />
+                                <controls:PasswordInput Margin="0,4,0,0" Password="{Binding SftpPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            </StackPanel>
+                        </Grid>
                         <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="远端目录" /><TextBox Margin="0,4,0,0" Text="{Binding SftpRemoteDirectory, UpdateSourceTrigger=PropertyChanged}" ToolTip="MobaXTerm 中拖入 Patch 的目录，例如 /opt/www/static/download/" />
                         <TextBlock Margin="0,7,0,0" Style="{StaticResource FieldLabel}" Text="HTTP 地址" /><TextBox Margin="0,4,0,0" Text="{Binding PublicHttpBaseUrl, UpdateSourceTrigger=PropertyChanged}" />
                         <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                             <Button Style="{StaticResource PrimaryButton}" Content="{Binding TestPublishConnectionButtonText}" IsEnabled="{Binding CanOperatePublication}" Command="{Binding TestPublishConnectionCommand}" />
                             <Button Margin="8,0,0,0" Style="{StaticResource PrimaryButton}" Content="{Binding PublishButtonText}" IsEnabled="{Binding CanOperatePublication}" Command="{Binding PublishPatchCommand}" />
                         </StackPanel>
+                        <TextBlock Margin="0,7,0,0" FontSize="11" TextWrapping="Wrap">
+                            <Run Foreground="{StaticResource MutedInkBrush}" Text="连接状态：" />
+                            <Run Foreground="{StaticResource GreenBrush}" Text="{Binding PublishConnectionTestStatus, Mode=OneWay}" />
+                        </TextBlock>
+                        <TextBlock Margin="0,4,0,0" FontSize="11" TextWrapping="Wrap">
+                            <Run Foreground="{StaticResource MutedInkBrush}" Text="发布状态：" />
+                            <Run Foreground="{StaticResource GreenBrush}" Text="{Binding PublishStatus, Mode=OneWay}" />
+                        </TextBlock>
                     </StackPanel>
                 </Border>
             </StackPanel>

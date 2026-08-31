@@ -169,7 +169,6 @@
                                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,10,0,0" Text="服务端用户名（可选）" /><TextBox Margin="0,5,0,0" Text="{Binding LocalBrokerUserName, UpdateSourceTrigger=PropertyChanged}" />
                                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,10,0,0" Text="服务端密码（仅保存到 Credential Manager）" /><controls:PasswordInput Margin="0,5,0,0" Password="{Binding LocalBrokerPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
                                             <Button Style="{StaticResource PrimaryButton}" Margin="0,16,0,0" HorizontalAlignment="Left" Content="{Binding EmbeddedBrokerToggleText}" Command="{Binding ToggleEmbeddedBrokerCommand}" />
-                                            <Border Background="#E9F0FF" BorderBrush="#BDD1FF" BorderThickness="1" CornerRadius="5" Padding="10" Margin="0,12,0,0"><StackPanel><TextBlock Style="{StaticResource FieldLabel}" Text="当前客户端目标" /><TextBlock FontFamily="Cascadia Mono" Foreground="{StaticResource BlueBrush}" Margin="0,5,0,0" Text="{Binding MqttClientEndpoint}" /></StackPanel></Border>
                                             <Button Style="{StaticResource PrimaryButton}" Margin="0,12,0,0" HorizontalAlignment="Left" Content="{Binding LocalMqttConnectionToggleText}" Command="{Binding ToggleLocalMqttConnectionCommand}" />
                                         </StackPanel>
                                     </Border>
@@ -305,30 +304,33 @@
                                                              Command="{Binding SelectMqttConfigurationCommand}" CommandParameter="Local" />
                                             </StackPanel>
                                         </Border>
-                                        <StackPanel Grid.Row="1" Margin="16" Visibility="{Binding MqttExternalConfigurationVisibility}">
-                                            <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock FontSize="18" FontWeight="SemiBold" Text="公网 MQTT Broker" /><Border Grid.Column="1" Background="{StaticResource GreenSoftBrush}" CornerRadius="9" Padding="8,3"><TextBlock Foreground="{StaticResource GreenBrush}" FontSize="11" Text="{Binding MqttStatus}" /></Border></Grid>
-                                            <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,5,0,16" Text="配置并连接公网或外部 MQTT Broker。切换前请先断开当前客户端连接。" TextWrapping="Wrap" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Text="公网 / 外部 Broker 地址" /><TextBox Margin="0,5,0,0" Text="{Binding MqttHost, UpdateSourceTrigger=PropertyChanged}" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="公网端口" /><TextBox Margin="0,5,0,0" Text="{Binding MqttPort, UpdateSourceTrigger=PropertyChanged}" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="客户端用户名" /><TextBox Margin="0,5,0,0" Text="{Binding MqttUserName, UpdateSourceTrigger=PropertyChanged}" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="公网客户端密码" /><controls:PasswordInput Margin="0,5,0,0" Password="{Binding MqttPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                            <StackPanel Margin="0,14,0,0"><CheckBox Content="公网连接使用 TLS" IsChecked="{Binding MqttUseTls}" /><CheckBox Margin="0,8,0,0" Content="允许不受信任证书（仅测试）" IsChecked="{Binding MqttAcceptAnyServerCertificate}" /></StackPanel>
-                                            <Button Style="{StaticResource PrimaryButton}" Margin="0,18,0,0" HorizontalAlignment="Left" Content="{Binding PublicMqttConnectionToggleText}" Command="{Binding TogglePublicMqttConnectionCommand}" />
-                                        </StackPanel>
-                                        <StackPanel Grid.Row="1" Margin="16" Visibility="{Binding MqttLocalConfigurationVisibility}">
-                                            <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock FontSize="18" FontWeight="SemiBold" Text="本地 MQTT Broker" /><Border Grid.Column="1" Background="{StaticResource GreenSoftBrush}" CornerRadius="9" Padding="8,3"><TextBlock Foreground="{StaticResource GreenBrush}" FontSize="11" Text="{Binding EmbeddedBrokerStatus}" /></Border></Grid>
-                                            <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,5,0,16" Text="本机作为 MQTT 服务端。启动 Broker 不会自动连接工具客户端，请点击下方按钮连接本地 Broker。" TextWrapping="Wrap" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Text="监听地址" /><TextBlock FontFamily="Cascadia Mono" Margin="0,5,0,0" Text="127.0.0.1（本机）" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="监听端口" /><TextBox Margin="0,5,0,0" Text="{Binding LocalBrokerPort, UpdateSourceTrigger=PropertyChanged}" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="服务端用户名（可选）" /><TextBox Margin="0,5,0,0" Text="{Binding LocalBrokerUserName, UpdateSourceTrigger=PropertyChanged}" />
-                                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="服务端密码（仅保存到 Credential Manager）" /><controls:PasswordInput Margin="0,5,0,0" Password="{Binding LocalBrokerPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
-                                            <StackPanel Orientation="Horizontal" Margin="0,18,0,0"><Button Style="{StaticResource PrimaryButton}" Content="{Binding EmbeddedBrokerToggleText}" Command="{Binding ToggleEmbeddedBrokerCommand}" /><Button Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Content="{Binding LocalMqttConnectionToggleText}" Command="{Binding ToggleLocalMqttConnectionCommand}" /></StackPanel>
-                                            <Border Background="#E9F0FF" BorderBrush="#BDD1FF" BorderThickness="1" CornerRadius="5" Padding="10" Margin="0,14,0,0"><StackPanel><TextBlock Style="{StaticResource FieldLabel}" Text="当前客户端目标" /><TextBlock FontFamily="Cascadia Mono" Foreground="{StaticResource BlueBrush}" Margin="0,5,0,0" Text="{Binding MqttClientEndpoint}" TextWrapping="Wrap" /></StackPanel></Border>
-                                        </StackPanel>
+                                        <Border x:Name="PublicMqttBrokerPanel" Grid.Row="1" Margin="16" Style="{StaticResource FunctionalPanel}" Visibility="{Binding MqttExternalConfigurationVisibility}">
+                                            <StackPanel>
+                                                <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="公网 MQTT Broker" /><Border Grid.Column="1" Background="{StaticResource GreenSoftBrush}" CornerRadius="9" Padding="8,3"><TextBlock Foreground="{StaticResource GreenBrush}" FontSize="11" Text="{Binding MqttStatus}" /></Border></Grid>
+                                                <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,5,0,16" Text="配置并连接公网或外部 MQTT Broker。切换前请先断开当前客户端连接。" TextWrapping="Wrap" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Text="公网 / 外部 Broker 地址" /><TextBox Margin="0,5,0,0" Text="{Binding MqttHost, UpdateSourceTrigger=PropertyChanged}" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="公网端口" /><TextBox Margin="0,5,0,0" Text="{Binding MqttPort, UpdateSourceTrigger=PropertyChanged}" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="客户端用户名" /><TextBox Margin="0,5,0,0" Text="{Binding MqttUserName, UpdateSourceTrigger=PropertyChanged}" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="公网客户端密码" /><controls:PasswordInput Margin="0,5,0,0" Password="{Binding MqttPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                <StackPanel Margin="0,14,0,0" Orientation="Horizontal"><CheckBox Content="公网连接使用 TLS" IsChecked="{Binding MqttUseTls}" /><CheckBox Margin="18,0,0,0" Content="允许不受信任证书（仅测试）" IsChecked="{Binding MqttAcceptAnyServerCertificate}" /></StackPanel>
+                                                <Button Style="{StaticResource PrimaryButton}" Margin="0,18,0,0" HorizontalAlignment="Left" Content="{Binding PublicMqttConnectionToggleText}" Command="{Binding TogglePublicMqttConnectionCommand}" />
+                                            </StackPanel>
+                                        </Border>
+                                        <Border x:Name="LocalMqttBrokerPanel" Grid.Row="1" Margin="16" Style="{StaticResource FunctionalPanel}" Visibility="{Binding MqttLocalConfigurationVisibility}">
+                                            <StackPanel>
+                                                <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="本地 MQTT Broker" /><Border Grid.Column="1" Background="{StaticResource GreenSoftBrush}" CornerRadius="9" Padding="8,3"><TextBlock Foreground="{StaticResource GreenBrush}" FontSize="11" Text="{Binding EmbeddedBrokerStatus}" /></Border></Grid>
+                                                <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,5,0,16" Text="本机作为 MQTT 服务端。启动 Broker 不会自动连接工具客户端，请点击下方按钮连接本地 Broker。" TextWrapping="Wrap" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Text="监听地址" /><TextBlock FontFamily="Cascadia Mono" Margin="0,5,0,0" Text="127.0.0.1（本机）" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="监听端口" /><TextBox Margin="0,5,0,0" Text="{Binding LocalBrokerPort, UpdateSourceTrigger=PropertyChanged}" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="服务端用户名（可选）" /><TextBox Margin="0,5,0,0" Text="{Binding LocalBrokerUserName, UpdateSourceTrigger=PropertyChanged}" />
+                                                <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="服务端密码（仅保存到 Credential Manager）" /><controls:PasswordInput Margin="0,5,0,0" Password="{Binding LocalBrokerPassword, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                <StackPanel Orientation="Horizontal" Margin="0,18,0,0"><Button Style="{StaticResource PrimaryButton}" Content="{Binding EmbeddedBrokerToggleText}" Command="{Binding ToggleEmbeddedBrokerCommand}" /><Button Style="{StaticResource PrimaryButton}" Margin="8,0,0,0" Content="{Binding LocalMqttConnectionToggleText}" Command="{Binding ToggleLocalMqttConnectionCommand}" /></StackPanel>
+                                            </StackPanel>
+                                        </Border>
                                     </Grid>
-                                    <Border Grid.Row="1" Margin="16,8,16,16" Padding="12" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="6">
+                                    <Border x:Name="MqttTopicPanel" Grid.Row="1" Margin="16,8,16,16" Style="{StaticResource FunctionalPanel}">
                                         <StackPanel>
-                                            <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock FontSize="16" FontWeight="SemiBold" Text="主题配置" /><Border Grid.Column="1" Background="{Binding GatewaySubscriptionBadgeBackground}" CornerRadius="9" Padding="8,3"><TextBlock Foreground="{Binding GatewaySubscriptionBadgeForeground}" FontSize="11" Text="{Binding GatewaySubscriptionBadgeText}" /></Border></Grid>
+                                            <Grid><Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="主题配置" /><Border Grid.Column="1" Background="{Binding GatewaySubscriptionBadgeBackground}" CornerRadius="9" Padding="8,3"><TextBlock Foreground="{Binding GatewaySubscriptionBadgeForeground}" FontSize="11" Text="{Binding GatewaySubscriptionBadgeText}" /></Border></Grid>
                                             <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" Margin="0,4,0,10" Text="主题格式固定；配置 Gateway ID 后订阅其上行消息。升级任务直接使用此 ID。" TextWrapping="Wrap" />
                                             <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="10" /><ColumnDefinition Width="*" /><ColumnDefinition Width="10" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBlock Style="{StaticResource FieldLabel}" VerticalAlignment="Center" Text="Gateway dev ID（十进制）" /><ComboBox Grid.Column="2" IsEditable="True" IsTextSearchEnabled="False" ItemsSource="{Binding GatewayIdHistory}" Text="{Binding GatewayId, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" ToolTip="可直接输入或选择最近使用的 Gateway dev ID" /><Button Grid.Column="4" Style="{StaticResource PrimaryButton}" Padding="12,5" Content="订阅主题" Command="{Binding SubscribeGatewayTopicCommand}" /></Grid>
                                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,8,0,0" Text="订阅主题（上行）" /><TextBlock FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource BlueBrush}" Margin="0,3,0,0" Text="{Binding GatewaySubscriptionTopic}" TextWrapping="Wrap" />
@@ -367,7 +369,7 @@
                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="密码 / OpenSSH 私钥路径" /><Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBox Margin="0,0,8,0" Text="{Binding SftpPassword, UpdateSourceTrigger=PropertyChanged}" ToolTip="密码" /><TextBox Grid.Column="1" Text="{Binding SftpPrivateKeyPath, UpdateSourceTrigger=PropertyChanged}" ToolTip="私钥路径" /></Grid>
                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="远端目录 / 公网 HTTP 基地址" /><Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBox Margin="0,0,8,0" Text="{Binding SftpRemoteDirectory, UpdateSourceTrigger=PropertyChanged}" /><TextBox Grid.Column="1" Text="{Binding SftpPublicBaseUrl, UpdateSourceTrigger=PropertyChanged}" /></Grid>
                             <TextBlock Style="{StaticResource FieldLabel}" Margin="0,12,0,0" Text="Host Key SHA256" /><TextBox Margin="0,6,0,0" Text="{Binding SftpHostKeySha256, UpdateSourceTrigger=PropertyChanged}" />
-                            <Button Style="{StaticResource PrimaryButton}" Margin="0,18,0,0" HorizontalAlignment="Left" Content="发布当前 Patch" Command="{Binding PublishPatchCommand}" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,10,0,0" Text="{Binding PublishStatus}" TextWrapping="Wrap" />
+                            <Button Style="{StaticResource PrimaryButton}" Margin="0,18,0,0" HorizontalAlignment="Left" Content="发布当前 Patch" Command="{Binding PublishPatchCommand}" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,10,0,0" Text="{Binding PublishStatus, Mode=OneWay}" TextWrapping="Wrap" />
                         </StackPanel></Border>
                     </Grid>
                 </ScrollViewer>
@@ -403,9 +405,11 @@
                                          Checked="OnCompactTaskStatusChecked" />
                         </StackPanel>
                     </Border>
-                    <ScrollViewer x:Name="TaskConfigurationScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                    <ScrollViewer x:Name="TaskConfigurationScrollViewer" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                         <Border Style="{StaticResource Card}"><StackPanel>
-                            <Grid><StackPanel><TextBlock FontSize="18" FontWeight="SemiBold" Text="升级任务配置" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,4,0,0" Text="同一套目标和版本参数可启动单次升级，也可按正向 → 反向执行循环升级。" TextWrapping="Wrap" /></StackPanel></Grid>
+                            <Border x:Name="UpgradeTaskConfigurationPanel" Style="{StaticResource FunctionalPanel}">
+                            <StackPanel>
+                            <Grid><StackPanel><TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="升级任务配置" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,4,0,0" Text="配置升级类型、版本和 Patch 后加入下方队列；所有任务均按顺序执行并自动闭环。" TextWrapping="Wrap" /></StackPanel></Grid>
                             <Grid Margin="0,20,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="1.25*" />
@@ -561,9 +565,10 @@
                                                         <DataTemplate>
                                                             <CheckBox Margin="0,2,14,2" IsChecked="{Binding IsSelected, Mode=TwoWay}" IsEnabled="{Binding CanSelect}" ToolTip="{Binding SelectionHint}">
                                                                 <Grid>
-                                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                                                                    <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                                                     <TextBlock Foreground="{StaticResource MutedInkBrush}" FontFamily="Cascadia Mono" Text="{Binding SequenceDisplay, Mode=OneWay}" />
                                                                     <TextBlock Grid.Column="1" FontFamily="Cascadia Mono"><Run Text="{Binding NodeIdDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding NodeTypeDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding SoftwareVersionDisplay, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding Rssi, Mode=OneWay}" /><Run Text=" dBm" /></TextBlock>
+                                                                    <TextBlock Grid.Column="2" Margin="12,0,0,0" FontWeight="SemiBold" Foreground="{Binding OnlineStatusForeground, Mode=OneWay}" Text="{Binding OnlineStatusText, Mode=OneWay}" />
                                                                 </Grid>
                                                             </CheckBox>
                                                         </DataTemplate>
@@ -577,9 +582,9 @@
                             <Expander Margin="0,14,0,0" Header="高级：手动目标兜底" Visibility="{Binding SpecifiedTargetVisibility}"><StackPanel Margin="0,8,0,0"><TextBlock Style="{StaticResource FieldLabel}" Text="目标 ID（十进制，每行一个）" /><TextBox Margin="0,6,0,0" Height="92" AcceptsReturn="True" Text="{Binding TargetIdList, UpdateSourceTrigger=PropertyChanged}" /></StackPanel></Expander>
                             <Expander Margin="0,14,0,0" Header="高级：手动 Node 目标兜底" Visibility="{Binding NodeTaskVisibility}"><StackPanel Margin="0,8,0,0"><TextBlock Style="{StaticResource FieldLabel}" Text="每行：ExtenderID: NodeID,NodeID" /><TextBox Margin="0,6,0,0" Height="92" AcceptsReturn="True" Text="{Binding NodeTargetsText, UpdateSourceTrigger=PropertyChanged}" /></StackPanel></Expander>
                             <Border Margin="0,16,0,0" Background="#FFF6E7" BorderBrush="#F1D7A4" BorderThickness="1" CornerRadius="5" Padding="10" Visibility="{Binding BroadcastTargetVisibility}"><TextBlock FontSize="12" Foreground="{StaticResource AmberBrush}" Text="广播升级不会填写、保存或发送目标 ID。" /></Border>
-                            <Border Margin="0,18,0,0" Padding="12" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="6">
+                            <Border x:Name="CycleUpgradeSettingsPanel" Margin="0,18,0,0" Style="{StaticResource FunctionalPanel}">
                                 <StackPanel>
-                                    <TextBlock FontSize="13" FontWeight="SemiBold" Text="循环升级设置" />
+                                    <TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="循环升级设置" />
                                     <Grid Margin="0,9,0,0">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="10" /><ColumnDefinition Width="120" /><ColumnDefinition Width="18" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                                         <TextBlock VerticalAlignment="Center" Style="{StaticResource FieldLabel}" Text="间隔方式" />
@@ -605,14 +610,70 @@
                                     <TextBlock Margin="0,8,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding CycleIntervalSummary}" TextWrapping="Wrap" />
                                 </StackPanel>
                             </Border>
-                            <StackPanel Margin="0,20,0,0" Orientation="Horizontal">
-                                <Button Style="{StaticResource PrimaryButton}" Content="正向升级" Command="{Binding StartForwardTaskCommand}" IsEnabled="{Binding CanStartForwardUpgrade}" ToolTip="使用正向 Patch 按旧版本升级到新版本" />
-                                <Button Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" Content="反向升级" Command="{Binding StartReverseTaskCommand}" IsEnabled="{Binding CanStartReverseUpgrade}" ToolTip="使用反向 Patch 按新版本回退到旧版本" />
-                                <Button Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" Content="启动循环升级" Command="{Binding StartCycleCommand}" IsEnabled="{Binding CanStartCycleUpgrade}" />
+                            <TextBlock Margin="0,18,0,0" FontSize="12" FontWeight="SemiBold" Foreground="{StaticResource MutedInkBrush}" Text="将当前配置添加到升级任务队列" />
+                            <StackPanel Margin="0,8,0,0" Orientation="Horizontal">
+                                <Button Style="{StaticResource PrimaryButton}" Content="添加正向任务" Command="{Binding AddForwardPlanItemCommand}" IsEnabled="{Binding CanModifyTestPlan}" ToolTip="按当前配置生成正向任务，并使用动态目标添加到串行队列" />
+                                <Button Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" Content="添加反向任务" Command="{Binding AddReversePlanItemCommand}" IsEnabled="{Binding CanModifyTestPlan}" ToolTip="按当前配置生成反向任务，并使用动态目标添加到串行队列" />
+                                <Button Margin="10,0,0,0" Style="{StaticResource PrimaryButton}" Content="添加循环任务" Command="{Binding AddCyclePlanItemCommand}" IsEnabled="{Binding CanModifyTestPlan}" ToolTip="按当前循环设置生成任务，并使用动态目标添加到串行队列" />
                             </StackPanel>
+                            </StackPanel>
+                            </Border>
+                            <Border x:Name="UpgradeTaskQueuePanel" Margin="0,18,0,0" Style="{StaticResource FunctionalPanel}">
+                                <StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="升级任务队列" />
+                                            <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="上方三个按钮将当前配置作为动态目标任务添加到队列；执行时按顺序重新匹配设备并自动闭环。" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <Border Grid.Column="1" Padding="9,3" HorizontalAlignment="Right" VerticalAlignment="Top" Background="#F1EAFE" CornerRadius="10"><TextBlock FontSize="10" FontWeight="SemiBold" Foreground="#7A4CC2" Text="{Binding TestPlanRunBadgeText}" /></Border>
+                                    </Grid>
+                                    <TextBlock Margin="0,4,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding TestPlanProgressSummary}" />
+                                    <Border Margin="0,10,0,0" Padding="10" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                                        <StackPanel>
+                                            <TextBlock FontSize="12" FontWeight="SemiBold" Text="任务历史" />
+                                            <TextBlock Margin="0,2,0,7" FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="成功队列会自动保存到历史；选择记录后可快速重新导入。" TextWrapping="Wrap" />
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                <ComboBox MinWidth="180" ItemsSource="{Binding SavedTestPlans}" DisplayMemberPath="Name" SelectedItem="{Binding SelectedSavedTestPlan, Mode=TwoWay}" />
+                                                <Button Grid.Column="1" Height="32" Margin="8,0,0,0" Padding="12,0" Style="{StaticResource PrimaryButton}" Content="导入历史" Command="{Binding LoadTestPlanTemplateCommand}" IsEnabled="{Binding CanImportSelectedTaskHistory}" />
+                                                <Button Grid.Column="2" Height="32" Margin="8,0,0,0" Padding="12,0" Style="{StaticResource QuietButton}" Content="删除历史" Command="{Binding DeleteTestPlanTemplateCommand}" IsEnabled="{Binding CanImportSelectedTaskHistory}" />
+                                            </Grid>
+                                        </StackPanel>
+                                    </Border>
+                                    <ItemsControl Margin="0,10,0,0" MinHeight="84" ItemsSource="{Binding TestPlanItems}">
+                                        <ItemsControl.ItemTemplate>
+                                            <DataTemplate>
+                                                <Border Margin="0,0,0,7" Padding="9" Background="White" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions><ColumnDefinition Width="34" /><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                                                        <TextBlock FontFamily="Cascadia Mono" FontWeight="SemiBold" Foreground="{StaticResource MutedInkBrush}" Text="{Binding OrderDisplay}" />
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock FontWeight="SemiBold" TextWrapping="Wrap"><Run Text="{Binding Name, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding StateDisplay, Mode=OneWay}" Foreground="{Binding StateColor}" /></TextBlock>
+                                                            <TextBlock Margin="0,3,0,0" FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="{Binding PatchName}" TextTrimming="CharacterEllipsis" />
+                                                            <TextBlock Margin="0,4,0,0" FontSize="10" FontWeight="SemiBold" Foreground="#D9342B" Text="{Binding FailureDetail}" TextWrapping="Wrap" Visibility="{Binding FailureDetailVisibility}" />
+                                                            <WrapPanel Margin="0,5,0,0">
+                                                                <TextBlock Margin="0,0,14,0" FontSize="10" Foreground="{StaticResource MutedInkBrush}"><Run Text="开始 " /><Run FontFamily="Cascadia Mono" Text="{Binding StartedAtText, Mode=OneWay}" /></TextBlock>
+                                                                <TextBlock Margin="0,0,14,0" FontSize="10" Foreground="{StaticResource MutedInkBrush}"><Run Text="结束 " /><Run FontFamily="Cascadia Mono" Text="{Binding FinishedAtText, Mode=OneWay}" /></TextBlock>
+                                                                <TextBlock FontSize="10" Foreground="{StaticResource GreenBrush}"><Run Text="总耗时 " /><Run FontFamily="Cascadia Mono" FontWeight="SemiBold" Text="{Binding DurationText, Mode=OneWay}" /></TextBlock>
+                                                            </WrapPanel>
+                                                        </StackPanel>
+                                                        <Button Grid.Column="2" Width="48" Height="28" Margin="8,0,0,0" Padding="5,0" VerticalAlignment="Top" Style="{StaticResource QuietButton}" Content="删除" Command="{Binding DataContext.DeletePlanItemCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}" CommandParameter="{Binding}" IsEnabled="{Binding DataContext.CanModifyTestPlan, RelativeSource={RelativeSource AncestorType=ItemsControl}}" />
+                                                    </Grid>
+                                                </Border>
+                                            </DataTemplate>
+                                        </ItemsControl.ItemTemplate>
+                                    </ItemsControl>
+                                    <TextBlock Margin="0,8,0,0" HorizontalAlignment="Center" Foreground="{StaticResource MutedInkBrush}" Text="队列为空：请使用上方按钮加入任务" Visibility="{Binding TestPlanEmptyVisibility}" />
+                                    <WrapPanel Margin="0,10,0,0">
+                                        <Button Margin="0,0,8,6" Style="{StaticResource PrimaryButton}" Content="开始执行队列" Command="{Binding StartTestPlanCommand}" IsEnabled="{Binding CanRunTestPlan}" ToolTip="开始后自动完成整队列预检，再按顺序执行任务" />
+                                        <Button Margin="0,0,0,6" Style="{StaticResource QuietButton}" Content="清空" Command="{Binding ClearTestPlanCommand}" IsEnabled="{Binding CanModifyTestPlan}" />
+                                    </WrapPanel>
+                                </StackPanel>
+                            </Border>
                         </StackPanel></Border>
                     </ScrollViewer>
-                    <ScrollViewer x:Name="TaskStatusScrollViewer" Grid.Row="1" Grid.Column="2" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
+                    <ScrollViewer x:Name="TaskStatusScrollViewer" Grid.Row="1" Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                             <Border Style="{StaticResource Card}">
                                 <StackPanel>
                                     <Grid>
@@ -624,6 +685,33 @@
                                     </Grid>
                                     <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,6,0,0" Text="EcoLink 升级请求发出后自动轮询；传统模式不轮询，只等待最终结果上报。" TextWrapping="Wrap" />
                                     <TextBlock Margin="0,10,0,0" FontSize="12" FontWeight="SemiBold" Foreground="{Binding UpgradeRunModeForeground}" Text="{Binding UpgradeRunProgressText}" TextWrapping="Wrap" />
+                                    <Grid Margin="0,10,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="8" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="8" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Border Padding="9,7" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                                            <StackPanel>
+                                                <TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="队列启动时间" />
+                                                <TextBlock Margin="0,3,0,0" FontFamily="Cascadia Mono" FontSize="11" FontWeight="SemiBold" Text="{Binding UpgradeTaskStartedAtText}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Grid.Column="2" Padding="9,7" Background="#F5F8FC" BorderBrush="{StaticResource LineBrush}" BorderThickness="1" CornerRadius="5">
+                                            <StackPanel>
+                                                <TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="队列结束时间" />
+                                                <TextBlock Margin="0,3,0,0" FontFamily="Cascadia Mono" FontSize="11" FontWeight="SemiBold" Text="{Binding UpgradeTaskFinishedAtText}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Border>
+                                        <Border Grid.Column="4" Padding="9,7" Background="{StaticResource GreenSoftBrush}" BorderBrush="#BEE9D4" BorderThickness="1" CornerRadius="5">
+                                            <StackPanel>
+                                                <TextBlock FontSize="10" Foreground="{StaticResource GreenBrush}" Text="队列总耗时" />
+                                                <TextBlock Margin="0,3,0,0" FontFamily="Cascadia Mono" FontSize="11" FontWeight="SemiBold" Foreground="{StaticResource GreenBrush}" Text="{Binding UpgradeTaskTotalDurationText}" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Border>
+                                    </Grid>
                                     <TextBlock FontSize="12" Foreground="{StaticResource BlueBrush}" Margin="0,14,0,0" Text="{Binding GatewayOnlineStatus}" Visibility="{Binding EcoLinkStatusDetailsVisibility}" />
                                     <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,14,0,0" Text="传统模式不发送 cmd=8/9 状态查询，只等待 Gateway 最终升级结果上报。" TextWrapping="Wrap" Visibility="{Binding TraditionalStatusVisibility}" />
                                     <TextBlock Margin="0,8,0,0" FontSize="13" FontWeight="SemiBold" Foreground="{Binding GatewayStageColor}" Text="{Binding GatewayStageSummary}" TextWrapping="Wrap" />
@@ -705,7 +793,7 @@
                                     </Expander>
                                     <StackPanel Margin="0,16,0,0" Orientation="Horizontal">
                                         <Button Style="{StaticResource QuietButton}" Content="{Binding PollingToggleText}" Command="{Binding TogglePollingCommand}" IsEnabled="{Binding CanControlPolling}" Visibility="{Binding EcoLinkStatusDetailsVisibility}" />
-                                        <Button Style="{StaticResource QuietButton}" Margin="8,0,0,0" Content="取消任务" Command="{Binding CancelTaskCommand}" IsEnabled="{Binding CanCancelTask}" ToolTip="停止工具端跟踪，并向 Gateway 发送 cmd=5 active=0 取消请求。" />
+                                        <Button Style="{StaticResource QuietButton}" Margin="8,0,0,0" Content="{Binding CancelUpgradeButtonText}" Command="{Binding CancelUpgradeExecutionCommand}" IsEnabled="{Binding CanCancelUpgradeExecution}" ToolTip="{Binding CancelUpgradeButtonToolTip}" />
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
@@ -1013,9 +1101,10 @@
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Grid>
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                        <TextBlock x:Name="GlobalLogTitleText" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Text="全局运行日志（仅保留本次运行最近 300 行，滚轮可暂停查看，按 Enter 回到最新日志）" ToolTip="滚轮可暂停查看，按 Enter 回到最新日志" />
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                        <TextBlock x:Name="GlobalLogTitleText" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Text="全局运行日志（仅保留本次运行最近 300 行，滚轮可暂停查看，按 Enter 回到最新日志）" TextTrimming="CharacterEllipsis" ToolTip="滚轮可暂停查看，按 Enter 回到最新日志" />
                         <Button Grid.Column="1" Height="24" MinWidth="56" Padding="10,0" Style="{StaticResource QuietButton}" Content="清空" Command="{Binding ClearGlobalLogCommand}" ToolTip="清空当前内存中的全局运行日志" />
+                        <Button x:Name="GlobalLogMinimizeButton" Grid.Column="2" Height="24" MinWidth="64" Margin="8,0,0,0" Padding="10,0" Style="{StaticResource QuietButton}" Content="最小化" Click="OnGlobalLogMinimizeClick" ToolTip="收起全局运行日志" />
                     </Grid>
                     <TextBox x:Name="GlobalLogTextBox" Grid.Row="1" Margin="0,5,0,0" Background="White" Foreground="Black" FontFamily="Cascadia Mono" FontSize="11" IsReadOnly="True" VerticalContentAlignment="Top" Text="{Binding GlobalLogText, Mode=OneWay}" TextWrapping="NoWrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" PreviewMouseWheel="OnGlobalLogPreviewMouseWheel" PreviewKeyDown="OnGlobalLogPreviewKeyDown" TextChanged="OnGlobalLogTextChanged" />
                 </Grid>

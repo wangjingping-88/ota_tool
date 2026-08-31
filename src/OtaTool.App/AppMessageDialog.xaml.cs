@@ -17,6 +17,12 @@ public partial class AppMessageDialog : Window
 
     public string DialogMessage { get; }
 
+    protected override void OnSourceInitialized(EventArgs eventArgs)
+    {
+        base.OnSourceInitialized(eventArgs);
+        NativeWindowShadow.Apply(this);
+    }
+
     public static void Show(string title, string message)
     {
         var dialog = new AppMessageDialog(title, message);

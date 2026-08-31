@@ -107,6 +107,10 @@ public sealed class AppSettings
     public IReadOnlyList<DiscoveredNodeGroupSettings> DiscoveredNodeGroups { get; init; } = [];
 
     public DateTimeOffset? NodeDiscoveryCompletedAt { get; init; }
+
+    public IReadOnlyList<OtaTestPlanTemplate> TestPlanTemplates { get; init; } = [];
+
+    public Guid? SelectedTestPlanId { get; init; }
 }
 
 /// <summary>
@@ -165,6 +169,8 @@ public sealed class ModeWorkspaceSettings
     public IReadOnlyList<DiscoveredNodeGroupSettings> DiscoveredNodeGroups { get; set; } = [];
     public DateTimeOffset? NodeDiscoveryCompletedAt { get; set; }
     public bool ShowArchivedReports { get; set; }
+    public IReadOnlyList<OtaTestPlanTemplate> TestPlanTemplates { get; set; } = [];
+    public Guid? SelectedTestPlanId { get; set; }
 
     public ModeWorkspaceSettings Copy() => (ModeWorkspaceSettings)MemberwiseClone();
 
@@ -219,6 +225,8 @@ public sealed class ModeWorkspaceSettings
         DiscoveredExtenders = settings.DiscoveredExtenders,
         DiscoveredNodeGroups = settings.DiscoveredNodeGroups,
         NodeDiscoveryCompletedAt = settings.NodeDiscoveryCompletedAt,
+        TestPlanTemplates = settings.TestPlanTemplates,
+        SelectedTestPlanId = settings.SelectedTestPlanId,
     };
 }
 

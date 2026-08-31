@@ -55,6 +55,8 @@ public sealed class DeviceDiscoveryService
         }
     }
 
+    public event EventHandler<MqttApplicationMessage>? MessagePublished;
+
     public async Task<IReadOnlyList<GatewayExtenderInfo>> DiscoverExtendersAsync(
         string gatewayId,
         CancellationToken cancellationToken = default)
@@ -79,7 +81,7 @@ public sealed class DeviceDiscoveryService
         try
         {
             var request = OtaMessageCodec.CreateGatewayAuthListQuery(gatewayId, sequence);
-            await _mqtt.PublishAsync(
+            await PublishAsync(
                 new MqttApplicationMessage(request.Topic, System.Text.Encoding.UTF8.GetBytes(request.JsonPayload), request.QualityOfService),
                 cancellationToken);
 
@@ -136,7 +138,7 @@ public sealed class DeviceDiscoveryService
         try
         {
             var request = OtaMessageCodec.CreateGatewayBasicInfoQuery(gatewayId, sequence);
-            await _mqtt.PublishAsync(
+            await PublishAsync(
                 new MqttApplicationMessage(
                     request.Topic,
                     System.Text.Encoding.UTF8.GetBytes(request.JsonPayload),
@@ -176,14 +178,14 @@ public sealed class DeviceDiscoveryService
                         extenderId,
                         token => RequestNodeListAsync(gatewayId, extenderId, token),
                         cancellationToken);
-                    var onlineNodes = response.Nodes
-                        .Where(node => node.IsOnline)
-                        .OrderBy(node => node.NodeId)
+                    var nodes = response.Nodes
+                        .OrderByDescending(node => node.IsOnline)
+                        .ThenBy(node => node.NodeId)
                         .ToArray();
                     return new ExtenderNodeDiscoveryResult(
                         extenderId,
-                        onlineNodes,
-                        response.Nodes.Count,
+                        nodes,
+                        response.TotalCount,
                         null);
                 }
                 catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
@@ -277,6 +279,8 @@ public sealed class DeviceDiscoveryService
     {
         var sequence = NextSequence();
         var completion = new TaskCompletionSource<GatewayNodeList>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pages = new Dictionary<byte, GatewayNodeList>();
+        var pageSync = new object();
 
         void Handler(object? _, MqttApplicationMessage message)
         {
@@ -297,14 +301,57 @@ public sealed class DeviceDiscoveryService
                 return;
             }
             if (response is null || response.ExtenderId != extenderId) return;
-            completion.TrySetResult(response);
+            lock (pageSync)
+            {
+                if (pages.Values.FirstOrDefault() is { } firstPage &&
+                    (response.AsyncAddress != firstPage.AsyncAddress ||
+                     response.PageCount != firstPage.PageCount ||
+                     response.TotalCount != firstPage.TotalCount))
+                {
+                    completion.TrySetException(new InvalidDataException("0x0F 多页响应的地址、总页数或设备总数不一致。"));
+                    return;
+                }
+                if (pages.TryGetValue(response.PageIndex, out var existingPage))
+                {
+                    if (!existingPage.Nodes.SequenceEqual(response.Nodes))
+                    {
+                        completion.TrySetException(new InvalidDataException($"0x0F 第 {response.PageIndex} 页重复响应内容不一致。"));
+                    }
+                    return;
+                }
+                pages.Add(response.PageIndex, response);
+                if (pages.Count < response.PageCount) return;
+
+                var orderedNodes = pages
+                    .OrderBy(pair => pair.Key)
+                    .SelectMany(pair => pair.Value.Nodes)
+                    .ToArray();
+                if (orderedNodes.Length != response.TotalCount)
+                {
+                    completion.TrySetException(new InvalidDataException(
+                        $"0x0F 分页汇总数量错误：声明 {response.TotalCount} 项，实际收到 {orderedNodes.Length} 项。"));
+                    return;
+                }
+                if (orderedNodes.Select(node => node.NodeId).Distinct().Count() != orderedNodes.Length)
+                {
+                    completion.TrySetException(new InvalidDataException("0x0F 多页响应包含重复 Node ID。"));
+                    return;
+                }
+                completion.TrySetResult(new GatewayNodeList(
+                    response.ExtenderId,
+                    response.AsyncAddress,
+                    orderedNodes,
+                    0,
+                    response.PageCount,
+                    response.TotalCount));
+            }
         }
 
         _mqtt.MessageReceived += Handler;
         try
         {
             var request = OtaMessageCodec.CreateAsyncNodeListQuery(gatewayId, sequence, extenderId);
-            await _mqtt.PublishAsync(
+            await PublishAsync(
                 new MqttApplicationMessage(request.Topic, System.Text.Encoding.UTF8.GetBytes(request.JsonPayload), request.QualityOfService),
                 cancellationToken);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -362,7 +409,7 @@ public sealed class DeviceDiscoveryService
                 gatewayId,
                 sequence,
                 extenderId);
-            await _mqtt.PublishAsync(
+            await PublishAsync(
                 new MqttApplicationMessage(
                     request.Topic,
                     System.Text.Encoding.UTF8.GetBytes(request.JsonPayload),
@@ -392,6 +439,12 @@ public sealed class DeviceDiscoveryService
         if (value > 0) return value;
         Interlocked.Exchange(ref _sequence, 1);
         return 1;
+    }
+
+    private async Task PublishAsync(MqttApplicationMessage message, CancellationToken cancellationToken)
+    {
+        await _mqtt.PublishAsync(message, cancellationToken);
+        MessagePublished?.Invoke(this, message);
     }
 
     private static bool MatchesGatewayUpstreamTopic(string topic, string gatewayId)

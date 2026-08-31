@@ -23,6 +23,12 @@
     <None Include="..\..\src\OtaTool.App\UpdateWindow.xaml"
           Link="TestAssets\UpdateWindow.xaml"
           CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\UpdateWindow.xaml.cs"
+          Link="TestAssets\UpdateWindow.xaml.cs"
+          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\src\OtaTool.App\NativeWindowShadow.cs"
+          Link="TestAssets\NativeWindowShadow.cs"
+          CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\src\OtaTool.App\Views\PatchPage.xaml"
           Link="TestAssets\PatchPage.xaml"
           CopyToOutputDirectory="PreserveNewest" />

@@ -39,6 +39,9 @@ public sealed class SqliteReportStore : ITaskSequenceStore
             CREATE TABLE IF NOT EXISTS ota_reports (
                 id TEXT PRIMARY KEY, created_at TEXT NOT NULL, mode TEXT NOT NULL, device_type TEXT NOT NULL,
                 old_version TEXT NOT NULL, new_version TEXT NOT NULL, final_state TEXT NOT NULL, json TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS ota_test_plan_reports (
+                id TEXT PRIMARY KEY, created_at TEXT NOT NULL, mode TEXT NOT NULL, gateway_id TEXT NOT NULL,
+                final_state TEXT NOT NULL, json TEXT NOT NULL);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -113,6 +116,60 @@ public sealed class SqliteReportStore : ITaskSequenceStore
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = "DELETE FROM ota_reports WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", reportId.ToString());
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task SavePlanAsync(OtaTestPlanReport report, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        await InitializeAsync(cancellationToken);
+        var json = JsonSerializer.Serialize(report, ReportJsonOptions);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO ota_test_plan_reports(id, created_at, mode, gateway_id, final_state, json)
+            VALUES($id, $createdAt, $mode, $gatewayId, $finalState, $json)
+            ON CONFLICT(id) DO UPDATE SET final_state=excluded.final_state, json=excluded.json;
+            """;
+        command.Parameters.AddWithValue("$id", report.Id.ToString());
+        command.Parameters.AddWithValue("$createdAt", report.StartedAt.ToString("O"));
+        command.Parameters.AddWithValue("$mode", report.Plan.Mode.ToString());
+        command.Parameters.AddWithValue("$gatewayId", report.Plan.GatewayId);
+        command.Parameters.AddWithValue("$finalState", report.FinalState.ToString());
+        command.Parameters.AddWithValue("$json", json);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<IReadOnlyList<OtaTestPlanReport>> LoadRecentPlansAsync(
+        int limit = 100,
+        CancellationToken cancellationToken = default)
+    {
+        if (limit is <= 0 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
+        await InitializeAsync(cancellationToken);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT json FROM ota_test_plan_reports ORDER BY created_at DESC LIMIT $limit;";
+        command.Parameters.AddWithValue("$limit", limit);
+        var reports = new List<OtaTestPlanReport>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var report = JsonSerializer.Deserialize<OtaTestPlanReport>(reader.GetString(0), ReportJsonOptions);
+            if (report is not null) reports.Add(report);
+        }
+        return reports;
+    }
+
+    public async Task DeletePlanAsync(Guid reportId, CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM ota_test_plan_reports WHERE id = $id;";
         command.Parameters.AddWithValue("$id", reportId.ToString());
         await command.ExecuteNonQueryAsync(cancellationToken);
     }

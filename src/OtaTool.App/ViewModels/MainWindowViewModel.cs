@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Input;
+using System.Windows.Threading;
 using Microsoft.Win32;
 using OtaTool.Core.Analysis;
 using OtaTool.Core.Diff;
@@ -83,6 +84,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private IOtaProtocolProfile? _pendingCycleProfile;
     private OtaCycleIntervalOptions? _pendingCycleInterval;
     private int _pendingCycleRounds;
+    private OtaTestPlanItemTemplate? _pendingTestPlanItem;
     private bool _isUpgradeStartInProgress;
     private bool _isPatchDialogOpen;
     private string _patchDialogTitle = string.Empty;
@@ -168,6 +170,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _upgradeRunModeForeground = "#65758B";
     private string _upgradeRunModeBackground = "#EEF2F7";
     private string _upgradeRunProgressText = "启动任务后显示执行方式和进度。";
+    private readonly DispatcherTimer _upgradeTaskDurationTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private DateTimeOffset? _upgradeTaskStartedAt;
+    private DateTimeOffset? _upgradeTaskFinishedAt;
     private readonly HashSet<string> _observedGatewayIds = new(StringComparer.Ordinal);
     private string _subscribedGatewayTopic = string.Empty;
     private string _gatewaySubscriptionStatus = "填写 Gateway ID 后订阅固定上行主题。";
@@ -190,6 +195,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _publishConnectionTestStatus = "尚未测试 SFTP 和 HTTP 连接。";
     private string _logAnalyzerExecutablePath = GetDefaultLogAnalyzerPath();
     private string _logDirectory = string.Empty;
+    private string? _lastLogBrowseDirectory;
     private string _logAnalysisStatus = "未导入日志";
     private string _logAnalysisResultText = "尚未执行日志分析。";
     private IReadOnlyList<LogAnalysisLineViewItem> _logAnalysisResultLines =
@@ -214,11 +220,29 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private DeviceType _gatewayStatusDeviceType = DeviceType.Gateway;
     private ReportListItem? _selectedReport;
     private bool _showArchivedReports;
+    private readonly OtaTestPlanRunner _testPlanRunner = new();
+    private bool _isTestPlanRunning;
+    private bool _isTestPlanPreflighting;
+    private string _testPlanName = "未命名测试计划";
+    private bool _testPlanContinueOnFailure;
+    private int _testPlanInterItemDelaySeconds;
+    private string _selectedPlanTargetMode = "动态匹配";
+    private string _testPlanItemName = string.Empty;
+    private OtaTestPlanTemplate? _selectedSavedTestPlan;
+    private OtaTestPlanItemViewItem? _selectedTestPlanItem;
+    private Guid _currentTestPlanId = Guid.NewGuid();
+    private string _currentTestPlanGatewayId = string.Empty;
+    private Guid? _editingTestPlanItemId;
+    private OtaTestPlanReport? _activeTestPlanReport;
+    private OtaTestPlanPreparedItem? _activePreparedPlanItem;
+    private const int PlanVersionVerificationTimeoutSeconds = 60;
+    private const int PlanVersionVerificationIntervalSeconds = 5;
 
     public MainWindowViewModel()
     {
         ApplicationUpdate = new ApplicationUpdateViewModel();
         _deviceDiscovery = new DeviceDiscoveryService(_mqtt);
+        _deviceDiscovery.MessagePublished += OnMqttMessagePublished;
         NavigateCommand = new RelayCommand(Navigate);
         SelectPatchCommand = new RelayCommand(SelectPatch);
         DeletePatchCommand = new RelayCommand(DeletePatch);
@@ -236,6 +260,21 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         StartForwardTaskCommand = new AsyncRelayCommand(() => StartSingleTaskAsync(reverse: false));
         StartReverseTaskCommand = new AsyncRelayCommand(() => StartSingleTaskAsync(reverse: true));
         StartCycleCommand = new AsyncRelayCommand(StartCycleAsync);
+        AddForwardPlanItemCommand = new AsyncRelayCommand(() => AddTestPlanItemAsync(OtaTestPlanExecutionKind.Forward));
+        AddReversePlanItemCommand = new AsyncRelayCommand(() => AddTestPlanItemAsync(OtaTestPlanExecutionKind.Reverse));
+        AddCyclePlanItemCommand = new AsyncRelayCommand(() => AddTestPlanItemAsync(OtaTestPlanExecutionKind.Cycle));
+        SavePlanItemEditCommand = new AsyncRelayCommand(SaveTestPlanItemEditAsync);
+        EditPlanItemCommand = new RelayCommand(EditTestPlanItem);
+        DuplicatePlanItemCommand = new RelayCommand(DuplicateTestPlanItem);
+        DeletePlanItemCommand = new RelayCommand(DeleteTestPlanItem);
+        ClearTestPlanCommand = new RelayCommand(_ => ClearTestPlan());
+        PreflightTestPlanCommand = new AsyncRelayCommand(PreflightTestPlanAsync);
+        StartTestPlanCommand = new AsyncRelayCommand(StartTestPlanAsync);
+        CancelTestPlanCommand = new AsyncRelayCommand(CancelTestPlanAsync);
+        CancelUpgradeExecutionCommand = new AsyncRelayCommand(CancelUpgradeExecutionAsync);
+        SaveTestPlanTemplateCommand = new AsyncRelayCommand(SaveTestPlanTemplateAsync);
+        LoadTestPlanTemplateCommand = new AsyncRelayCommand(LoadSelectedTestPlanTemplateAsync);
+        DeleteTestPlanTemplateCommand = new AsyncRelayCommand(DeleteSelectedTestPlanTemplateAsync);
         StartHttpServiceCommand = new AsyncRelayCommand(StartHttpServiceAsync);
         StopHttpServiceCommand = new AsyncRelayCommand(StopHttpServiceAsync);
         ToggleHttpServiceCommand = new AsyncRelayCommand(ToggleHttpServiceAsync);
@@ -281,6 +320,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         ApplyStartupShellSettings(_startupSettings);
         _mqtt.ConnectionStateChanged += (_, status) => RunOnUi(() => MqttStatus = status);
         _mqtt.MessageReceived += OnMqttMessageReceived;
+        _testPlanRunner.Updated += OnTestPlanUpdated;
+        _upgradeTaskDurationTimer.Tick += (_, _) => RefreshUpgradeTimingDisplays();
         ApplyMode();
         SelectedPage = NavigationItems.FirstOrDefault(item => item.Name == "MQTT 配置");
         SaveSettingsCommand = new AsyncRelayCommand(SaveSettingsAsync);
@@ -324,6 +365,147 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     public ObservableCollection<ReportListItem> RecentReports { get; } = [];
+
+    public ObservableCollection<OtaTestPlanItemViewItem> TestPlanItems { get; } = [];
+
+    public ObservableCollection<OtaTestPlanTemplate> SavedTestPlans { get; } = [];
+
+    public IReadOnlyList<string> PlanTargetModes { get; } = ["固定目标", "动态匹配"];
+
+    public OtaTestPlanItemViewItem? SelectedTestPlanItem
+    {
+        get => _selectedTestPlanItem;
+        set
+        {
+            if (!SetProperty(ref _selectedTestPlanItem, value)) return;
+            OnPropertyChanged(nameof(CanEditTestPlanItem));
+        }
+    }
+
+    public OtaTestPlanTemplate? SelectedSavedTestPlan
+    {
+        get => _selectedSavedTestPlan;
+        set
+        {
+            if (!SetProperty(ref _selectedSavedTestPlan, value)) return;
+            OnPropertyChanged(nameof(CanImportSelectedTaskHistory));
+        }
+    }
+
+    public string TestPlanName
+    {
+        get => _testPlanName;
+        set
+        {
+            if (SetProperty(ref _testPlanName, string.IsNullOrWhiteSpace(value) ? "未命名测试计划" : value))
+            {
+                ScheduleSettingsAutoSave();
+            }
+        }
+    }
+
+    public bool TestPlanContinueOnFailure
+    {
+        get => _testPlanContinueOnFailure;
+        set
+        {
+            if (SetProperty(ref _testPlanContinueOnFailure, value)) ScheduleSettingsAutoSave();
+        }
+    }
+
+    public int TestPlanInterItemDelaySeconds
+    {
+        get => _testPlanInterItemDelaySeconds;
+        set
+        {
+            if (SetProperty(ref _testPlanInterItemDelaySeconds, Math.Clamp(value, 0, 86400))) ScheduleSettingsAutoSave();
+        }
+    }
+
+    public string SelectedPlanTargetMode
+    {
+        get => _selectedPlanTargetMode;
+        set => SetProperty(ref _selectedPlanTargetMode, value);
+    }
+
+    public string TestPlanItemName
+    {
+        get => _testPlanItemName;
+        set => SetProperty(ref _testPlanItemName, value);
+    }
+
+    public bool IsTestPlanRunning
+    {
+        get => _isTestPlanRunning;
+        private set
+        {
+            if (!SetProperty(ref _isTestPlanRunning, value)) return;
+            OnPropertyChanged(nameof(CanModifyTestPlan));
+            OnPropertyChanged(nameof(CanRunTestPlan));
+            OnPropertyChanged(nameof(CanCancelTestPlan));
+            OnPropertyChanged(nameof(TestPlanRunBadgeText));
+            OnPropertyChanged(nameof(CanCancelUpgradeExecution));
+            OnPropertyChanged(nameof(CancelUpgradeButtonText));
+            OnPropertyChanged(nameof(CancelUpgradeButtonToolTip));
+            OnPropertyChanged(nameof(CanImportSelectedTaskHistory));
+            NotifyUpgradeActionAvailability();
+        }
+    }
+
+    public bool IsTestPlanPreflighting
+    {
+        get => _isTestPlanPreflighting;
+        private set
+        {
+            if (!SetProperty(ref _isTestPlanPreflighting, value)) return;
+            OnPropertyChanged(nameof(CanModifyTestPlan));
+            OnPropertyChanged(nameof(CanRunTestPlan));
+            OnPropertyChanged(nameof(TestPlanRunBadgeText));
+            OnPropertyChanged(nameof(CanImportSelectedTaskHistory));
+            NotifyUpgradeActionAvailability();
+        }
+    }
+
+    public bool CanModifyTestPlan => !IsTestPlanRunning && !IsTestPlanPreflighting;
+
+    public bool CanEditTestPlanItem => CanModifyTestPlan && SelectedTestPlanItem is not null;
+
+    public bool CanImportSelectedTaskHistory => CanModifyTestPlan && SelectedSavedTestPlan is not null;
+
+    public bool CanRunTestPlan => TestPlanItems.Count > 0 && !IsTestPlanRunning && !IsTestPlanPreflighting && !IsUpgradeInProgress;
+
+    public bool CanCancelTestPlan => IsTestPlanRunning;
+
+    public bool CanCancelUpgradeExecution => IsTestPlanRunning || CanCancelTask;
+
+    public string CancelUpgradeButtonText => IsTestPlanRunning ? "取消队列" : "取消任务";
+
+    public string CancelUpgradeButtonToolTip => IsTestPlanRunning
+        ? "取消当前队列任务并跳过尚未执行的任务。"
+        : "停止工具端跟踪，并通知 Gateway 终止当前升级任务。";
+
+    public string TestPlanRunBadgeText => IsTestPlanRunning ? "队列执行中" : IsTestPlanPreflighting ? "队列预检中" : "等待执行";
+
+    public string TestPlanBindingSummary => string.IsNullOrWhiteSpace(_currentTestPlanGatewayId)
+        ? $"新计划将绑定当前 Gateway {GatewayId}"
+        : $"计划绑定 Gateway {_currentTestPlanGatewayId} · 当前 Gateway {GatewayId}";
+
+    public string TestPlanProgressSummary
+    {
+        get
+        {
+            var success = TestPlanItems.Count(item => item.State == OtaTestPlanItemState.Succeeded);
+            var failed = TestPlanItems.Count(item => item.State is OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut);
+            var skipped = TestPlanItems.Count(item => item.State == OtaTestPlanItemState.Skipped);
+            var active = TestPlanItems.FirstOrDefault(item => item.State is OtaTestPlanItemState.Preflighting or OtaTestPlanItemState.Running or OtaTestPlanItemState.Verifying);
+            var current = active is null
+                ? Math.Min(TestPlanItems.Count, success + failed + skipped + TestPlanItems.Count(item => item.State == OtaTestPlanItemState.Cancelled))
+                : TestPlanItems.IndexOf(active) + 1;
+            return $"当前 {current}/{TestPlanItems.Count} · 成功 {success} · 失败 {failed} · 跳过 {skipped}";
+        }
+    }
+
+    public Visibility TestPlanEmptyVisibility => TestPlanItems.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
     public ReportListItem? SelectedReport
     {
@@ -374,6 +556,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(CanStartCycleUpgrade));
             if (value is not null)
             {
+                if (value.IsFullImage)
+                {
+                    ApplyGatewayImagePairVersions();
+                }
                 _ = ApplySelectedPatchManifestAsync(value);
             }
             else
@@ -393,7 +579,38 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private async Task ApplySelectedPatchManifestAsync(PatchSelection patch)
     {
-        if (!IsEcoLink || patch.IsFullImage)
+        if (patch.IsFullImage)
+        {
+            try
+            {
+                var identity = await FirmwareIdentityReader.ReadAsync(Path.GetFullPath(patch.FilePath));
+                if (!ReferenceEquals(_selectedUpgradePatch, patch)) return;
+                if (identity.DeviceType != FirmwareDeviceType.Gateway || !identity.Version.HasValue)
+                {
+                    throw new InvalidDataException("完整镜像必须包含有效的 Gateway 类型和软件版本。");
+                }
+
+                _selectedPatchManifest = null;
+                _patchManifestVerified = true;
+                ApplyGatewayImagePairVersions(identity.Version.Value);
+                TaskStatusMessage = BuildGatewayImagePairStatus();
+                RefreshNodeEligibility();
+                NotifyUpgradeActionAvailability();
+            }
+            catch (Exception exception)
+            {
+                if (!ReferenceEquals(_selectedUpgradePatch, patch)) return;
+                _selectedPatchManifest = null;
+                _patchManifestVerified = false;
+                OldVersion = string.Empty;
+                NewVersion = string.Empty;
+                SelectedUpgradePatch = null;
+                TaskStatusMessage = $"完整镜像不可用于升级：{exception.Message}";
+            }
+            return;
+        }
+
+        if (!IsEcoLink)
         {
             _selectedPatchManifest = null;
             _patchManifestVerified = true;
@@ -421,9 +638,61 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         catch (Exception exception)
         {
+            if (!ReferenceEquals(_selectedUpgradePatch, patch)) return;
+            _selectedPatchManifest = null;
             _patchManifestVerified = false;
-            TaskStatusMessage = $"Patch 元数据校验失败：{exception.Message}";
+            OldVersion = string.Empty;
+            NewVersion = string.Empty;
+            SelectedUpgradePatch = null;
+            TaskStatusMessage = $"Patch 不可用于升级：{exception.Message}。请重新导入带匹配 .json 元数据的 Patch。";
         }
+    }
+
+    private void ApplyGatewayImagePairVersions(byte? forwardVersionOverride = null)
+    {
+        if (SelectedUpgradePatch is not { IsFullImage: true } forwardImage) return;
+        var forwardVersion = forwardVersionOverride ?? forwardImage.NewVersion;
+        NewVersion = forwardVersion?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty;
+
+        var reverseVersion = SelectedReverseUpgradePatch is { IsFullImage: true } reverseImage
+            ? reverseImage.NewVersion
+            : null;
+        if (reverseVersion.HasValue && reverseVersion != forwardVersion)
+        {
+            OldVersion = reverseVersion.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return;
+        }
+
+        OldVersion = _gatewaySoftwareVersion.HasValue &&
+                     string.Equals(_gatewayVersionGatewayId, GatewayId, StringComparison.Ordinal) &&
+                     _gatewaySoftwareVersion != forwardVersion
+            ? _gatewaySoftwareVersion.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            : string.Empty;
+    }
+
+    private string BuildGatewayImagePairStatus()
+    {
+        if (!byte.TryParse(OldVersion, out var oldVersion) ||
+            !byte.TryParse(NewVersion, out var newVersion) ||
+            oldVersion == newVersion)
+        {
+            return _gatewaySoftwareVersion.HasValue &&
+                   string.Equals(_gatewayVersionGatewayId, GatewayId, StringComparison.Ordinal)
+                ? $"Gateway 当前版本已是 {ProtocolVersionFormatter.FormatWithPrefix(_gatewaySoftwareVersion.Value)}；请选择目标版本不同的正向镜像，或选择对应旧版本镜像作为反向 Patch。"
+                : "已识别正向完整镜像；请选择反向完整镜像组成版本对，并刷新 Gateway。";
+        }
+
+        var pair = $"{ProtocolVersionFormatter.FormatWithPrefix(oldVersion)} to {ProtocolVersionFormatter.FormatWithPrefix(newVersion)}";
+        if (!_gatewaySoftwareVersion.HasValue ||
+            !string.Equals(_gatewayVersionGatewayId, GatewayId, StringComparison.Ordinal))
+        {
+            return $"已按正向/反向完整镜像识别版本对：{pair}；请刷新 Gateway 后加入任务。";
+        }
+        return _gatewaySoftwareVersion.Value == oldVersion
+            ? $"已识别完整镜像版本对：{pair}；当前 Gateway 可加入正向或循环任务。"
+            : _gatewaySoftwareVersion.Value == newVersion
+                ? $"已识别完整镜像版本对：{pair}；当前 Gateway 可加入反向任务。"
+                : $"已识别完整镜像版本对：{pair}；当前 Gateway 版本 {ProtocolVersionFormatter.FormatWithPrefix(_gatewaySoftwareVersion.Value)} 不在该版本对中。";
     }
 
     public PatchSelection? SelectedRestorePatch
@@ -466,6 +735,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(CanStartForwardUpgrade));
             OnPropertyChanged(nameof(CanStartReverseUpgrade));
             OnPropertyChanged(nameof(CanStartCycleUpgrade));
+            if (SelectedUpgradePatch is { IsFullImage: true })
+            {
+                ApplyGatewayImagePairVersions();
+                TaskStatusMessage = BuildGatewayImagePairStatus();
+            }
             if (value is null) return;
             _reversePatchPath = value.FilePath;
             _reversePatchLength = value.Length;
@@ -561,6 +835,36 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public ICommand StartReverseTaskCommand { get; }
 
     public ICommand StartCycleCommand { get; }
+
+    public ICommand AddForwardPlanItemCommand { get; }
+
+    public ICommand AddReversePlanItemCommand { get; }
+
+    public ICommand AddCyclePlanItemCommand { get; }
+
+    public ICommand SavePlanItemEditCommand { get; }
+
+    public ICommand EditPlanItemCommand { get; }
+
+    public ICommand DuplicatePlanItemCommand { get; }
+
+    public ICommand DeletePlanItemCommand { get; }
+
+    public ICommand ClearTestPlanCommand { get; }
+
+    public ICommand PreflightTestPlanCommand { get; }
+
+    public ICommand StartTestPlanCommand { get; }
+
+    public ICommand CancelTestPlanCommand { get; }
+
+    public ICommand CancelUpgradeExecutionCommand { get; }
+
+    public ICommand SaveTestPlanTemplateCommand { get; }
+
+    public ICommand LoadTestPlanTemplateCommand { get; }
+
+    public ICommand DeleteTestPlanTemplateCommand { get; }
 
     public ICommand StartHttpServiceCommand { get; }
 
@@ -878,9 +1182,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 OnPropertyChanged(nameof(GatewaySubscriptionBadgeText));
                 OnPropertyChanged(nameof(GatewaySubscriptionBadgeBackground));
                 OnPropertyChanged(nameof(GatewaySubscriptionBadgeForeground));
+                OnPropertyChanged(nameof(TestPlanBindingSummary));
                 if (SelectedTaskType == GatewayTaskType)
                 {
                     DeviceDiscoveryStatus = "Gateway dev ID 已变更，请重新刷新 Gateway。";
+                }
+                if (SelectedUpgradePatch is { IsFullImage: true })
+                {
+                    ApplyGatewayImagePairVersions();
                 }
                 NotifyUpgradeActionAvailability();
             }
@@ -1342,7 +1651,43 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public string PatchStatus
     {
         get => _patchStatus;
-        private set => SetProperty(ref _patchStatus, value);
+        private set
+        {
+            if (SetProperty(ref _patchStatus, value))
+            {
+                OnPropertyChanged(nameof(PatchOperationStatusText));
+            }
+        }
+    }
+
+    public string PatchOperationStatusText
+    {
+        get
+        {
+            if (PatchStatus.Contains("正在制作", StringComparison.Ordinal) ||
+                PatchStatus.Contains("正在执行原生还原验证", StringComparison.Ordinal))
+            {
+                return "制作中";
+            }
+
+            if (PatchStatus.StartsWith("已制作", StringComparison.Ordinal))
+            {
+                return "Patch 已制作";
+            }
+
+            if (PatchStatus.Contains("失败", StringComparison.Ordinal))
+            {
+                return "操作失败";
+            }
+
+            if (PatchStatus.StartsWith("已导入", StringComparison.Ordinal) ||
+                PatchStatus.StartsWith("已校验", StringComparison.Ordinal))
+            {
+                return "Patch 已导入";
+            }
+
+            return CanGeneratePatch ? "待制作" : "待导入固件";
+        }
     }
 
     public string PatchRestoreTestStatus { get => _patchRestoreTestStatus; private set => SetProperty(ref _patchRestoreTestStatus, value); }
@@ -1534,7 +1879,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public bool IsDiscoveringDevices => IsRefreshingExtenders || IsRefreshingNodes;
 
-    private bool IsUpgradeInProgress => _isUpgradeStartInProgress || _isCycleUpgradeRunning || _runner?.HasActiveTask == true;
+    private bool IsUpgradeInProgress => _isUpgradeStartInProgress || _isCycleUpgradeRunning || _isTestPlanRunning || _isTestPlanPreflighting || _runner?.HasActiveTask == true;
 
     public bool CanRefreshDiscovery => IsEcoLink && IsMqttConnected && !IsDiscoveringDevices && !IsUpgradeInProgress;
 
@@ -1619,6 +1964,50 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         private set => SetProperty(ref _upgradeRunProgressText, value);
     }
 
+    public string UpgradeTaskStartedAtText => _upgradeTaskStartedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "—";
+
+    public string UpgradeTaskFinishedAtText => _upgradeTaskFinishedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "—";
+
+    public string UpgradeTaskTotalDurationText
+    {
+        get
+        {
+            if (_upgradeTaskStartedAt is null) return "—";
+            var finishedAt = _upgradeTaskFinishedAt ?? DateTimeOffset.Now;
+            return DurationDisplay.Format((long)Math.Max(0, (finishedAt - _upgradeTaskStartedAt.Value).TotalMilliseconds));
+        }
+    }
+
+    private void BeginUpgradeTaskTiming(DateTimeOffset? startedAt = null)
+    {
+        _upgradeTaskStartedAt = startedAt ?? DateTimeOffset.Now;
+        _upgradeTaskFinishedAt = null;
+        _upgradeTaskDurationTimer.Start();
+        NotifyUpgradeTaskTimingChanged();
+    }
+
+    private void CompleteUpgradeTaskTiming(DateTimeOffset? finishedAt = null)
+    {
+        if (_upgradeTaskStartedAt is null || _upgradeTaskFinishedAt is not null) return;
+        _upgradeTaskFinishedAt = finishedAt ?? DateTimeOffset.Now;
+        _upgradeTaskDurationTimer.Stop();
+        NotifyUpgradeTaskTimingChanged();
+    }
+
+    private void NotifyUpgradeTaskTimingChanged()
+    {
+        OnPropertyChanged(nameof(UpgradeTaskStartedAtText));
+        OnPropertyChanged(nameof(UpgradeTaskFinishedAtText));
+        OnPropertyChanged(nameof(UpgradeTaskTotalDurationText));
+        foreach (var item in TestPlanItems) item.RefreshTiming();
+    }
+
+    private void RefreshUpgradeTimingDisplays()
+    {
+        OnPropertyChanged(nameof(UpgradeTaskTotalDurationText));
+        foreach (var item in TestPlanItems) item.RefreshTiming();
+    }
+
     public string MqttMessageFilter
     {
         get => _mqttMessageFilter;
@@ -1641,7 +2030,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public bool CanPrepareForApplicationUpdate(out string reason)
     {
-        if (_runner?.HasActiveTask == true || _isCycleUpgradeRunning || _isUpgradeStartInProgress)
+        if (IsUpgradeInProgress)
         {
             reason = "当前存在 OTA 升级任务，请等待任务结束或取消任务后再更新工具。";
             return false;
@@ -1696,6 +2085,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private async Task DisposeCoreAsync()
     {
+        _upgradeTaskDurationTimer.Stop();
         _settingsLoaded = false;
         _settingsAutoSaveCancellation?.Cancel();
         try
@@ -1709,6 +2099,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await SaveSettingsAsync();
         _settingsAutoSaveCancellation?.Dispose();
         _cycleCancellation?.Cancel();
+        await _testPlanRunner.CancelAsync();
         if (_runner is not null) await _runner.DisposeAsync();
         await _httpRangeServer.DisposeAsync();
         await _embeddedBroker.DisposeAsync();
@@ -1932,6 +2323,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(OldImageIdentityDetail));
         OnPropertyChanged(nameof(NewImageIdentityDetail));
         OnPropertyChanged(nameof(CanGeneratePatch));
+        OnPropertyChanged(nameof(PatchOperationStatusText));
         OnPropertyChanged(nameof(PatchFileName));
         OnPropertyChanged(nameof(PatchDetail));
         OnPropertyChanged(nameof(PatchMetadataDetail));
@@ -2022,6 +2414,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             group.ReportedCount)).ToArray(),
         NodeDiscoveryCompletedAt = _nodeDiscoveryCompletedAt,
         ShowArchivedReports = _showArchivedReports,
+        TestPlanTemplates = SavedTestPlans.ToArray(),
+        SelectedTestPlanId = SelectedSavedTestPlan?.Id,
     };
 
     private void ApplyCurrentModeWorkspace()
@@ -2056,7 +2450,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             LogAnalyzerExecutablePath = File.Exists(workspace.LogAnalyzerExecutablePath)
                 ? workspace.LogAnalyzerExecutablePath
                 : GetDefaultLogAnalyzerPath();
-            LogDirectory = workspace.LogDirectory;
+            var configuredLogDirectory = workspace.LogDirectory?.Trim() ?? string.Empty;
+            _lastLogBrowseDirectory = GetExistingBrowseDirectory(configuredLogDirectory) ?? _lastLogBrowseDirectory;
+            LogDirectory = Directory.Exists(configuredLogDirectory)
+                ? Path.GetFullPath(configuredLogDirectory)
+                : string.Empty;
             LoadImportedLogFiles();
             SelectedTaskType = TaskTypes.Contains(workspace.SelectedTaskType) ? workspace.SelectedTaskType : TaskTypes[0];
             OldVersion = workspace.OldVersion;
@@ -2085,6 +2483,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             RestoreDiscoveryCollections(workspace);
             _showArchivedReports = workspace.ShowArchivedReports;
             NotifyReportScopeChanged();
+            SavedTestPlans.Clear();
+            foreach (var plan in workspace.TestPlanTemplates ?? []) SavedTestPlans.Add(plan);
+            SelectedSavedTestPlan = SavedTestPlans.FirstOrDefault(plan => plan.Id == workspace.SelectedTestPlanId)
+                ?? SavedTestPlans.FirstOrDefault();
+            ClearTestPlan(resetIdentity: true, updateStatus: false);
             LoadCurrentModeSecrets();
         }
         finally
@@ -2242,8 +2645,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(CanStartForwardUpgrade));
         OnPropertyChanged(nameof(CanStartReverseUpgrade));
         OnPropertyChanged(nameof(CanStartCycleUpgrade));
+        OnPropertyChanged(nameof(CanRunTestPlan));
+        OnPropertyChanged(nameof(CanModifyTestPlan));
+        OnPropertyChanged(nameof(CanEditTestPlanItem));
+        OnPropertyChanged(nameof(CanCancelTestPlan));
         OnPropertyChanged(nameof(CanRefreshDiscovery));
         OnPropertyChanged(nameof(CanCancelTask));
+        OnPropertyChanged(nameof(CanCancelUpgradeExecution));
+        OnPropertyChanged(nameof(CancelUpgradeButtonText));
+        OnPropertyChanged(nameof(CancelUpgradeButtonToolTip));
     }
 
     private void ToggleExtenderSelection(object? _)
@@ -2296,12 +2706,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 throw new InvalidOperationException("仅支持 .patch 差分包或 .bin Gateway 完整镜像。");
             }
 
+            FirmwareIdentity? fullImageIdentity = null;
             if (isFullImage)
             {
-                var firmware = await FirmwareIdentityReader.ReadAsync(dialog.FileName);
-                if (firmware.DeviceType != FirmwareDeviceType.Gateway)
+                fullImageIdentity = await FirmwareIdentityReader.ReadAsync(dialog.FileName);
+                if (fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway)
                 {
-                    throw new InvalidOperationException($"完整镜像升级只支持 Gateway，当前文件识别为{firmware.DisplayName}（类型 {firmware.DeviceTypeCode}）。");
+                    throw new InvalidOperationException($"完整镜像升级只支持 Gateway，当前文件识别为{fullImageIdentity.DisplayName}（类型 {fullImageIdentity.DeviceTypeCode}）。");
+                }
+                if (!fullImageIdentity.Version.HasValue)
+                {
+                    throw new InvalidOperationException("Gateway 完整镜像没有有效的软件版本，无法安全生成升级任务。");
                 }
             }
 
@@ -2344,7 +2759,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 isFullImage: isFullImage,
                 otaDeviceType: patchDeviceType,
                 oldVersion: manifestVerified && !isFullImage ? _selectedPatchManifest?.OldVersion : null,
-                newVersion: manifestVerified && !isFullImage ? _selectedPatchManifest?.NewVersion : null);
+                newVersion: isFullImage ? fullImageIdentity?.Version : _selectedPatchManifest?.NewVersion);
             RefreshUpgradePatchChoices();
         }
         catch (Exception exception)
@@ -2369,19 +2784,77 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void BrowseLogDirectory(object? _)
     {
-        var dialog = new OpenFolderDialog
+        try
         {
-            Title = "选择日志目录",
-            InitialDirectory = Directory.Exists(LogDirectory) ? LogDirectory : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
-        };
-        if (dialog.ShowDialog() == true)
-        {
+            var preferredBrowseDirectory = string.IsNullOrWhiteSpace(LogDirectory)
+                ? _lastLogBrowseDirectory
+                : LogDirectory;
+            var initialDirectory = GetExistingBrowseDirectory(preferredBrowseDirectory);
+            if (!string.IsNullOrWhiteSpace(LogDirectory) && !Directory.Exists(LogDirectory))
+            {
+                LogDirectory = string.Empty;
+                ImportedLogFiles.Clear();
+                NotifyImportedLogFilesChanged();
+                LogAnalysisStatus = "原日志目录已不存在，请重新选择日志目录。";
+            }
+
+            var dialog = new OpenFolderDialog
+            {
+                Title = "选择日志目录",
+            };
+            if (!string.IsNullOrWhiteSpace(initialDirectory))
+            {
+                dialog.InitialDirectory = initialDirectory;
+            }
+
+            var owner = Application.Current?.MainWindow;
+            var result = owner is null ? dialog.ShowDialog() : dialog.ShowDialog(owner);
+            if (result != true) return;
+
             LogDirectory = dialog.FolderName;
+            _lastLogBrowseDirectory = LogDirectory;
             LoadImportedLogFiles();
             LogAnalysisStatus = ImportedLogFiles.Count == 0
                 ? "所选目录中没有 .log 文件。"
                 : $"已导入 {ImportedLogFiles.Count} 个 .log 文件，可删除不参与本次分析的文件。";
         }
+        catch (Exception exception)
+        {
+            LogAnalysisStatus = $"无法打开日志目录选择器：{exception.Message}";
+            TaskStatusMessage = LogAnalysisStatus;
+        }
+    }
+
+    private static string? GetExistingBrowseDirectory(string? preferredDirectory)
+    {
+        var candidates = new[]
+        {
+            preferredDirectory,
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            AppContext.BaseDirectory,
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) continue;
+
+            try
+            {
+                var current = Path.GetFullPath(candidate.Trim());
+                while (!string.IsNullOrWhiteSpace(current))
+                {
+                    if (Directory.Exists(current)) return current;
+                    current = Directory.GetParent(current)?.FullName;
+                }
+            }
+            catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+            {
+                // 路径无效或不可访问时继续尝试下一个安全回退目录。
+            }
+        }
+
+        return null;
     }
 
     private void LoadImportedLogFiles()
@@ -3612,6 +4085,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 var info = await _deviceDiscovery.QueryGatewayBasicInfoAsync(gatewayId.ToString());
                 _gatewaySoftwareVersion = info.SoftwareVersion;
                 _gatewayVersionGatewayId = gatewayId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                if (SelectedUpgradePatch is { IsFullImage: true })
+                {
+                    ApplyGatewayImagePairVersions();
+                    TaskStatusMessage = BuildGatewayImagePairStatus();
+                }
                 DeviceDiscoveryStatus = $"Gateway 当前软件版本：{ProtocolVersionFormatter.FormatWithPrefix(info.SoftwareVersion)}。";
                 OnPropertyChanged(nameof(GatewayIdTaskHint));
                 NotifyUpgradeActionAvailability();
@@ -3732,6 +4210,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         _gatewaySoftwareVersion = null;
         _gatewayVersionGatewayId = string.Empty;
+        if (SelectedUpgradePatch is { IsFullImage: true })
+        {
+            ApplyGatewayImagePairVersions();
+        }
         OnPropertyChanged(nameof(GatewayIdTaskHint));
         NotifyUpgradeActionAvailability();
     }
@@ -3812,10 +4294,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnNodeSelectionChanged();
             var failed = results.Count(item => !item.IsSuccess);
             var protocolTotal = results.Where(item => item.IsSuccess).Sum(item => item.ReportedCount);
-            var onlineVisible = results.Where(item => item.IsSuccess).Sum(item => item.Nodes.Count);
+            var onlineVisible = results.Where(item => item.IsSuccess).Sum(item => item.Nodes.Count(node => node.IsOnline));
+            var offlineVisible = results.Where(item => item.IsSuccess).Sum(item => item.Nodes.Count(node => !node.IsOnline));
             NodeDiscoveryStatus = failed == results.Count
                 ? "Node 列表刷新失败：所有 Extender 均未响应，请确认固件支持 cmd=100/0x0E→0x0F。"
-                : $"Node 列表刷新完成：协议返回 {protocolTotal} 个，在线显示 {onlineVisible} 个，失败 Extender {failed} 个。";
+                : $"Node 列表刷新完成：协议返回 {protocolTotal} 个，在线 {onlineVisible} 个，离线 {offlineVisible} 个，失败 Extender {failed} 个。";
             await SaveSettingsAsync();
         }
         catch (OperationCanceledException)
@@ -3980,8 +4463,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             activeSubtask?.Result.Equals("FAILED", StringComparison.OrdinalIgnoreCase) == true
                 ? "FAILED"
                 : status.Status;
-        var usesCachedPackage = status.UsesCachedPackage;
-        GatewayPackageSourceSummary = OtaStatusDisplay.PackageSourceSummary(status);
+        var usesCachedPackage = _gatewayStatusDeviceType != DeviceType.Gateway && status.UsesCachedPackage;
+        GatewayPackageSourceSummary = _gatewayStatusDeviceType == DeviceType.Gateway
+            ? string.Empty
+            : OtaStatusDisplay.PackageSourceSummary(status);
         GatewayPackageSourceColor = usesCachedPackage
             ? "#168A55"
             : string.Equals(status.PackageSource, "TRANSFER", StringComparison.OrdinalIgnoreCase)
@@ -4046,7 +4531,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     ? transferProgressPercent
                     : null,
                 freezeRunningAnimation,
-                usesCachedPackage));
+                usesCachedPackage,
+                displayState));
         }
         GatewaySubtasks.Clear();
         foreach (var subtask in status.Subtasks)
@@ -4125,7 +4611,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             var exportedPaths = await SaveReportAsync(
                 report,
-                autoExport: IsTerminalState(update.State) && !_isCycleUpgradeRunning);
+                autoExport: IsTerminalState(update.State) && !_isCycleUpgradeRunning && !_isTestPlanRunning);
             if (exportedPaths is { } paths)
             {
                 await RefreshCurrentReportsAfterExportAsync();
@@ -4158,6 +4644,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OtaTaskState.TimedOut => "TIMEDOUT",
             _ => "FAILED",
         };
+        ApplyTerminalGatewayStageState(stateCode);
         var terminalStage = update.Message.Contains("cmd=8", StringComparison.OrdinalIgnoreCase)
             ? "状态查询中断"
             : "任务已结束";
@@ -4173,6 +4660,18 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         GatewayStageSummary = $"{OtaStatusDisplay.State(stateCode)} · {terminalStage}";
         GatewayStageColor = StatusColor.For(stateCode);
+    }
+
+    private void ApplyTerminalGatewayStageState(string stateCode)
+    {
+        for (var index = 0; index < GatewayStages.Count; index++)
+        {
+            GatewayStages[index] = GatewayStages[index] with
+            {
+                TaskState = stateCode,
+                FreezeRunningAnimation = true,
+            };
+        }
     }
 
     private void TogglePolling(object? _)
@@ -4213,6 +4712,21 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 : "确定要取消当前循环升级吗？\n\n取消后，等待立即结束，后续单次升级不会启动。",
             "确认取消");
         return Task.CompletedTask;
+    }
+
+    private async Task CancelUpgradeExecutionAsync()
+    {
+        if (IsTestPlanRunning)
+        {
+            OpenPatchDialog(
+                PatchDialogAction.CancelTestPlan,
+                "确认取消队列",
+                "确定要取消升级任务队列吗？\n\n当前升级将被终止，尚未执行的任务会标记为已跳过。",
+                "确认取消");
+            return;
+        }
+
+        await CancelTaskAsync();
     }
 
     private async Task CancelActiveTaskAsync()
@@ -4692,10 +5206,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var unpublishedPatches = patches.Where(item => !_publishedPatchKeys.Contains(BuildPublishedPatchKey(item))).ToArray();
         if (unpublishedPatches.Length == 0)
         {
-            foreach (var patch in patches) patch.IsSelectedForPublish = false;
             HasPublishedPatches = true;
             PublishStatus = "已勾选的 Patch 均已发布且未发生变化，无需重复上传。";
             TaskStatusMessage = "Patch 未变化，已跳过重复发布；可直接在升级任务中选择 Patch 启动升级。";
+            ShowInformationDialog(
+                "无需重复发布",
+                "已勾选的 Patch 均已发布且文件内容未发生变化，本次未重复上传。\n\n当前勾选状态已保留；Patch 内容变化后可直接再次发布。");
             return Task.CompletedTask;
         }
 
@@ -4858,13 +5374,22 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         var modeState = IsEcoLink ? _ecoLinkUpgradeUiState : _traditionalUpgradeUiState;
         var selectedId = modeState.SelectedReportId ?? SelectedReport?.Id;
+        var mode = IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional;
+        var outputDirectory = GetReportOutputDirectory();
+        var reports = (await _reportStore.LoadRecentAsync(200))
+            .Where(report => report.Task.Mode == mode)
+            .Where(report => report.IsArchived == _showArchivedReports)
+            .Select(report => new ReportListItem(report, outputDirectory));
+        var planReports = (await _reportStore.LoadRecentPlansAsync(200))
+            .Where(report => report.Plan.Mode == mode)
+            .Where(report => report.IsArchived == _showArchivedReports)
+            .Select(report => new ReportListItem(report, outputDirectory));
         RecentReports.Clear();
-        foreach (var report in (await _reportStore.LoadRecentAsync(200))
-                     .Where(report => report.Task.Mode == (IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional))
-                     .Where(report => report.IsArchived == _showArchivedReports)
+        foreach (var report in reports.Concat(planReports)
+                     .OrderByDescending(item => item.StartedAtValue)
                      .Take(100))
         {
-            RecentReports.Add(new ReportListItem(report, GetReportOutputDirectory()));
+            RecentReports.Add(report);
         }
         SelectedReport = RecentReports.FirstOrDefault(item => item.Id == selectedId)
             ?? RecentReports.FirstOrDefault();
@@ -4917,8 +5442,18 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var htmlPath = await OtaReportExporter.ExportHtmlAsync(SelectedReport.Report, SelectedReport.HtmlPath);
-        await OtaReportExporter.ExportJsonAsync(SelectedReport.Report, SelectedReport.JsonPath);
+        string htmlPath;
+        if (SelectedReport.PlanReport is { } planReport)
+        {
+            htmlPath = await OtaTestPlanReportExporter.ExportHtmlAsync(planReport, SelectedReport.HtmlPath);
+            await OtaTestPlanReportExporter.ExportJsonAsync(planReport, SelectedReport.JsonPath);
+        }
+        else
+        {
+            var report = SelectedReport.Report ?? throw new InvalidOperationException("报告数据不存在。");
+            htmlPath = await OtaReportExporter.ExportHtmlAsync(report, SelectedReport.HtmlPath);
+            await OtaReportExporter.ExportJsonAsync(report, SelectedReport.JsonPath);
+        }
         Process.Start(new ProcessStartInfo(htmlPath) { UseShellExecute = true });
         TaskStatusMessage = $"已打开报告：{Path.GetFileName(htmlPath)}";
     }
@@ -4931,10 +5466,18 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        var report = SelectedReport.Report;
-        var wasArchived = report.IsArchived;
-        report.ArchivedAt = wasArchived ? null : DateTimeOffset.Now;
-        await _reportStore.SaveAsync(report);
+        var wasArchived = SelectedReport.IsArchived;
+        if (SelectedReport.PlanReport is { } planReport)
+        {
+            planReport.ArchivedAt = wasArchived ? null : DateTimeOffset.Now;
+            await _reportStore.SavePlanAsync(planReport);
+        }
+        else
+        {
+            var report = SelectedReport.Report ?? throw new InvalidOperationException("报告数据不存在。");
+            report.ArchivedAt = wasArchived ? null : DateTimeOffset.Now;
+            await _reportStore.SaveAsync(report);
+        }
         TaskStatusMessage = wasArchived ? "报告已恢复到当前报告。" : "报告已归档。";
         await LoadReportsAsync(updateStatus: false);
     }
@@ -4957,7 +5500,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private async Task DeleteReportAsync(ReportListItem item)
     {
-        await _reportStore.DeleteAsync(item.Id);
+        if (item.PlanReport is not null)
+        {
+            await _reportStore.DeletePlanAsync(item.Id);
+        }
+        else
+        {
+            await _reportStore.DeleteAsync(item.Id);
+        }
         if (File.Exists(item.HtmlPath)) File.Delete(item.HtmlPath);
         if (File.Exists(item.JsonPath)) File.Delete(item.JsonPath);
         TaskStatusMessage = $"已删除报告：{item.StartedAt}";
@@ -5132,6 +5682,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                         group.ReportedCount))
                     .ToArray(),
                 NodeDiscoveryCompletedAt = _nodeDiscoveryCompletedAt,
+                TestPlanTemplates = SavedTestPlans.ToArray(),
+                SelectedTestPlanId = SelectedSavedTestPlan?.Id,
             };
             await _settingsStore.SaveAsync(settings, cancellationToken);
             SaveCurrentModeSecrets();
@@ -5317,7 +5869,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     try
                     {
                         var identity = await FirmwareIdentityReader.ReadAsync(filePath);
-                        if (identity.DeviceType != FirmwareDeviceType.Gateway) continue;
+                        if (identity.DeviceType != FirmwareDeviceType.Gateway || !identity.Version.HasValue) continue;
+                        patchNewVersion = identity.Version.Value;
                     }
                     catch (InvalidDataException)
                     {
@@ -5462,6 +6015,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _pendingCycleProfile = null;
         _pendingCycleInterval = null;
         _pendingCycleRounds = 0;
+        _pendingTestPlanItem = null;
         DialogResultStampText = string.Empty;
         OnPropertyChanged(nameof(DialogResultStampVisibility));
         NotifyUpgradeActionAvailability();
@@ -5472,6 +6026,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var wasPublishing = _patchDialogAction == PatchDialogAction.Publish;
         var wasStartingUpgrade = _patchDialogAction == PatchDialogAction.StartUpgrade;
         var wasStartingCycle = _patchDialogAction == PatchDialogAction.StartCycleUpgrade;
+        var wasAddingTestPlanItem = _patchDialogAction == PatchDialogAction.AddTestPlanItem;
         ClosePatchDialog();
         if (wasPublishing)
         {
@@ -5485,6 +6040,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         else if (wasStartingCycle)
         {
             TaskStatusMessage = "已取消启动循环升级，任务尚未发送。";
+        }
+        else if (wasAddingTestPlanItem)
+        {
+            TaskStatusMessage = "已取消加入升级任务队列。";
         }
     }
 
@@ -5501,6 +6060,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var cycleProfile = _pendingCycleProfile;
         var cycleInterval = _pendingCycleInterval;
         var cycleRounds = _pendingCycleRounds;
+        var testPlanItem = _pendingTestPlanItem;
         if (action is PatchDialogAction.StartUpgrade or PatchDialogAction.StartCycleUpgrade)
         {
             _isUpgradeStartInProgress = true;
@@ -5531,9 +6091,24 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        if (action == PatchDialogAction.CancelTestPlan)
+        {
+            await CancelTestPlanAsync();
+            return;
+        }
+
         if (action == PatchDialogAction.CloseApplication)
         {
             CloseApplicationRequested?.Invoke(this, EventArgs.Empty);
+            return;
+        }
+
+        if (action == PatchDialogAction.AddTestPlanItem && testPlanItem is not null)
+        {
+            TestPlanItems.Add(new OtaTestPlanItemViewItem(testPlanItem));
+            SelectedTestPlanItem = TestPlanItems[^1];
+            NotifyTestPlanChanged();
+            TaskStatusMessage = $"已加入升级任务队列：{testPlanItem.Name}。";
             return;
         }
 
@@ -5700,11 +6275,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         if (!byte.TryParse(OldVersion, out var oldVersion) ||
             !byte.TryParse(NewVersion, out var newVersion) ||
-            patch.OldVersion is null ||
             patch.NewVersion is null)
         {
             return false;
         }
+
+        if (patch.IsFullImage)
+        {
+            return patch.OtaDeviceType == DeviceType.Gateway &&
+                   patch.NewVersion == (reverse ? oldVersion : newVersion);
+        }
+        if (patch.OldVersion is null) return false;
 
         return reverse
             ? patch.OldVersion == newVersion && patch.NewVersion == oldVersion
@@ -5721,7 +6302,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var deviceType = GetSelectedTaskDeviceType();
         if (patch.IsFullImage)
         {
-            return deviceType == DeviceType.Gateway;
+            return deviceType == DeviceType.Gateway && MatchesPatchDirection(patch, reverse);
         }
         if (!IsEcoLink)
         {
@@ -6200,14 +6781,1576 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void RefreshNodeEligibility()
     {
-        var filterType = _selectedNodeTypeValue > 0
-            ? _selectedNodeTypeValue
-            : (int?)null;
         foreach (var group in DiscoveredNodeGroups)
         {
-            group.SetFilter(NodeIdSearch, filterType);
+            group.SetFilter(NodeIdSearch);
         }
     }
+
+    private async Task AddTestPlanItemAsync(OtaTestPlanExecutionKind kind)
+    {
+        if (!CanModifyTestPlan)
+        {
+            TaskStatusMessage = "升级任务队列执行中，不能修改队列。";
+            return;
+        }
+        try
+        {
+            EnsureTestPlanBindingForEdit();
+            SelectedPlanTargetMode = "动态匹配";
+            TestPlanItemName = string.Empty;
+            var template = await BuildTestPlanItemTemplateAsync(kind, TestPlanItems.Count + 1);
+            _pendingTestPlanItem = template;
+            var directionName = kind switch
+            {
+                OtaTestPlanExecutionKind.Reverse => "反向",
+                OtaTestPlanExecutionKind.Cycle => "循环",
+                _ => "正向",
+            };
+            OpenPatchDialog(
+                PatchDialogAction.AddTestPlanItem,
+                $"确认加入{directionName}任务",
+                BuildTestPlanItemConfirmationMessage(template),
+                "确认加入");
+            TaskStatusMessage = $"请确认是否将“{template.Name}”加入升级任务队列。";
+        }
+        catch (Exception exception)
+        {
+            TaskStatusMessage = $"未加入升级任务队列：{exception.Message}";
+        }
+    }
+
+    private string BuildTestPlanItemConfirmationMessage(OtaTestPlanItemTemplate template)
+    {
+        var target = template.DeviceType switch
+        {
+            DeviceType.Gateway => $"动态目标：Gateway {template.GatewayId}",
+            DeviceType.Node when template.TargetRule.ExtenderTargets.Count == 0 =>
+                $"动态目标：当前 Gateway 下符合 Node 类型 {template.TargetRule.NodeType}、版本和 RSSI 条件的全部在线节点",
+            DeviceType.Node =>
+                $"目标 Extender：{string.Join("、", template.TargetRule.ExtenderTargets.Select(item => item.ExtenderId))}",
+            _ when template.TargetRule.DeviceIds.Count == 0 => "动态目标：当前 Gateway 下符合版本条件的全部在线 Extender",
+            _ => $"目标 Extender：{string.Join("、", template.TargetRule.DeviceIds)}",
+        };
+        var execution = template.ExecutionKind switch
+        {
+            OtaTestPlanExecutionKind.Reverse => "反向单次",
+            OtaTestPlanExecutionKind.Cycle => $"正反向循环 {template.CycleRounds} 轮",
+            _ => "正向单次",
+        };
+        var lines = new List<string>
+        {
+            $"模式：{(template.Mode == OtaMode.EcoLink ? "EcoLink" : "传统")}",
+            $"升级类型：{GetTaskTypeName(template.DeviceType)}",
+            $"执行方式：{execution}",
+            $"Gateway dev ID：{template.GatewayId}",
+            target,
+            $"版本：{ProtocolVersionFormatter.FormatRaw(template.OldVersion)} → {ProtocolVersionFormatter.FormatRaw(template.NewVersion)}",
+            $"Patch：{Path.GetFileName(template.ForwardPatch.FilePath)}",
+            $"MD5：{template.ForwardPatch.Md5}",
+        };
+        if (template.ReversePatch is { } reversePatch)
+        {
+            lines.Add($"反向 Patch：{Path.GetFileName(reversePatch.FilePath)}");
+            lines.Add($"反向 MD5：{reversePatch.Md5}");
+        }
+        lines.Add(string.Empty);
+        lines.Add("确认后仅加入升级任务队列，不会立即向设备发送升级请求。");
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private async Task SaveTestPlanItemEditAsync()
+    {
+        if (_editingTestPlanItemId is not { } itemId ||
+            TestPlanItems.FirstOrDefault(item => item.Id == itemId) is not { } existing)
+        {
+            TaskStatusMessage = "请先选择并编辑一个计划任务。";
+            return;
+        }
+        try
+        {
+            var replacement = await BuildTestPlanItemTemplateAsync(existing.Template.ExecutionKind, existing.Template.Order);
+            existing.ReplaceTemplate(replacement with { Id = existing.Id, Name = string.IsNullOrWhiteSpace(TestPlanItemName) ? existing.Name : TestPlanItemName.Trim() });
+            existing.ResetForReview();
+            _editingTestPlanItemId = null;
+            TestPlanItemName = string.Empty;
+            NotifyTestPlanChanged();
+            TaskStatusMessage = $"已保存计划任务：{existing.Name}。";
+        }
+        catch (Exception exception)
+        {
+            TaskStatusMessage = $"计划任务未保存：{exception.Message}";
+        }
+    }
+
+    private void EditTestPlanItem(object? parameter)
+    {
+        if (!CanModifyTestPlan || parameter is not OtaTestPlanItemViewItem item) return;
+        SelectedTestPlanItem = item;
+        _editingTestPlanItemId = item.Id;
+        var template = item.Template;
+        TestPlanItemName = template.Name;
+        SelectedTaskType = GetTaskTypeName(template.DeviceType);
+        SelectedPlanTargetMode = template.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds
+            ? "固定目标"
+            : "动态匹配";
+        if (template.ExecutionKind == OtaTestPlanExecutionKind.Reverse)
+        {
+            OldVersion = template.NewVersion;
+            NewVersion = template.OldVersion;
+        }
+        else
+        {
+            OldVersion = template.OldVersion;
+            NewVersion = template.NewVersion;
+        }
+        if (template.TargetRule.NodeType is { } nodeType) NodeType = nodeType;
+        TargetIdList = string.Join(Environment.NewLine, template.TargetRule.DeviceIds);
+        NodeTargetsText = string.Join(Environment.NewLine, template.TargetRule.ExtenderTargets.Select(target =>
+            $"{target.ExtenderId}: {string.Join(',', target.NodeIds)}"));
+        SetEditorExtenderSelection(template.TargetRule);
+        SelectedUpgradePatch = UpgradePatchChoices.FirstOrDefault(patch =>
+            string.Equals(patch.FilePath, template.ForwardPatch.FilePath, StringComparison.OrdinalIgnoreCase));
+        SelectedReverseUpgradePatch = template.ReversePatch is null
+            ? null
+            : UpgradePatchChoices.FirstOrDefault(patch =>
+                string.Equals(patch.FilePath, template.ReversePatch.FilePath, StringComparison.OrdinalIgnoreCase));
+        if (template.ExecutionKind == OtaTestPlanExecutionKind.Reverse)
+        {
+            SelectedReverseUpgradePatch = UpgradePatchChoices.FirstOrDefault(patch =>
+                string.Equals(patch.FilePath, template.ForwardPatch.FilePath, StringComparison.OrdinalIgnoreCase));
+        }
+        CycleRounds = template.CycleRounds;
+        if (template.CycleInterval is { } interval)
+        {
+            CycleIntervalMode = interval.Mode == OtaCycleIntervalMode.Random ? "随机间隔" : "固定间隔";
+            CycleFixedIntervalSeconds = interval.FixedSeconds;
+            CycleRandomMinimumSeconds = interval.RandomMinimumSeconds;
+            CycleRandomMaximumSeconds = interval.RandomMaximumSeconds;
+        }
+        TaskStatusMessage = $"正在编辑计划任务：{item.Name}。修改配置后点击“保存任务修改”。";
+    }
+
+    private void DuplicateTestPlanItem(object? parameter)
+    {
+        if (!CanModifyTestPlan || parameter is not OtaTestPlanItemViewItem item) return;
+        var copy = item.Template with
+        {
+            Id = Guid.NewGuid(),
+            Order = TestPlanItems.Count + 1,
+            Name = item.Name + "（副本）",
+        };
+        TestPlanItems.Add(new OtaTestPlanItemViewItem(copy));
+        NotifyTestPlanChanged();
+    }
+
+    private void DeleteTestPlanItem(object? parameter)
+    {
+        if (!CanModifyTestPlan || parameter is not OtaTestPlanItemViewItem item) return;
+        TestPlanItems.Remove(item);
+        if (_editingTestPlanItemId == item.Id) _editingTestPlanItemId = null;
+        ReindexTestPlanItems();
+        NotifyTestPlanChanged();
+    }
+
+    private void ClearTestPlan(bool resetIdentity = true, bool updateStatus = true)
+    {
+        if (!CanModifyTestPlan && TestPlanItems.Count > 0) return;
+        TestPlanItems.Clear();
+        SelectedTestPlanItem = null;
+        _editingTestPlanItemId = null;
+        TestPlanItemName = string.Empty;
+        if (resetIdentity)
+        {
+            _currentTestPlanId = Guid.NewGuid();
+            _currentTestPlanGatewayId = string.Empty;
+            TestPlanName = "未命名测试计划";
+            TestPlanContinueOnFailure = false;
+            TestPlanInterItemDelaySeconds = 0;
+            SelectedPlanTargetMode = "动态匹配";
+        }
+        NotifyTestPlanChanged();
+        if (updateStatus) TaskStatusMessage = "升级任务队列已清空。";
+    }
+
+    private async Task PreflightTestPlanAsync()
+    {
+        if (IsTestPlanRunning || IsTestPlanPreflighting) return;
+        IsTestPlanPreflighting = true;
+        try
+        {
+            var plan = BuildCurrentTestPlan();
+            ResetTestPlanItemStates();
+            var executor = new ViewModelTestPlanExecutor(this, plan);
+            var results = await _testPlanRunner.PreflightAsync(plan, executor);
+            var failed = results.Count(result => result.State == OtaTestPlanItemState.Failed);
+            TaskStatusMessage = failed == 0
+                ? $"升级任务队列预检通过，共 {results.Count} 项，可以开始执行。"
+                : $"升级任务队列预检失败：{failed} 项需要处理。";
+        }
+        catch (Exception exception)
+        {
+            TaskStatusMessage = $"升级任务队列预检失败：{exception.Message}";
+        }
+        finally
+        {
+            IsTestPlanPreflighting = false;
+            NotifyTestPlanChanged();
+        }
+    }
+
+    private async Task StartTestPlanAsync()
+    {
+        if (!CanRunTestPlan)
+        {
+            TaskStatusMessage = "升级任务队列不可启动：请确认队列非空且当前没有其他升级任务。";
+            return;
+        }
+        OtaTestPlanTemplate plan;
+        try
+        {
+            plan = BuildCurrentTestPlan();
+        }
+        catch (Exception exception)
+        {
+            TaskStatusMessage = $"升级任务队列未启动：{exception.Message}";
+            return;
+        }
+
+        ResetTestPlanItemStates();
+        var planReport = new OtaTestPlanReport
+        {
+            Plan = plan,
+            FinalState = OtaTestPlanState.Preflighting,
+            Items = plan.Items.OrderBy(item => item.Order)
+                .Select(item => new OtaTestPlanItemReport { Template = item })
+                .ToList(),
+        };
+        _activeTestPlanReport = planReport;
+        var executor = new ViewModelTestPlanExecutor(this, plan);
+        IsTestPlanRunning = true;
+        BeginUpgradeTaskTiming(_activeTestPlanReport.StartedAt);
+        UpgradeRunModeText = $"任务队列 0/{plan.Items.Count}";
+        UpgradeRunModeForeground = "#7A4CC2";
+        UpgradeRunModeBackground = "#F1EAFE";
+        UpgradeRunProgressText = "正在执行整份队列预检…";
+        TaskStatusMessage = $"升级任务队列开始预检，共 {plan.Items.Count} 项。";
+        OtaTestPlanRunResult? completedResult = null;
+        Exception? reportExportError = null;
+        try
+        {
+            var result = await _testPlanRunner.RunAsync(plan, executor);
+            completedResult = result;
+            planReport.FinalState = result.State;
+            planReport.FinishedAt = result.OccurredAt;
+            CompleteUpgradeTaskTiming(result.OccurredAt);
+            TaskStatusMessage = result.Message;
+            UpgradeRunProgressText = result.Message;
+            UpgradeRunModeText = result.State == OtaTestPlanState.Succeeded ? "队列已完成" : "队列未通过";
+            try
+            {
+                await SaveAndExportTestPlanReportAsync(planReport);
+                await LoadReportsAsync(updateStatus: false);
+            }
+            catch (Exception exception)
+            {
+                reportExportError = exception;
+            }
+        }
+        finally
+        {
+            CompleteUpgradeTaskTiming();
+            _activePreparedPlanItem = null;
+            _activeReport = null;
+            _reportTaskIds.Clear();
+            IsTestPlanRunning = false;
+            NotifyTestPlanChanged();
+        }
+
+        if (completedResult is null) return;
+        var historyError = string.Empty;
+        if (completedResult.State == OtaTestPlanState.Succeeded)
+        {
+            try
+            {
+                await SaveSuccessfulTaskHistoryAsync(plan, completedResult.OccurredAt);
+            }
+            catch (Exception exception)
+            {
+                historyError = exception.Message;
+            }
+            ClearTestPlan(resetIdentity: true, updateStatus: false);
+        }
+        ShowTestPlanCompletionDialog(completedResult, planReport, reportExportError, historyError);
+    }
+
+    private async Task SaveSuccessfulTaskHistoryAsync(OtaTestPlanTemplate plan, DateTimeOffset completedAt)
+    {
+        var items = plan.Items.OrderBy(item => item.Order)
+            .Select((item, index) => item with { Id = Guid.NewGuid(), Order = index + 1 })
+            .ToArray();
+        var summary = items.Length == 1
+            ? items[0].Name
+            : $"{items.Length} 项 · {string.Join(" → ", items.Take(3).Select(item => GetTaskTypeName(item.DeviceType).Replace("升级", string.Empty, StringComparison.Ordinal)))}";
+        if (items.Length > 3) summary += "…";
+        var history = plan with
+        {
+            Id = Guid.NewGuid(),
+            Name = $"{completedAt.ToLocalTime():MM-dd HH:mm:ss} · {summary}",
+            Items = items,
+        };
+        SavedTestPlans.Insert(0, history);
+        while (SavedTestPlans.Count > 30) SavedTestPlans.RemoveAt(SavedTestPlans.Count - 1);
+        SelectedSavedTestPlan = history;
+        await SaveSettingsAsync();
+    }
+
+    private void ShowTestPlanCompletionDialog(
+        OtaTestPlanRunResult result,
+        OtaTestPlanReport report,
+        Exception? reportExportError,
+        string historyError)
+    {
+        var succeeded = result.State == OtaTestPlanState.Succeeded;
+        var outputDirectory = GetReportOutputDirectory();
+        var details = new List<string>
+        {
+            result.Message,
+            $"成功 {result.Succeeded} · 失败 {result.Failed} · 跳过 {result.Skipped}",
+        };
+        if (succeeded)
+        {
+            details.Add("任务列表已自动清空，原队列已保存到任务历史，可一键重新导入。");
+        }
+        else
+        {
+            details.Add("未通过的任务仍保留在队列中，可查看原因后调整并重试。");
+        }
+        details.Add(reportExportError is null
+            ? $"报告已自动导出到：{outputDirectory}{Environment.NewLine}" +
+              $"HTML：ota-plan-report-{report.Id:N}.html{Environment.NewLine}" +
+              $"JSON：ota-plan-report-{report.Id:N}.json"
+            : $"报告导出失败：{reportExportError.Message}");
+        if (!string.IsNullOrWhiteSpace(historyError))
+        {
+            details.Add($"任务历史持久化失败：{historyError}");
+        }
+        TaskStatusMessage = succeeded
+            ? "升级任务队列已完成，任务已保存到历史并自动清空。"
+            : result.Message;
+        OpenPatchDialog(
+            PatchDialogAction.Information,
+            succeeded ? "测试完成" : "测试结束",
+            string.Join(Environment.NewLine + Environment.NewLine, details),
+            "知道了",
+            succeeded ? "通过" : "失败",
+            succeeded ? "#159E68" : "#C73A3A");
+    }
+
+    private async Task CancelTestPlanAsync()
+    {
+        if (!IsTestPlanRunning) return;
+        TaskStatusMessage = "正在取消当前队列任务并停止后续任务…";
+        await _testPlanRunner.CancelAsync();
+    }
+
+    private async Task SaveTestPlanTemplateAsync()
+    {
+        try
+        {
+            var plan = BuildCurrentTestPlan();
+            var existing = SavedTestPlans.FirstOrDefault(item => item.Id == plan.Id);
+            if (existing is not null)
+            {
+                var index = SavedTestPlans.IndexOf(existing);
+                SavedTestPlans[index] = plan;
+            }
+            else
+            {
+                SavedTestPlans.Add(plan);
+            }
+            SelectedSavedTestPlan = plan;
+            await SaveSettingsAsync();
+            TaskStatusMessage = $"测试计划模板“{plan.Name}”已保存；下次加载后需要重新预检。";
+        }
+        catch (Exception exception)
+        {
+            TaskStatusMessage = $"测试计划模板未保存：{exception.Message}";
+        }
+    }
+
+    private async Task LoadSelectedTestPlanTemplateAsync()
+    {
+        if (!CanModifyTestPlan || SelectedSavedTestPlan is not { } plan) return;
+        _currentTestPlanId = plan.Id;
+        _currentTestPlanGatewayId = plan.GatewayId;
+        TestPlanName = plan.Name;
+        TestPlanContinueOnFailure = plan.ContinueOnFailure;
+        TestPlanInterItemDelaySeconds = plan.InterItemDelaySeconds;
+        TestPlanItems.Clear();
+        foreach (var item in plan.Items.OrderBy(item => item.Order))
+        {
+            TestPlanItems.Add(new OtaTestPlanItemViewItem(item));
+        }
+        foreach (var item in TestPlanItems)
+        {
+            await ReviewLoadedTestPlanItemAsync(item);
+        }
+        SelectedTestPlanItem = TestPlanItems.FirstOrDefault();
+        NotifyTestPlanChanged();
+        var localFailures = TestPlanItems.Count(item => item.State == OtaTestPlanItemState.Failed);
+        TaskStatusMessage = plan.Mode != (IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional) ||
+                            !string.Equals(plan.GatewayId, GatewayId, StringComparison.Ordinal)
+            ? $"已加载“{plan.Name}”，但模式或 Gateway 与当前环境不一致；请切回绑定环境后执行。"
+            : localFailures > 0
+                ? $"已加载“{plan.Name}”，发现 {localFailures} 项本地 Patch 异常，请查看任务行。"
+                : $"已加载“{plan.Name}”，请执行预检后启动。";
+    }
+
+    private static async Task ReviewLoadedTestPlanItemAsync(OtaTestPlanItemViewItem item)
+    {
+        try
+        {
+            IReadOnlyList<OtaTestPlanPatchReference> references = item.Template.ReversePatch is { } reversePatch
+                ? [item.Template.ForwardPatch, reversePatch]
+                : [item.Template.ForwardPatch];
+            foreach (var reference in references)
+            {
+                if (!File.Exists(reference.FilePath))
+                {
+                    item.Apply(OtaTestPlanItemState.Failed, $"Patch 已丢失：{reference.FilePath}");
+                    return;
+                }
+                var metadata = await PatchMetadata.FromFileAsync(reference.FilePath);
+                if (!metadata.Md5.Equals(reference.Md5, StringComparison.OrdinalIgnoreCase) ||
+                    !metadata.Sha256.Equals(reference.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    item.Apply(OtaTestPlanItemState.Failed, $"Patch 内容哈希已变化：{Path.GetFileName(reference.FilePath)}");
+                    return;
+                }
+            }
+            item.ResetForReview();
+        }
+        catch (Exception exception)
+        {
+            item.Apply(OtaTestPlanItemState.Failed, $"Patch 本地复核失败：{exception.Message}");
+        }
+    }
+
+    private async Task DeleteSelectedTestPlanTemplateAsync()
+    {
+        if (!CanModifyTestPlan || SelectedSavedTestPlan is not { } plan) return;
+        SavedTestPlans.Remove(plan);
+        SelectedSavedTestPlan = SavedTestPlans.FirstOrDefault();
+        await SaveSettingsAsync();
+        TaskStatusMessage = $"已删除测试计划模板“{plan.Name}”。";
+    }
+
+    private async Task<OtaTestPlanItemTemplate> BuildTestPlanItemTemplateAsync(
+        OtaTestPlanExecutionKind kind,
+        int order)
+    {
+        var mode = IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional;
+        var deviceType = GetSelectedTaskDeviceType();
+        if (!uint.TryParse(GatewayId, out var gatewayId) || gatewayId == 0)
+        {
+            throw new InvalidOperationException("Gateway ID 必须是十进制正整数。");
+        }
+        var primaryPatch = kind == OtaTestPlanExecutionKind.Reverse
+            ? SelectedReverseUpgradePatch
+            : SelectedUpgradePatch;
+        if (primaryPatch is null || !File.Exists(primaryPatch.FilePath))
+        {
+            throw new InvalidOperationException(kind == OtaTestPlanExecutionKind.Reverse
+                ? "请选择可用的反向 Patch。"
+                : "请选择可用的正向 Patch。");
+        }
+        var reversePatch = kind == OtaTestPlanExecutionKind.Cycle ? SelectedReverseUpgradePatch : null;
+        if (kind == OtaTestPlanExecutionKind.Cycle && (reversePatch is null || !File.Exists(reversePatch.FilePath)))
+        {
+            throw new InvalidOperationException("循环任务必须同时选择正向和反向 Patch。");
+        }
+        if (primaryPatch.IsFullImage && deviceType != DeviceType.Gateway)
+        {
+            throw new InvalidOperationException("完整固件镜像仅允许用于 Gateway 升级。 ");
+        }
+        if (reversePatch is not null && primaryPatch.IsFullImage != reversePatch.IsFullImage)
+        {
+            throw new InvalidOperationException("循环任务的正向和反向文件必须同为完整镜像或同为差分 Patch。 ");
+        }
+        var targetRule = BuildPlanTargetRule(deviceType);
+        if (IsEcoLink && deviceType == DeviceType.Gateway &&
+            (!_gatewaySoftwareVersion.HasValue ||
+             !string.Equals(_gatewayVersionGatewayId, GatewayId, StringComparison.Ordinal)))
+        {
+            throw new InvalidOperationException("请先点击“刷新 Gateway”查询当前软件版本，再加入任务。");
+        }
+        var oldVersion = kind == OtaTestPlanExecutionKind.Reverse ? NewVersion : OldVersion;
+        var newVersion = kind == OtaTestPlanExecutionKind.Reverse ? OldVersion : NewVersion;
+        if (!byte.TryParse(oldVersion, out var oldVersionByte) ||
+            !byte.TryParse(newVersion, out var newVersionByte) ||
+            oldVersionByte == newVersionByte)
+        {
+            throw new InvalidOperationException("Patch 版本方向无效。");
+        }
+        ValidatePatchSelectionForPlan(primaryPatch, deviceType, oldVersionByte, newVersionByte);
+        if (reversePatch is not null)
+        {
+            ValidatePatchSelectionForPlan(reversePatch, deviceType, newVersionByte, oldVersionByte);
+        }
+        var primaryReference = await CreatePlanPatchReferenceAsync(primaryPatch, mode);
+        var reverseReference = reversePatch is null ? null : await CreatePlanPatchReferenceAsync(reversePatch, mode);
+        var interval = kind == OtaTestPlanExecutionKind.Cycle
+            ? CycleIntervalMode == "随机间隔"
+                ? new OtaCycleIntervalOptions(OtaCycleIntervalMode.Random, 0, CycleRandomMinimumSeconds, CycleRandomMaximumSeconds)
+                : new OtaCycleIntervalOptions(OtaCycleIntervalMode.Fixed, CycleFixedIntervalSeconds)
+            : null;
+        if (interval?.Validate() is { } intervalError) throw new InvalidOperationException(intervalError);
+        var typeName = GetTaskTypeName(deviceType).Replace("升级", string.Empty, StringComparison.Ordinal).Trim();
+        var directionName = kind switch
+        {
+            OtaTestPlanExecutionKind.Reverse => "反向",
+            OtaTestPlanExecutionKind.Cycle => "循环",
+            _ => "正向",
+        };
+        var template = new OtaTestPlanItemTemplate
+        {
+            Name = $"{typeName} {directionName} {ProtocolVersionFormatter.FormatRaw(oldVersion)} to {ProtocolVersionFormatter.FormatRaw(newVersion)}",
+            Order = order,
+            Mode = mode,
+            GatewayId = gatewayId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            DeviceType = deviceType,
+            ExecutionKind = kind,
+            OldVersion = oldVersion,
+            NewVersion = newVersion,
+            ForwardPatch = primaryReference,
+            ReversePatch = reverseReference,
+            TargetRule = targetRule,
+            CycleRounds = kind == OtaTestPlanExecutionKind.Cycle ? CycleRounds : 1,
+            CycleInterval = interval,
+        };
+        var previous = OtaTestPlanVersionProjection.FindPreviousCompatible(
+            TestPlanItems.Select(item => item.Template),
+            template);
+        if (previous is not null)
+        {
+            var projectedVersion = OtaTestPlanVersionProjection.GetProjectedEndVersion(previous);
+            if (projectedVersion != oldVersionByte)
+            {
+                throw new InvalidOperationException(
+                    $"前序任务“{previous.Name}”完成后预计版本 {ProtocolVersionFormatter.FormatWithPrefix(projectedVersion)}，" +
+                    $"当前任务要求起始版本 {ProtocolVersionFormatter.FormatWithPrefix(oldVersionByte)}。");
+            }
+        }
+        else if (ValidateCurrentTargetsForPlanItem(deviceType, targetRule, oldVersionByte) is { } targetError)
+        {
+            throw new InvalidOperationException(targetError);
+        }
+        return template;
+    }
+
+    private void ValidatePatchSelectionForPlan(
+        PatchSelection patch,
+        DeviceType deviceType,
+        byte expectedOldVersion,
+        byte expectedNewVersion)
+    {
+        if (patch.IsFullImage)
+        {
+            if (deviceType != DeviceType.Gateway || patch.OtaDeviceType != DeviceType.Gateway)
+            {
+                throw new InvalidOperationException("完整固件镜像仅允许用于 Gateway 升级。");
+            }
+            if (!patch.NewVersion.HasValue)
+            {
+                throw new InvalidOperationException($"完整镜像 {patch.FileName} 未识别到有效目标版本，请重新导入。");
+            }
+            if (patch.NewVersion.Value != expectedNewVersion)
+            {
+                throw new InvalidOperationException(
+                    $"完整镜像 {patch.FileName} 的目标版本为 {ProtocolVersionFormatter.FormatWithPrefix(patch.NewVersion.Value)}，" +
+                    $"当前任务配置要求升级到 {ProtocolVersionFormatter.FormatWithPrefix(expectedNewVersion)}。");
+            }
+            return;
+        }
+
+        if (!IsEcoLink) return;
+        if (!patch.ManifestVerified || patch.OtaDeviceType is null ||
+            !patch.OldVersion.HasValue || !patch.NewVersion.HasValue)
+        {
+            throw new InvalidOperationException($"Patch {patch.FileName} 缺少或未通过 .json 元数据校验，不能加入升级任务。");
+        }
+        if (patch.OtaDeviceType != deviceType ||
+            patch.OldVersion.Value != expectedOldVersion ||
+            patch.NewVersion.Value != expectedNewVersion)
+        {
+            throw new InvalidOperationException(
+                $"Patch {patch.FileName} 的类型或版本方向与任务不匹配：" +
+                $"Patch 为 {ProtocolVersionFormatter.FormatWithPrefix(patch.OldVersion.Value)} to {ProtocolVersionFormatter.FormatWithPrefix(patch.NewVersion.Value)}，" +
+                $"任务为 {ProtocolVersionFormatter.FormatWithPrefix(expectedOldVersion)} to {ProtocolVersionFormatter.FormatWithPrefix(expectedNewVersion)}。");
+        }
+    }
+
+    private string? ValidateCurrentTargetsForPlanItem(
+        DeviceType deviceType,
+        OtaTestPlanTargetRule targetRule,
+        byte expectedVersion)
+    {
+        if (!IsEcoLink) return null;
+        if (deviceType == DeviceType.Gateway)
+        {
+            if (!_gatewaySoftwareVersion.HasValue ||
+                !string.Equals(_gatewayVersionGatewayId, GatewayId, StringComparison.Ordinal))
+            {
+                return "请先点击“刷新 Gateway”查询当前软件版本，再加入任务。";
+            }
+            return _gatewaySoftwareVersion.Value == expectedVersion
+                ? null
+                : $"Gateway 当前版本 {ProtocolVersionFormatter.FormatWithPrefix(_gatewaySoftwareVersion.Value)}，" +
+                  $"所选 Patch 要求起始版本 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}。";
+        }
+
+        if (deviceType is DeviceType.Sync or DeviceType.Async)
+        {
+            var configuredIds = targetRule.DeviceIds
+                .Select(value => uint.TryParse(value, out var parsed) ? parsed : 0U)
+                .Where(value => value > 0)
+                .ToHashSet();
+            var candidates = configuredIds.Count == 0
+                ? DiscoveredExtenders.ToArray()
+                : DiscoveredExtenders.Where(item => configuredIds.Contains(item.ExtenderId)).ToArray();
+            if (candidates.Length == 0)
+            {
+                return "当前没有可用于任务的 Extender，请先刷新 Extender。";
+            }
+            if (candidates.Any(item => item.GetSoftwareVersion(deviceType) == expectedVersion)) return null;
+
+            var first = candidates[0];
+            var actual = first.GetSoftwareVersion(deviceType);
+            var versionName = deviceType == DeviceType.Async ? "异步版本" : "同步版本";
+            return $"动态目标中没有起始版本匹配的 Extender；{ProtocolIdentifierFormatter.Format(first.ExtenderId)} 当前{versionName} " +
+                   $"{(actual.HasValue ? ProtocolVersionFormatter.FormatWithPrefix(actual.Value) : "未知")}，" +
+                   $"所选 Patch 要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}。";
+        }
+
+        var configuredExtenders = targetRule.ExtenderTargets
+            .Select(target => uint.TryParse(target.ExtenderId, out var parsed) ? parsed : 0U)
+            .Where(value => value > 0)
+            .ToHashSet();
+        var groups = configuredExtenders.Count == 0
+            ? DiscoveredNodeGroups.ToArray()
+            : DiscoveredNodeGroups.Where(group => configuredExtenders.Contains(group.ExtenderId)).ToArray();
+        if (groups.Length == 0)
+        {
+            return "当前没有 Node 查询结果，请先刷新 Node。";
+        }
+        var nodeType = targetRule.NodeType ?? NodeType;
+        var failures = new List<string>();
+        foreach (var extenderId in configuredExtenders.Where(id => groups.All(group => group.ExtenderId != id)))
+        {
+            failures.Add($"Extender {ProtocolIdentifierFormatter.Format(extenderId)} 没有 Node 查询结果");
+        }
+        foreach (var group in groups)
+        {
+            var hasMatch = group.Nodes.Any(node =>
+                node.NodeType == nodeType &&
+                ProtocolVersionFormatter.IsKnown(node.SoftwareVersion) &&
+                node.SoftwareVersion == expectedVersion &&
+                node.Rssi >= MinimumNodeRssi);
+            if (!hasMatch)
+            {
+                failures.Add($"Extender {ProtocolIdentifierFormatter.Format(group.ExtenderId)} 没有在线且类型、版本、RSSI 均匹配的 Node");
+            }
+        }
+        return failures.Count == 0
+            ? null
+            : $"Node 任务不满足起始条件：{string.Join("；", failures.Take(3))}。";
+    }
+
+    private OtaTestPlanTargetRule BuildPlanTargetRule(DeviceType deviceType)
+    {
+        var dynamic = string.Equals(SelectedPlanTargetMode, "动态匹配", StringComparison.Ordinal);
+        if (deviceType == DeviceType.Gateway)
+        {
+            return new OtaTestPlanTargetRule { ResolutionMode = dynamic ? OtaTargetResolutionMode.DynamicMatch : OtaTargetResolutionMode.FixedIds };
+        }
+        var selectedExtenders = DiscoveredExtenders.Where(item => item.IsSelected)
+            .Select(item => item.ExtenderId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .ToArray();
+        if (deviceType == DeviceType.Node)
+        {
+            if (dynamic)
+            {
+                return new OtaTestPlanTargetRule
+                {
+                    ResolutionMode = OtaTargetResolutionMode.DynamicMatch,
+                    ExtenderTargets = selectedExtenders.Select(id => new OtaExtenderTarget(id, [])).ToArray(),
+                    NodeType = NodeType,
+                };
+            }
+            if (selectedExtenders.Length == 0) throw new InvalidOperationException("固定 Node 目标请至少选择一个 Extender。 ");
+            var targets = ParseNodeTargets(NodeTargetsText);
+            if (ValidateSelectedExtenderNodeCoverage(targets) is { } coverageError) throw new InvalidOperationException(coverageError);
+            return new OtaTestPlanTargetRule
+            {
+                ResolutionMode = OtaTargetResolutionMode.FixedIds,
+                ExtenderTargets = targets,
+                NodeType = NodeType,
+            };
+        }
+        var ids = dynamic
+            ? selectedExtenders
+            : ParsePositiveUIntLines(TargetIdList).Select(id => id.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+        if (IsEcoLink && !dynamic && ids.Length == 0) throw new InvalidOperationException("固定目标请至少选择一个 Extender。 ");
+        return new OtaTestPlanTargetRule
+        {
+            ResolutionMode = dynamic ? OtaTargetResolutionMode.DynamicMatch : OtaTargetResolutionMode.FixedIds,
+            DeviceIds = ids,
+        };
+    }
+
+    private static async Task<OtaTestPlanPatchReference> CreatePlanPatchReferenceAsync(PatchSelection patch, OtaMode mode)
+    {
+        var metadata = await PatchMetadata.FromFileAsync(patch.FilePath);
+        PackageManifest? manifest = null;
+        FirmwareIdentity? fullImageIdentity = null;
+        if (mode == OtaMode.EcoLink && !patch.IsFullImage)
+        {
+            manifest = await PackageManifestImporter.LoadAndValidateAsync(patch.FilePath);
+        }
+        if (patch.IsFullImage)
+        {
+            fullImageIdentity = await FirmwareIdentityReader.ReadAsync(patch.FilePath);
+            if (fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway || !fullImageIdentity.Version.HasValue)
+            {
+                throw new InvalidOperationException("Gateway 完整镜像没有有效的类型或目标版本。");
+            }
+        }
+        return new OtaTestPlanPatchReference
+        {
+            FilePath = Path.GetFullPath(patch.FilePath),
+            Md5 = metadata.Md5,
+            Sha256 = metadata.Sha256,
+            ManifestDeviceTypeCode = manifest?.DeviceTypeCode,
+            ManifestOldVersion = manifest?.OldVersion,
+            ManifestNewVersion = manifest?.NewVersion,
+            FullImageTargetVersion = fullImageIdentity?.Version,
+        };
+    }
+
+    private void EnsureTestPlanBindingForEdit()
+    {
+        var mode = IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional;
+        if (TestPlanItems.Count == 0)
+        {
+            _currentTestPlanGatewayId = GatewayId;
+            OnPropertyChanged(nameof(TestPlanBindingSummary));
+            return;
+        }
+        var first = TestPlanItems[0].Template;
+        if (first.Mode != mode || !string.Equals(_currentTestPlanGatewayId, GatewayId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"当前队列绑定 {first.Mode} / Gateway {_currentTestPlanGatewayId}，不能加入其他环境的任务。");
+        }
+    }
+
+    private OtaTestPlanTemplate BuildCurrentTestPlan()
+    {
+        if (TestPlanItems.Count == 0) throw new InvalidOperationException("请先向升级任务队列加入任务。");
+        var mode = IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional;
+        var binding = string.IsNullOrWhiteSpace(_currentTestPlanGatewayId) ? GatewayId : _currentTestPlanGatewayId;
+        if (mode != TestPlanItems[0].Template.Mode || !string.Equals(binding, GatewayId, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"计划绑定 {TestPlanItems[0].Template.Mode} / Gateway {binding}，当前环境为 {mode} / Gateway {GatewayId}。禁止静默替换目标；请切回绑定环境或清空后另建计划。");
+        }
+        return new OtaTestPlanTemplate
+        {
+            Id = _currentTestPlanId,
+            Name = string.IsNullOrWhiteSpace(TestPlanName) ? "未命名测试计划" : TestPlanName.Trim(),
+            Mode = mode,
+            GatewayId = binding,
+            ContinueOnFailure = TestPlanContinueOnFailure,
+            InterItemDelaySeconds = TestPlanInterItemDelaySeconds,
+            Items = TestPlanItems.Select(item => item.Template).OrderBy(item => item.Order).ToArray(),
+        };
+    }
+
+    private void ResetTestPlanItemStates()
+    {
+        foreach (var item in TestPlanItems) item.ResetForReview();
+        NotifyTestPlanChanged();
+    }
+
+    private void ReindexTestPlanItems()
+    {
+        for (var index = 0; index < TestPlanItems.Count; index++)
+        {
+            TestPlanItems[index].ReplaceTemplate(TestPlanItems[index].Template with { Order = index + 1 });
+        }
+    }
+
+    private void NotifyTestPlanChanged()
+    {
+        OnPropertyChanged(nameof(CanRunTestPlan));
+        OnPropertyChanged(nameof(CanEditTestPlanItem));
+        OnPropertyChanged(nameof(CanImportSelectedTaskHistory));
+        OnPropertyChanged(nameof(TestPlanProgressSummary));
+        OnPropertyChanged(nameof(TestPlanEmptyVisibility));
+        OnPropertyChanged(nameof(TestPlanBindingSummary));
+        CommandManager.InvalidateRequerySuggested();
+        ScheduleSettingsAutoSave();
+    }
+
+    private void SetEditorExtenderSelection(OtaTestPlanTargetRule rule)
+    {
+        var ids = rule.DeviceIds
+            .Concat(rule.ExtenderTargets.Select(target => target.ExtenderId))
+            .Select(id => uint.TryParse(id, out var parsed) ? parsed : 0U)
+            .Where(id => id > 0)
+            .ToHashSet();
+        _suppressSelectionSync = true;
+        foreach (var extender in DiscoveredExtenders) extender.IsSelected = ids.Contains(extender.ExtenderId);
+        _suppressSelectionSync = false;
+        OnExtenderSelectionChanged();
+    }
+
+    private static string GetTaskTypeName(DeviceType deviceType) => deviceType switch
+    {
+        DeviceType.Gateway => GatewayTaskType,
+        DeviceType.Sync => SyncTaskType,
+        DeviceType.Async => AsyncTaskType,
+        DeviceType.Node => NodeTaskType,
+        _ => deviceType.ToString(),
+    };
+
+    private async Task<string?> ValidateTestPlanEnvironmentAsync(
+        OtaTestPlanTemplate plan,
+        CancellationToken cancellationToken)
+    {
+        if (!_mqtt.IsConnected) return "MQTT 尚未连接。";
+        if (plan.Mode != (IsEcoLink ? OtaMode.EcoLink : OtaMode.Traditional)) return "测试计划绑定的协议模式与当前模式不一致。";
+        if (!string.Equals(plan.GatewayId, GatewayId, StringComparison.Ordinal)) return $"测试计划绑定 Gateway {plan.GatewayId}，当前 Gateway 为 {GatewayId}。";
+        if (plan.Mode == OtaMode.EcoLink && !IsGatewayTopicSubscribed) return "尚未订阅当前 Gateway 的固定上行主题。";
+        if (_runner?.HasActiveTask == true) return "当前已有活动 OTA 任务。";
+        if (plan.Items.Any(item => item.Mode != plan.Mode || !string.Equals(item.GatewayId, plan.GatewayId, StringComparison.Ordinal)))
+        {
+            return "测试计划中存在其他协议模式或 Gateway 的任务。";
+        }
+        if (plan.Mode == OtaMode.Traditional && plan.Items.Any(item => item.TargetRule.ResolutionMode == OtaTargetResolutionMode.DynamicMatch))
+        {
+            return "传统模式没有设备发现接口，不能使用动态匹配目标。";
+        }
+        await Task.CompletedTask;
+        return null;
+    }
+
+    private async Task<PlanDiscoverySnapshot> DiscoverTestPlanSnapshotAsync(
+        IReadOnlyList<OtaTestPlanItemTemplate> items,
+        CancellationToken cancellationToken)
+    {
+        if (items.Count == 0 || items[0].Mode == OtaMode.Traditional)
+        {
+            return PlanDiscoverySnapshot.Empty;
+        }
+        GatewayBasicInfo? gateway = null;
+        if (items.Any(item => item.DeviceType == DeviceType.Gateway))
+        {
+            gateway = await _deviceDiscovery.QueryGatewayBasicInfoAsync(GatewayId, cancellationToken);
+        }
+        IReadOnlyList<GatewayExtenderInfo> extenders = [];
+        if (items.Any(item => item.DeviceType != DeviceType.Gateway))
+        {
+            extenders = await _deviceDiscovery.DiscoverExtendersAsync(GatewayId, cancellationToken);
+        }
+        var extenderIds = extenders.Select(item => item.ExtenderId).ToArray();
+        var asyncScope = ResolvePlanExtenderScope(items.Where(item => item.DeviceType == DeviceType.Async), extenderIds);
+        var nodeScope = ResolvePlanExtenderScope(items.Where(item => item.DeviceType == DeviceType.Node), extenderIds);
+        IReadOnlyList<ExtenderStatusDiscoveryResult> statuses = asyncScope.Count == 0
+            ? []
+            : await _deviceDiscovery.DiscoverExtenderStatusesAsync(GatewayId, asyncScope, cancellationToken);
+        IReadOnlyList<ExtenderNodeDiscoveryResult> nodes = nodeScope.Count == 0
+            ? []
+            : await _deviceDiscovery.DiscoverNodesAsync(GatewayId, nodeScope, cancellationToken);
+        return new PlanDiscoverySnapshot(
+            gateway,
+            extenders.ToDictionary(item => item.ExtenderId),
+            statuses.ToDictionary(item => item.ExtenderId),
+            nodes.ToDictionary(item => item.ExtenderId));
+    }
+
+    private static IReadOnlyList<uint> ResolvePlanExtenderScope(
+        IEnumerable<OtaTestPlanItemTemplate> items,
+        IReadOnlyList<uint> allExtenderIds)
+    {
+        var result = new HashSet<uint>();
+        foreach (var item in items)
+        {
+            var configured = item.TargetRule.DeviceIds
+                .Concat(item.TargetRule.ExtenderTargets.Select(target => target.ExtenderId))
+                .Select(value => uint.TryParse(value, out var parsed) ? parsed : 0U)
+                .Where(value => value > 0)
+                .ToArray();
+            if (item.TargetRule.ResolutionMode == OtaTargetResolutionMode.DynamicMatch && configured.Length == 0)
+            {
+                result.UnionWith(allExtenderIds);
+            }
+            else
+            {
+                result.UnionWith(configured);
+            }
+        }
+        return result.Order().ToArray();
+    }
+
+    private async Task<OtaTestPlanPreparedItem> PrepareTestPlanItemAsync(
+        OtaTestPlanItemTemplate item,
+        PlanDiscoverySnapshot snapshot,
+        Func<OtaTestPlanPatchReference, CancellationToken, Task<PreparedPlanPatch>> preparePatch,
+        CancellationToken cancellationToken,
+        PreparedPlanTargets? projectedTargets = null)
+    {
+        var resolved = projectedTargets ?? ResolveTestPlanTargets(item, snapshot);
+        var primaryPatch = await preparePatch(item.ForwardPatch, cancellationToken);
+        var primaryIsFullImage = string.Equals(Path.GetExtension(primaryPatch.Path), ".bin", StringComparison.OrdinalIgnoreCase);
+        if (primaryIsFullImage && item.DeviceType != DeviceType.Gateway)
+        {
+            throw new InvalidOperationException("完整固件镜像仅允许用于 Gateway 升级。 ");
+        }
+        ValidatePlanPatchDirection(item, item.ForwardPatch, primaryPatch.Manifest, primaryPatch.FullImageIdentity, item.OldVersion, item.NewVersion);
+        var primaryTask = CreatePreparedOtaTask(item, resolved, primaryPatch, item.OldVersion, item.NewVersion);
+        OtaTask? reverseTask = null;
+        if (item.ExecutionKind == OtaTestPlanExecutionKind.Cycle)
+        {
+            if (item.ReversePatch is null) throw new InvalidOperationException("循环任务缺少反向 Patch。 ");
+            var reversePatch = await preparePatch(item.ReversePatch, cancellationToken);
+            var reverseIsFullImage = string.Equals(Path.GetExtension(reversePatch.Path), ".bin", StringComparison.OrdinalIgnoreCase);
+            if (primaryIsFullImage != reverseIsFullImage)
+            {
+                throw new InvalidOperationException("循环任务的正向和反向文件必须同为完整镜像或同为差分 Patch。 ");
+            }
+            ValidatePlanPatchDirection(item, item.ReversePatch, reversePatch.Manifest, reversePatch.FullImageIdentity, item.NewVersion, item.OldVersion);
+            reverseTask = CreatePreparedOtaTask(item, resolved, reversePatch, item.NewVersion, item.OldVersion);
+        }
+        var profile = item.Mode == OtaMode.EcoLink
+            ? (IOtaProtocolProfile)new EcoLinkProtocolProfile()
+            : new TraditionalProtocolProfile();
+        var validation = OtaTaskValidator.Validate(primaryTask, profile);
+        if (!validation.IsValid) throw new InvalidOperationException(validation.Message);
+        if (reverseTask is not null)
+        {
+            validation = OtaTaskValidator.Validate(reverseTask, profile);
+            if (!validation.IsValid) throw new InvalidOperationException(validation.Message);
+        }
+        return new OtaTestPlanPreparedItem(item, primaryTask, reverseTask);
+    }
+
+    private PreparedPlanTargets ResolveTestPlanTargets(OtaTestPlanItemTemplate item, PlanDiscoverySnapshot snapshot)
+    {
+        if (!byte.TryParse(item.OldVersion, out var expectedVersion))
+        {
+            throw new InvalidOperationException("任务起始版本无效。 ");
+        }
+        if (item.Mode == OtaMode.Traditional)
+        {
+            var target = item.DeviceType == DeviceType.Gateway || item.TargetRule.DeviceIds.Count == 0
+                ? OtaTaskTarget.Broadcast()
+                : OtaTaskTarget.Specified(item.TargetRule.DeviceIds.ToArray());
+            return new PreparedPlanTargets(target, item.TargetRule.ExtenderTargets, item.TargetRule.NodeType);
+        }
+        if (item.DeviceType == DeviceType.Gateway)
+        {
+            if (snapshot.Gateway is null) throw new InvalidOperationException("未查询到 Gateway 基础信息。 ");
+            if (snapshot.Gateway.SoftwareVersion != expectedVersion)
+            {
+                throw new InvalidOperationException($"Gateway 当前版本 {ProtocolVersionFormatter.FormatWithPrefix(snapshot.Gateway.SoftwareVersion)}，任务要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}。 ");
+            }
+            return new PreparedPlanTargets(OtaTaskTarget.Broadcast(), [], null);
+        }
+        if (item.DeviceType is DeviceType.Sync or DeviceType.Async)
+        {
+            var configuredIds = item.TargetRule.DeviceIds
+                .Select(value => uint.TryParse(value, out var parsed) ? parsed : 0U)
+                .Where(value => value > 0)
+                .Distinct()
+                .ToArray();
+            var candidateIds = item.TargetRule.ResolutionMode == OtaTargetResolutionMode.DynamicMatch && configuredIds.Length == 0
+                ? snapshot.Extenders.Keys.Order().ToArray()
+                : configuredIds;
+            if (candidateIds.Length == 0) throw new InvalidOperationException("任务没有可解析的 Extender 范围。 ");
+            var resolvedIds = new List<string>();
+            var failures = new List<string>();
+            foreach (var id in candidateIds)
+            {
+                if (!snapshot.Extenders.TryGetValue(id, out var extender))
+                {
+                    failures.Add($"Extender {ProtocolIdentifierFormatter.Format(id)} 未在线");
+                    continue;
+                }
+                byte? actualVersion = item.DeviceType == DeviceType.Sync ? extender.SoftwareVersion : null;
+                if (item.DeviceType == DeviceType.Async)
+                {
+                    if (!snapshot.Statuses.TryGetValue(id, out var statusResult) || !statusResult.IsSuccess)
+                    {
+                        failures.Add($"Extender {ProtocolIdentifierFormatter.Format(id)} 异步状态查询失败：{statusResult?.Error ?? "无响应"}");
+                        continue;
+                    }
+                    actualVersion = statusResult.Status!.AsyncSoftwareVersion;
+                }
+                if (actualVersion != expectedVersion)
+                {
+                    if (item.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds)
+                    {
+                        failures.Add($"Extender {ProtocolIdentifierFormatter.Format(id)} 当前版本 {(actualVersion.HasValue ? ProtocolVersionFormatter.FormatWithPrefix(actualVersion.Value) : "未知")}，任务要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}");
+                    }
+                    continue;
+                }
+                resolvedIds.Add(id.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+            if (failures.Count > 0 && item.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds)
+            {
+                throw new InvalidOperationException(string.Join("；", failures));
+            }
+            if (resolvedIds.Count == 0) throw new InvalidOperationException("没有在线且版本匹配的 Extender。 ");
+            return new PreparedPlanTargets(OtaTaskTarget.Specified(resolvedIds.ToArray()), [], null);
+        }
+
+        var nodeType = item.TargetRule.NodeType ?? throw new InvalidOperationException("Node 任务缺少 Node 类型。 ");
+        var configuredExtenders = item.TargetRule.ExtenderTargets
+            .Select(target => uint.TryParse(target.ExtenderId, out var parsed) ? parsed : 0U)
+            .Where(value => value > 0)
+            .Distinct()
+            .ToArray();
+        var extenderScope = item.TargetRule.ResolutionMode == OtaTargetResolutionMode.DynamicMatch && configuredExtenders.Length == 0
+            ? snapshot.Nodes.Keys.Order().ToArray()
+            : configuredExtenders;
+        if (extenderScope.Length == 0) throw new InvalidOperationException("Node 任务没有 Extender 范围。 ");
+        var resolvedTargets = new List<OtaExtenderTarget>();
+        var nodeFailures = new List<string>();
+        foreach (var extenderId in extenderScope)
+        {
+            if (!snapshot.Nodes.TryGetValue(extenderId, out var group) || !group.IsSuccess)
+            {
+                nodeFailures.Add($"Extender {ProtocolIdentifierFormatter.Format(extenderId)} Node 查询失败：{group?.Error ?? "无响应"}");
+                continue;
+            }
+            IReadOnlyList<GatewayNodeInfo> nodes;
+            if (item.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds)
+            {
+                var configured = item.TargetRule.ExtenderTargets.First(target => uint.Parse(target.ExtenderId) == extenderId).NodeIds
+                    .Select(value => ushort.TryParse(value, out var parsed) ? parsed : (ushort)0)
+                    .Where(value => value > 0)
+                    .ToHashSet();
+                nodes = group.Nodes.Where(node => configured.Contains(node.NodeId)).ToArray();
+                if (nodes.Count != configured.Count)
+                {
+                    nodeFailures.Add($"Extender {ProtocolIdentifierFormatter.Format(extenderId)} 部分固定 Node 已离线");
+                    continue;
+                }
+                var invalid = nodes.FirstOrDefault(node => !node.IsOnline ||
+                    node.NodeType != nodeType ||
+                    node.SoftwareVersion is 0 or byte.MaxValue ||
+                    node.SoftwareVersion != expectedVersion ||
+                    node.Rssi < MinimumNodeRssi);
+                if (invalid is not null)
+                {
+                    nodeFailures.Add($"Node {ProtocolIdentifierFormatter.Format(invalid.NodeId)} 类型、版本或 RSSI 不满足条件");
+                    continue;
+                }
+            }
+            else
+            {
+                nodes = group.Nodes.Where(node =>
+                    node.IsOnline &&
+                    node.NodeType == nodeType &&
+                    node.SoftwareVersion is not (0 or byte.MaxValue) &&
+                    node.SoftwareVersion == expectedVersion &&
+                    node.Rssi >= MinimumNodeRssi).ToArray();
+                if (nodes.Count == 0)
+                {
+                    nodeFailures.Add($"Extender {ProtocolIdentifierFormatter.Format(extenderId)} 没有满足类型、版本和 RSSI 条件的在线 Node");
+                    continue;
+                }
+            }
+            resolvedTargets.Add(new OtaExtenderTarget(
+                extenderId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                nodes.Select(node => node.NodeId.ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray()));
+        }
+        if (nodeFailures.Count > 0)
+        {
+            throw new InvalidOperationException(string.Join("；", nodeFailures));
+        }
+        if (resolvedTargets.Count == 0) throw new InvalidOperationException("没有满足条件的 Node。 ");
+        return new PreparedPlanTargets(
+            OtaTaskTarget.Specified(resolvedTargets.SelectMany(target => target.NodeIds).ToArray()),
+            resolvedTargets,
+            nodeType);
+    }
+
+    private OtaTask CreatePreparedOtaTask(
+        OtaTestPlanItemTemplate item,
+        PreparedPlanTargets targets,
+        PreparedPlanPatch patch,
+        string oldVersion,
+        string newVersion)
+        => new()
+        {
+            Mode = item.Mode,
+            DeviceType = item.DeviceType,
+            GatewayId = item.GatewayId,
+            Target = targets.Target,
+            ExtenderTargets = targets.ExtenderTargets,
+            NodeType = targets.NodeType,
+            OldVersion = oldVersion,
+            NewVersion = newVersion,
+            PatchPath = patch.Path,
+            PatchUrl = patch.Url,
+            PatchMd5 = patch.Metadata.Md5,
+            PatchSha256 = patch.Metadata.Sha256,
+            ProtocolProfileId = item.Mode == OtaMode.EcoLink ? "ecolink-gateway" : "traditional",
+            ProtocolProfileVersion = "1.0",
+        };
+
+    private void ValidatePlanPatchDirection(
+        OtaTestPlanItemTemplate item,
+        OtaTestPlanPatchReference reference,
+        PackageManifest? manifest,
+        FirmwareIdentity? fullImageIdentity,
+        string oldVersion,
+        string newVersion)
+    {
+        if (!byte.TryParse(oldVersion, out var oldByte) || !byte.TryParse(newVersion, out var newByte))
+        {
+            throw new InvalidOperationException("任务版本方向无效。");
+        }
+        if (fullImageIdentity is not null)
+        {
+            if (item.DeviceType != DeviceType.Gateway ||
+                fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway ||
+                !fullImageIdentity.Version.HasValue ||
+                fullImageIdentity.Version.Value != newByte ||
+                reference.FullImageTargetVersion.HasValue &&
+                reference.FullImageTargetVersion.Value != fullImageIdentity.Version.Value)
+            {
+                throw new InvalidOperationException(
+                    $"完整镜像 {Path.GetFileName(reference.FilePath)} 的内嵌目标版本与任务方向不一致。");
+            }
+            return;
+        }
+        if (item.Mode != OtaMode.EcoLink || manifest is null) return;
+        if (
+            manifest.OtaDeviceType != item.DeviceType ||
+            manifest.OldVersion != oldByte ||
+            manifest.NewVersion != newByte ||
+            reference.ManifestDeviceTypeCode != manifest.DeviceTypeCode ||
+            reference.ManifestOldVersion != manifest.OldVersion ||
+            reference.ManifestNewVersion != manifest.NewVersion)
+        {
+            throw new InvalidOperationException($"Patch {Path.GetFileName(reference.FilePath)} 的类型或版本方向与保存时不一致。 ");
+        }
+        if (item.DeviceType == DeviceType.Node && manifest.DeviceTypeCode != item.TargetRule.NodeType)
+        {
+            throw new InvalidOperationException("Patch Node 类型与计划目标类型不一致。 ");
+        }
+    }
+
+    private async Task<OtaTestPlanOperationResult> ExecutePreparedTestPlanItemAsync(
+        OtaTestPlanPreparedItem prepared,
+        CancellationToken cancellationToken)
+    {
+        if (_runner?.HasActiveTask == true)
+        {
+            return new(OtaTaskState.Failed, "已有活动 OTA 任务。 ");
+        }
+        if (_runner is not null) await _runner.DisposeAsync();
+        var profile = prepared.Template.Mode == OtaMode.EcoLink
+            ? (IOtaProtocolProfile)new EcoLinkProtocolProfile()
+            : new TraditionalProtocolProfile();
+        _runner = new OtaTaskRunner(_mqtt, profile, _reportStore);
+        _runner.Updated += OnTaskUpdated;
+        _runner.MessagePublished += OnMqttMessagePublished;
+        _gatewayStatusDeviceType = prepared.PrimaryTask.DeviceType;
+        GatewayStages.Clear();
+        GatewaySubtasks.Clear();
+        GatewayPackageSourceSummary = string.Empty;
+        _activePreparedPlanItem = prepared;
+        _activeReport = new OtaReport
+        {
+            Task = prepared.PrimaryTask,
+            LogAnalysisConclusion = prepared.Template.Mode == OtaMode.Traditional ? "日志解析不支持" : null,
+        };
+        _reportTaskIds.Clear();
+        _reportTaskIds.Add(prepared.PrimaryTask.Id);
+        if (prepared.ReverseTask is not null) _reportTaskIds.Add(prepared.ReverseTask.Id);
+        OtaTaskResult result;
+        var startedAt = DateTimeOffset.Now;
+        var completedSteps = 0;
+        var successfulSteps = 0;
+        if (prepared.Template.ExecutionKind == OtaTestPlanExecutionKind.Cycle)
+        {
+            if (prepared.ReverseTask is null) return new(OtaTaskState.Failed, "循环任务缺少反向运行时任务。 ");
+            var cycle = new OtaCycleRunner();
+            cycle.StepStarting += (_, update) => RunOnUi(() =>
+            {
+                var task = update.IsForward ? prepared.PrimaryTask : prepared.ReverseTask;
+                UpgradeRunModeText = $"计划 {prepared.Template.Order}/{TestPlanItems.Count} · 循环 {update.Round}/{prepared.Template.CycleRounds}";
+                UpgradeRunProgressText = $"{prepared.Template.Name} · {(update.IsForward ? "正向" : "反向")} {task.OldVersion} to {task.NewVersion}";
+            });
+            cycle.Updated += (_, update) =>
+            {
+                completedSteps++;
+                if (update.Result.State == OtaTaskState.Succeeded) successfulSteps++;
+            };
+            var launcher = new VersionVerifyingTaskLauncher(
+                _runner,
+                task => VerifyTaskVersionWithRetryAsync(task, cancellationToken));
+            result = await cycle.RunAsync(
+                new OtaCycleDefinition(
+                    prepared.PrimaryTask,
+                    prepared.ReverseTask,
+                    prepared.Template.CycleRounds,
+                    prepared.Template.CycleInterval),
+                launcher,
+                cancellationToken);
+            _activeReport.Cycle = new OtaCycleSummary(
+                prepared.Template.CycleRounds,
+                completedSteps,
+                successfulSteps,
+                DateTimeOffset.Now - startedAt,
+                result.Message);
+        }
+        else
+        {
+            UpgradeRunModeText = $"计划 {prepared.Template.Order}/{TestPlanItems.Count} · 单次";
+            UpgradeRunProgressText = $"{prepared.Template.Name} · 正在执行";
+            result = await _runner.StartAndWaitAsync(prepared.PrimaryTask, cancellationToken);
+        }
+        if (!IsTerminalState(_activeReport.FinalState))
+        {
+            _activeReport.AddUpdate(new OtaExecutionUpdate(
+                prepared.PrimaryTask.Id,
+                result.State,
+                result.Message,
+                result.OccurredAt));
+        }
+        var childReport = _activeReport;
+        await SaveReportAsync(childReport, autoExport: true);
+        if (_activeTestPlanReport?.Items.FirstOrDefault(item => item.Template.Id == prepared.Template.Id) is { } planItemReport)
+        {
+            planItemReport.ChildReportIds = [childReport.Id];
+        }
+        return new(result.State, result.Message, [childReport.Id]);
+    }
+
+    private async Task<OtaTestPlanOperationResult> VerifyPreparedTestPlanItemAsync(
+        OtaTestPlanPreparedItem prepared,
+        CancellationToken cancellationToken)
+    {
+        var expectedTask = prepared.Template.ExecutionKind == OtaTestPlanExecutionKind.Cycle
+            ? prepared.ReverseTask ?? prepared.PrimaryTask
+            : prepared.PrimaryTask;
+        return await VerifyTaskVersionWithRetryAsync(expectedTask, cancellationToken);
+    }
+
+    private async Task<OtaTestPlanOperationResult> VerifyTaskVersionWithRetryAsync(
+        OtaTask task,
+        CancellationToken cancellationToken)
+    {
+        if (task.Mode == OtaMode.Traditional)
+        {
+            return new(OtaTaskState.Succeeded, "传统模式无主动版本查询接口；已校验 Gateway 最终成功结果中的设备类型及版本方向。 ");
+        }
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(PlanVersionVerificationTimeoutSeconds);
+        var lastReason = "设备尚未重新上线。";
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                var mismatch = await QueryTaskVersionMismatchAsync(task, cancellationToken);
+                if (mismatch is null)
+                {
+                    return new(OtaTaskState.Succeeded, $"版本复查通过：全部目标已升级到 {ProtocolVersionFormatter.FormatRaw(task.NewVersion)}。 ");
+                }
+                lastReason = mismatch;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                lastReason = exception.Message;
+            }
+            var remaining = deadline - DateTimeOffset.UtcNow;
+            if (remaining <= TimeSpan.Zero) break;
+            await Task.Delay(
+                TimeSpan.FromSeconds(Math.Min(PlanVersionVerificationIntervalSeconds, remaining.TotalSeconds)),
+                cancellationToken);
+        }
+        return new(OtaTaskState.TimedOut, $"版本复查超时：{lastReason}");
+    }
+
+    private async Task<string?> QueryTaskVersionMismatchAsync(OtaTask task, CancellationToken cancellationToken)
+    {
+        if (!byte.TryParse(task.NewVersion, out var expectedVersion)) return "任务目标版本无效。";
+        if (task.DeviceType == DeviceType.Gateway)
+        {
+            var gateway = await _deviceDiscovery.QueryGatewayBasicInfoAsync(task.GatewayId, cancellationToken);
+            return gateway.SoftwareVersion == expectedVersion
+                ? null
+                : $"Gateway 当前版本 {ProtocolVersionFormatter.FormatWithPrefix(gateway.SoftwareVersion)}。";
+        }
+        var extenders = await _deviceDiscovery.DiscoverExtendersAsync(task.GatewayId, cancellationToken);
+        var requestedExtenderIds = task.DeviceType == DeviceType.Node
+            ? task.ExtenderTargets.Select(target => uint.Parse(target.ExtenderId)).ToArray()
+            : task.Target.DeviceIds.Select(id => uint.Parse(id)).ToArray();
+        if (task.DeviceType == DeviceType.Sync)
+        {
+            var versions = extenders.Where(item => requestedExtenderIds.Contains(item.ExtenderId)).ToDictionary(item => item.ExtenderId, item => item.SoftwareVersion);
+            var mismatch = requestedExtenderIds.Where(id => !versions.TryGetValue(id, out var version) || version != expectedVersion).ToArray();
+            return mismatch.Length == 0 ? null : $"Sync 未达到目标版本：{string.Join("、", mismatch.Select(ProtocolIdentifierFormatter.Format))}";
+        }
+        if (task.DeviceType == DeviceType.Async)
+        {
+            var statuses = await _deviceDiscovery.DiscoverExtenderStatusesAsync(task.GatewayId, requestedExtenderIds, cancellationToken);
+            var mismatch = statuses.Where(item => !item.IsSuccess || item.Status!.AsyncSoftwareVersion != expectedVersion).Select(item => item.ExtenderId).ToArray();
+            var missing = requestedExtenderIds.Except(statuses.Select(item => item.ExtenderId));
+            mismatch = mismatch.Concat(missing).Distinct().ToArray();
+            return mismatch.Length == 0 ? null : $"Async 未达到目标版本：{string.Join("、", mismatch.Select(ProtocolIdentifierFormatter.Format))}";
+        }
+        var groups = await _deviceDiscovery.DiscoverNodesAsync(task.GatewayId, requestedExtenderIds, cancellationToken);
+        var mismatches = new List<string>();
+        foreach (var target in task.ExtenderTargets)
+        {
+            var extenderId = uint.Parse(target.ExtenderId);
+            var group = groups.FirstOrDefault(item => item.ExtenderId == extenderId);
+            foreach (var nodeIdText in target.NodeIds)
+            {
+                var nodeId = ushort.Parse(nodeIdText);
+                var node = group?.Nodes.FirstOrDefault(item => item.NodeId == nodeId);
+                if (node is null || !node.IsOnline || node.SoftwareVersion != expectedVersion)
+                {
+                    mismatches.Add($"{ProtocolIdentifierFormatter.Format(extenderId)}/{ProtocolIdentifierFormatter.Format(nodeId)}");
+                }
+            }
+        }
+        return mismatches.Count == 0 ? null : $"Node 未达到目标版本：{string.Join("、", mismatches)}";
+    }
+
+    private void OnTestPlanUpdated(object? sender, OtaTestPlanItemUpdate update)
+    {
+        RunOnUi(() =>
+        {
+            var item = TestPlanItems.FirstOrDefault(value => value.Id == update.ItemId);
+            item?.Apply(update.State, update.Message, update.OccurredAt);
+            if (_activeTestPlanReport?.Items.FirstOrDefault(value => value.Template.Id == update.ItemId) is { } reportItem)
+            {
+                reportItem.State = update.State;
+                reportItem.Message = update.Message;
+                if (update.State == OtaTestPlanItemState.Running && reportItem.StartedAt is null) reportItem.StartedAt = update.OccurredAt;
+                if (update.State is OtaTestPlanItemState.Succeeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut or OtaTestPlanItemState.Cancelled or OtaTestPlanItemState.Skipped)
+                {
+                    reportItem.FinishedAt = update.OccurredAt;
+                }
+            }
+            UpgradeRunModeText = $"任务队列 {update.Index}/{update.Total}";
+            UpgradeRunProgressText = $"{item?.Name ?? "任务"} · {update.Message}";
+            OnPropertyChanged(nameof(TestPlanProgressSummary));
+        });
+    }
+
+    private async Task SaveAndExportTestPlanReportAsync(OtaTestPlanReport report)
+    {
+        await _reportStore.SavePlanAsync(report);
+        var directory = GetReportOutputDirectory();
+        var baseName = $"ota-plan-report-{report.Id:N}";
+        await OtaTestPlanReportExporter.ExportJsonAsync(report, Path.Combine(directory, baseName + ".json"));
+        await OtaTestPlanReportExporter.ExportHtmlAsync(report, Path.Combine(directory, baseName + ".html"));
+    }
+
+    private sealed class ViewModelTestPlanExecutor : IOtaTestPlanItemExecutor
+    {
+        private readonly MainWindowViewModel _owner;
+        private readonly OtaTestPlanTemplate _plan;
+        private readonly HashSet<string> _wholePlanVerifiedPatches = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, WholePlanProjectedTargetState> _wholePlanProjectedTargets = new(StringComparer.Ordinal);
+        private PlanDiscoverySnapshot? _sharedSnapshot;
+
+        public ViewModelTestPlanExecutor(MainWindowViewModel owner, OtaTestPlanTemplate plan)
+        {
+            _owner = owner;
+            _plan = plan;
+        }
+
+        public async Task<string?> ValidatePlanAsync(OtaTestPlanTemplate plan, CancellationToken cancellationToken)
+        {
+            var error = await _owner.ValidateTestPlanEnvironmentAsync(plan, cancellationToken);
+            if (error is not null) return error;
+            _wholePlanProjectedTargets.Clear();
+            _sharedSnapshot = await _owner.DiscoverTestPlanSnapshotAsync(plan.Items, cancellationToken);
+            return null;
+        }
+
+        public async Task<OtaTestPlanPreparationResult> PreflightAsync(
+            OtaTestPlanItemTemplate item,
+            bool justInTime,
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                var snapshot = justInTime
+                    ? await _owner.DiscoverTestPlanSnapshotAsync([item], cancellationToken)
+                    : _sharedSnapshot ?? await _owner.DiscoverTestPlanSnapshotAsync(_plan.Items, cancellationToken);
+                PreparedPlanTargets? projectedTargets = null;
+                var scopeKey = OtaTestPlanVersionProjection.BuildTargetScopeKey(item);
+                if (!justInTime && _wholePlanProjectedTargets.TryGetValue(scopeKey, out var projectedState))
+                {
+                    if (!byte.TryParse(item.OldVersion, out var expectedVersion))
+                    {
+                        throw new InvalidOperationException($"任务“{item.Name}”的起始版本无效。");
+                    }
+                    if (projectedState.Version != expectedVersion)
+                    {
+                        throw new InvalidOperationException(
+                            $"前序兼容任务完成后预计版本 {ProtocolVersionFormatter.FormatWithPrefix(projectedState.Version)}，" +
+                            $"当前任务要求起始版本 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}。");
+                    }
+                    projectedTargets = projectedState.Targets;
+                }
+                var prepared = await _owner.PrepareTestPlanItemAsync(
+                    item,
+                    snapshot,
+                    (patch, token) => PreparePatchAsync(patch, justInTime, token),
+                    cancellationToken,
+                    projectedTargets);
+                if (!justInTime)
+                {
+                    _wholePlanProjectedTargets[scopeKey] = new WholePlanProjectedTargetState(
+                        OtaTestPlanVersionProjection.GetProjectedEndVersion(item),
+                        new PreparedPlanTargets(
+                            prepared.PrimaryTask.Target,
+                            prepared.PrimaryTask.ExtenderTargets,
+                            prepared.PrimaryTask.NodeType));
+                }
+                var resolvedTargets = FormatTargets(prepared);
+                RunOnUi(() => _owner.TestPlanItems
+                    .FirstOrDefault(value => value.Id == item.Id)
+                    ?.SetResolvedTargetCount(resolvedTargets.Count));
+                if (justInTime && _owner._activeTestPlanReport?.Items.FirstOrDefault(value => value.Template.Id == item.Id) is { } reportItem)
+                {
+                    reportItem.ResolvedTargets = resolvedTargets;
+                }
+                return OtaTestPlanPreparationResult.Success(
+                    prepared,
+                    justInTime
+                        ? $"实时校验通过，已固化 {resolvedTargets.Count} 个目标。"
+                        : $"计划预检通过，匹配 {resolvedTargets.Count} 个目标。 ");
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                return OtaTestPlanPreparationResult.Failure(exception.Message);
+            }
+        }
+
+        public Task<OtaTestPlanOperationResult> ExecuteAsync(OtaTestPlanPreparedItem item, CancellationToken cancellationToken)
+            => _owner.ExecutePreparedTestPlanItemAsync(item, cancellationToken);
+
+        public Task<OtaTestPlanOperationResult> VerifyAsync(OtaTestPlanPreparedItem item, CancellationToken cancellationToken)
+            => _owner.VerifyPreparedTestPlanItemAsync(item, cancellationToken);
+
+        public Task CancelAsync(CancellationToken cancellationToken)
+            => _owner._runner is null ? Task.CompletedTask : _owner._runner.CancelAndNotifyGatewayAsync(cancellationToken);
+
+        private async Task<PreparedPlanPatch> PreparePatchAsync(
+            OtaTestPlanPatchReference reference,
+            bool justInTime,
+            CancellationToken cancellationToken)
+        {
+            if (!File.Exists(reference.FilePath)) throw new FileNotFoundException("Patch 文件不存在。", reference.FilePath);
+            var metadata = await PatchMetadata.FromFileAsync(reference.FilePath, cancellationToken);
+            if (!metadata.Md5.Equals(reference.Md5, StringComparison.OrdinalIgnoreCase) ||
+                !metadata.Sha256.Equals(reference.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException($"Patch {Path.GetFileName(reference.FilePath)} 内容自保存计划后已变化。 ");
+            }
+            PackageManifest? manifest = null;
+            FirmwareIdentity? fullImageIdentity = null;
+            if (string.Equals(Path.GetExtension(reference.FilePath), ".bin", StringComparison.OrdinalIgnoreCase))
+            {
+                fullImageIdentity = await FirmwareIdentityReader.ReadAsync(reference.FilePath, cancellationToken);
+                if (fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway || !fullImageIdentity.Version.HasValue)
+                {
+                    throw new InvalidOperationException("Gateway 完整镜像没有有效的类型或目标版本。");
+                }
+            }
+            else if (_plan.Mode == OtaMode.EcoLink)
+            {
+                manifest = await PackageManifestImporter.LoadAndValidateAsync(reference.FilePath, cancellationToken);
+            }
+            var capacity = PatchCapacityPolicy.Check(
+                manifest?.OtaDeviceType ?? DeviceType.Gateway,
+                metadata.Length,
+                _owner.GetPatchCapacityLimits());
+            if (!capacity.IsAllowed) throw new InvalidOperationException(capacity.Message);
+            var url = _owner.GetPatchDownloadUrl(reference.FilePath);
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) throw new InvalidOperationException("没有可用的 Patch HTTP 地址。 ");
+            var cacheKey = $"{reference.FilePath}|{metadata.Md5}";
+            if (justInTime || _wholePlanVerifiedPatches.Add(cacheKey))
+            {
+                var verification = await HttpFileVerifier.VerifyAsync(uri, metadata.Length, metadata.Md5, verifyFullMd5: true, cancellationToken);
+                if (!verification.IsSuccess) throw new InvalidOperationException($"Patch HTTP 校验失败：{verification.Message}");
+            }
+            return new PreparedPlanPatch(reference.FilePath, url, metadata, manifest, fullImageIdentity);
+        }
+
+        private static IReadOnlyList<string> FormatTargets(OtaTestPlanPreparedItem item)
+            => item.PrimaryTask.DeviceType switch
+            {
+                DeviceType.Gateway => [$"Gateway {item.PrimaryTask.GatewayId}"],
+                DeviceType.Node => item.PrimaryTask.ExtenderTargets.SelectMany(target => target.NodeIds.Select(node =>
+                    $"{FormatIdentifier(target.ExtenderId)}/{FormatIdentifier(node)}")).ToArray(),
+                _ => item.PrimaryTask.Target.DeviceIds.Select(FormatIdentifier).ToArray(),
+            };
+
+        private static string FormatIdentifier(string value)
+            => uint.TryParse(value, out var parsed) ? ProtocolIdentifierFormatter.Format(parsed) : value;
+
+        private sealed record WholePlanProjectedTargetState(byte Version, PreparedPlanTargets Targets);
+    }
+
+    private sealed class VersionVerifyingTaskLauncher(
+        IOtaTaskLauncher inner,
+        Func<OtaTask, Task<OtaTestPlanOperationResult>> verifyAsync) : IOtaTaskLauncher
+    {
+        public async Task<OtaTaskResult> StartAndWaitAsync(OtaTask task, CancellationToken cancellationToken)
+        {
+            var result = await inner.StartAndWaitAsync(task, cancellationToken);
+            if (result.State != OtaTaskState.Succeeded) return result;
+            var verification = await verifyAsync(task);
+            return new OtaTaskResult(verification.State, verification.Message, DateTimeOffset.Now);
+        }
+    }
+
+    private sealed record PlanDiscoverySnapshot(
+        GatewayBasicInfo? Gateway,
+        IReadOnlyDictionary<uint, GatewayExtenderInfo> Extenders,
+        IReadOnlyDictionary<uint, ExtenderStatusDiscoveryResult> Statuses,
+        IReadOnlyDictionary<uint, ExtenderNodeDiscoveryResult> Nodes)
+    {
+        public static PlanDiscoverySnapshot Empty { get; } = new(
+            null,
+            new Dictionary<uint, GatewayExtenderInfo>(),
+            new Dictionary<uint, ExtenderStatusDiscoveryResult>(),
+            new Dictionary<uint, ExtenderNodeDiscoveryResult>());
+    }
+
+    private sealed record PreparedPlanTargets(
+        OtaTaskTarget Target,
+        IReadOnlyList<OtaExtenderTarget> ExtenderTargets,
+        int? NodeType);
+
+    private sealed record PreparedPlanPatch(
+        string Path,
+        string Url,
+        PatchMetadata Metadata,
+        PackageManifest? Manifest,
+        FirmwareIdentity? FullImageIdentity);
 
     private static void RunOnUi(Action action)
     {
@@ -6232,7 +8375,9 @@ public enum PatchDialogAction
     Publish,
     StartUpgrade,
     StartCycleUpgrade,
+    AddTestPlanItem,
     CancelTask,
+    CancelTestPlan,
     CloseApplication,
 }
 
@@ -6307,6 +8452,193 @@ public sealed class PatchSelection : ObservableObject
     public string Md5Display => $"MD5：{Md5}";
 }
 
+public sealed class OtaTestPlanItemViewItem : ObservableObject
+{
+    private OtaTestPlanItemTemplate _template;
+    private OtaTestPlanItemState _state = OtaTestPlanItemState.NeedsReview;
+    private string _message = "模板参数已保存，执行前需要重新预检。";
+    private int? _resolvedTargetCount;
+    private DateTimeOffset? _startedAt;
+    private DateTimeOffset? _finishedAt;
+
+    public OtaTestPlanItemViewItem(OtaTestPlanItemTemplate template) => _template = template;
+
+    public OtaTestPlanItemTemplate Template => _template;
+
+    public Guid Id => _template.Id;
+
+    public int Order => _template.Order;
+
+    public string OrderDisplay => Order.ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+
+    public string Name => _template.Name;
+
+    public string DeviceType => _template.DeviceType switch
+    {
+        OtaTool.Core.Models.DeviceType.Gateway => "Gateway",
+        OtaTool.Core.Models.DeviceType.Sync => "Sync",
+        OtaTool.Core.Models.DeviceType.Async => "Async",
+        OtaTool.Core.Models.DeviceType.Node => "Node",
+        _ => _template.DeviceType.ToString(),
+    };
+
+    public string ExecutionKind => _template.ExecutionKind switch
+    {
+        OtaTestPlanExecutionKind.Forward => "正向单次",
+        OtaTestPlanExecutionKind.Reverse => "反向单次",
+        OtaTestPlanExecutionKind.Cycle => $"循环 {_template.CycleRounds} 轮",
+        _ => _template.ExecutionKind.ToString(),
+    };
+
+    public string Version => $"{ProtocolVersionFormatter.FormatRaw(_template.OldVersion)} to {ProtocolVersionFormatter.FormatRaw(_template.NewVersion)}";
+
+    public string TargetMode => _template.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds ? "固定目标" : "动态匹配";
+
+    public string TargetSummary
+    {
+        get
+        {
+            if (_resolvedTargetCount.HasValue) return $"{_resolvedTargetCount.Value} 个实际目标";
+            if (_template.DeviceType == OtaTool.Core.Models.DeviceType.Gateway) return $"Gateway {_template.GatewayId}";
+            if (_template.TargetRule.ResolutionMode == OtaTargetResolutionMode.DynamicMatch)
+            {
+                var scope = _template.TargetRule.DeviceIds.Count + _template.TargetRule.ExtenderTargets.Count;
+                return scope == 0 ? "全部在线范围" : $"{scope} 个 Extender 范围";
+            }
+            var count = _template.DeviceType == OtaTool.Core.Models.DeviceType.Node
+                ? _template.TargetRule.ExtenderTargets.Sum(target => target.NodeIds.Count)
+                : _template.TargetRule.DeviceIds.Count;
+            return $"{count} 个固定目标";
+        }
+    }
+
+    public string PatchName => Path.GetFileName(_template.ForwardPatch.FilePath);
+
+    public OtaTestPlanItemState State => _state;
+
+    public string StateDisplay => _state switch
+    {
+        OtaTestPlanItemState.NeedsReview => "待复核",
+        OtaTestPlanItemState.Preflighting => "预检中",
+        OtaTestPlanItemState.Ready => "就绪",
+        OtaTestPlanItemState.Running => "执行中",
+        OtaTestPlanItemState.Verifying => "版本复查中",
+        OtaTestPlanItemState.Succeeded => "成功",
+        OtaTestPlanItemState.Failed => "失败",
+        OtaTestPlanItemState.TimedOut => "超时",
+        OtaTestPlanItemState.Cancelled => "已取消",
+        OtaTestPlanItemState.Skipped => "已跳过",
+        _ => _state.ToString(),
+    };
+
+    public string StateColor => StatusColor.For(_state.ToString());
+
+    public string Message => _message;
+
+    public string FailureDetail => _state switch
+    {
+        OtaTestPlanItemState.Failed => $"失败原因：{_message}",
+        OtaTestPlanItemState.TimedOut => $"超时原因：{_message}",
+        OtaTestPlanItemState.Cancelled => $"取消原因：{_message}",
+        OtaTestPlanItemState.Skipped => $"跳过原因：{_message}",
+        _ => string.Empty,
+    };
+
+    public Visibility FailureDetailVisibility => string.IsNullOrEmpty(FailureDetail)
+        ? Visibility.Collapsed
+        : Visibility.Visible;
+
+    public string StartedAtText => _startedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "—";
+
+    public string FinishedAtText => _finishedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") ?? "—";
+
+    public string DurationText
+    {
+        get
+        {
+            if (_startedAt is null) return "—";
+            var finishedAt = _finishedAt ?? DateTimeOffset.Now;
+            return DurationDisplay.Format((long)Math.Max(0, (finishedAt - _startedAt.Value).TotalMilliseconds));
+        }
+    }
+
+    public void Apply(OtaTestPlanItemState state, string message, DateTimeOffset? occurredAt = null)
+    {
+        var timestamp = occurredAt ?? DateTimeOffset.Now;
+        var timingChanged = false;
+        if (_startedAt is null &&
+            (state == OtaTestPlanItemState.Running ||
+             (state == OtaTestPlanItemState.Preflighting && message.Contains("任务开始前", StringComparison.Ordinal))))
+        {
+            _startedAt = timestamp;
+            timingChanged = true;
+        }
+        if (state is OtaTestPlanItemState.Succeeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut or OtaTestPlanItemState.Cancelled or OtaTestPlanItemState.Skipped)
+        {
+            _startedAt ??= timestamp;
+            _finishedAt = timestamp;
+            timingChanged = true;
+        }
+        _state = state;
+        _message = message;
+        OnPropertyChanged(nameof(State));
+        OnPropertyChanged(nameof(StateDisplay));
+        OnPropertyChanged(nameof(StateColor));
+        OnPropertyChanged(nameof(Message));
+        OnPropertyChanged(nameof(FailureDetail));
+        OnPropertyChanged(nameof(FailureDetailVisibility));
+        if (timingChanged) NotifyTimingChanged();
+    }
+
+    public void RefreshTiming()
+    {
+        if (_startedAt is not null && _finishedAt is null) OnPropertyChanged(nameof(DurationText));
+    }
+
+    public void SetResolvedTargetCount(int count)
+    {
+        _resolvedTargetCount = Math.Max(0, count);
+        OnPropertyChanged(nameof(TargetSummary));
+    }
+
+    public void ResetForReview()
+    {
+        _resolvedTargetCount = null;
+        _startedAt = null;
+        _finishedAt = null;
+        OnPropertyChanged(nameof(TargetSummary));
+        NotifyTimingChanged();
+        Apply(OtaTestPlanItemState.NeedsReview, "执行前需要重新预检。 ");
+    }
+
+    public void ReplaceTemplate(OtaTestPlanItemTemplate template)
+    {
+        _template = template;
+        _resolvedTargetCount = null;
+        _startedAt = null;
+        _finishedAt = null;
+        OnPropertyChanged(nameof(Template));
+        OnPropertyChanged(nameof(Id));
+        OnPropertyChanged(nameof(Order));
+        OnPropertyChanged(nameof(OrderDisplay));
+        OnPropertyChanged(nameof(Name));
+        OnPropertyChanged(nameof(DeviceType));
+        OnPropertyChanged(nameof(ExecutionKind));
+        OnPropertyChanged(nameof(Version));
+        OnPropertyChanged(nameof(TargetMode));
+        OnPropertyChanged(nameof(TargetSummary));
+        OnPropertyChanged(nameof(PatchName));
+        NotifyTimingChanged();
+    }
+
+    private void NotifyTimingChanged()
+    {
+        OnPropertyChanged(nameof(StartedAtText));
+        OnPropertyChanged(nameof(FinishedAtText));
+        OnPropertyChanged(nameof(DurationText));
+    }
+}
+
 public sealed class ReportListItem
 {
     public ReportListItem(OtaReport report, string outputDirectory)
@@ -6317,32 +8649,50 @@ public sealed class ReportListItem
         StageTimeline = BuildStageTimeline(report);
     }
 
-    public OtaReport Report { get; }
-
-    public Guid Id => Report.Id;
-
-    public string StartedAt => Report.StartedAt.ToString("yyyy-MM-dd HH:mm:ss");
-
-    public string Mode => Report.Task.Mode == OtaMode.EcoLink ? "EcoLink" : "传统模式";
-
-    public string DeviceType => Report.Task.DeviceType switch
+    public ReportListItem(OtaTestPlanReport report, string outputDirectory)
     {
-        OtaTool.Core.Models.DeviceType.Gateway => "Gateway",
-        OtaTool.Core.Models.DeviceType.Sync => "Sync",
-        OtaTool.Core.Models.DeviceType.Async => "Async",
-        OtaTool.Core.Models.DeviceType.Node => "Node",
-        _ => Report.Task.DeviceType.ToString(),
-    };
+        PlanReport = report;
+        HtmlPath = Path.Combine(outputDirectory, $"ota-plan-report-{report.Id:N}.html");
+        JsonPath = Path.Combine(outputDirectory, $"ota-plan-report-{report.Id:N}.json");
+        StageTimeline = BuildStageTimeline(report);
+    }
 
-    public string State => OtaStatusDisplay.State(Report.FinalState.ToString());
+    public OtaReport? Report { get; }
 
-    public string Version => $"{Report.Task.OldVersion} → {Report.Task.NewVersion}";
+    public OtaTestPlanReport? PlanReport { get; }
 
-    public string Duration => Report.FinishedAt.HasValue
-        ? $"{Math.Max(0, (Report.FinishedAt.Value - Report.StartedAt).TotalSeconds):N1} 秒"
+    public Guid Id => Report?.Id ?? PlanReport!.Id;
+
+    public DateTimeOffset StartedAtValue => Report?.StartedAt ?? PlanReport!.StartedAt;
+
+    public string StartedAt => StartedAtValue.ToString("yyyy-MM-dd HH:mm:ss");
+
+    public string Mode => (Report?.Task.Mode ?? PlanReport!.Plan.Mode) == OtaMode.EcoLink ? "EcoLink" : "传统模式";
+
+    public string DeviceType => PlanReport is not null
+        ? $"测试计划 · {PlanReport.Items.Count} 项"
+        : Report!.Task.DeviceType switch
+        {
+            OtaTool.Core.Models.DeviceType.Gateway => "Gateway",
+            OtaTool.Core.Models.DeviceType.Sync => "Sync",
+            OtaTool.Core.Models.DeviceType.Async => "Async",
+            OtaTool.Core.Models.DeviceType.Node => "Node",
+            _ => Report.Task.DeviceType.ToString(),
+        };
+
+    public string State => OtaStatusDisplay.State(Report?.FinalState.ToString() ?? PlanReport!.FinalState.ToString());
+
+    public string Version => PlanReport is not null
+        ? $"成功 {PlanReport.SucceededCount} / 失败 {PlanReport.FailedCount} / 跳过 {PlanReport.SkippedCount}"
+        : $"{Report!.Task.OldVersion} → {Report.Task.NewVersion}";
+
+    public string Duration => (Report?.FinishedAt ?? PlanReport!.FinishedAt) is { } finishedAt
+        ? $"{Math.Max(0, (finishedAt - StartedAtValue).TotalSeconds):N1} 秒"
         : "未结束";
 
-    public string ArchiveButtonText => Report.IsArchived ? "恢复报告" : "归档报告";
+    public bool IsArchived => Report?.IsArchived ?? PlanReport!.IsArchived;
+
+    public string ArchiveButtonText => IsArchived ? "恢复报告" : "归档报告";
 
     public string HtmlPath { get; }
 
@@ -6392,6 +8742,20 @@ public sealed class ReportListItem
                     StatusColor.For(state));
             }).ToArray();
     }
+
+    private static IReadOnlyList<ReportStageSummaryItem> BuildStageTimeline(OtaTestPlanReport report)
+        => report.Items
+            .OrderBy(item => item.Template.Order)
+            .Select(item => new ReportStageSummaryItem(
+                $"{item.Template.Order:D2} · {item.Template.Name}",
+                OtaStatusDisplay.State(item.State.ToString()),
+                item.StartedAt?.ToString("HH:mm:ss.fff") ?? "未开始",
+                item.StartedAt.HasValue && item.FinishedAt.HasValue
+                    ? DurationDisplay.Format((long)Math.Max(0, (item.FinishedAt.Value - item.StartedAt.Value).TotalMilliseconds))
+                    : "—",
+                item.Message,
+                StatusColor.For(item.State.ToString())))
+            .ToArray();
 }
 
 public sealed record ReportStageSummaryItem(
@@ -6568,7 +8932,7 @@ public sealed class SelectableNodeItem : ObservableObject
         // 兼容旧设置中的 RSSI 绝对值；新协议解析结果已经统一为 -200～0 dBm。
         Rssi = node.Rssi > 0 ? -Math.Min(node.Rssi, 200) : Math.Max(node.Rssi, -200);
         SequenceNumber = sequenceNumber;
-        _isSelected = isSelected;
+        _isSelected = isSelected && IsOnline;
         _selectionChanged = selectionChanged;
     }
 
@@ -6600,6 +8964,12 @@ public sealed class SelectableNodeItem : ObservableObject
 
     public int Rssi { get; }
 
+    public bool IsOnline => Rssi < 0;
+
+    public string OnlineStatusText => IsOnline ? "在线" : "离线";
+
+    public string OnlineStatusForeground => IsOnline ? "#159E68" : "#8B96A8";
+
     public bool CanSelect
     {
         get => _canSelect;
@@ -6615,12 +8985,15 @@ public sealed class SelectableNodeItem : ObservableObject
     public void ApplyEligibility(int? requiredType, byte? requiredVersion)
     {
         var hasKnownVersion = ProtocolVersionFormatter.IsKnown(SoftwareVersion);
-        CanSelect = hasKnownVersion &&
+        CanSelect = IsOnline &&
+                    hasKnownVersion &&
                     (!requiredType.HasValue || NodeType == requiredType.Value) &&
                     (!requiredVersion.HasValue || SoftwareVersion == requiredVersion.Value);
         SelectionHint = CanSelect
             ? string.Empty
-            : !hasKnownVersion
+            : !IsOnline
+                ? "Node 当前离线，不能升级"
+                : !hasKnownVersion
                 ? "协议返回未知版本，不能升级"
                 : $"Patch 要求类型 {NodeTypeCatalog.Format(requiredType ?? NodeType)}、底版本 {ProtocolVersionFormatter.FormatWithPrefix(requiredVersion ?? SoftwareVersion)}";
         if (!CanSelect && IsSelected) IsSelected = false;
@@ -6659,7 +9032,7 @@ public sealed class NodeGroupItem : ObservableObject
                 index + 1,
                 selectedNodeIds.Contains(node.NodeId),
                 selectionChanged)));
-        VisibleNodes = Nodes.ToArray();
+        VisibleNodes = SortByOnlineState(Nodes);
     }
 
     public uint ExtenderId { get; }
@@ -6682,26 +9055,26 @@ public sealed class NodeGroupItem : ObservableObject
 
     public int VisibleNodeCount => VisibleNodes.Count;
 
-    public string NodeCountSummary => VisibleNodeCount == TotalNodeCount && TotalNodeCount == ReportedCount
-        ? $"共 {TotalNodeCount} 个在线 Node"
-        : $"在线显示 {VisibleNodeCount} / 协议返回 {ReportedCount}";
+    public int VisibleOnlineNodeCount => VisibleNodes.Count(node => node.IsOnline);
 
-    public void SetFilter(string searchText, int? filterType)
+    public int VisibleOfflineNodeCount => VisibleNodes.Count - VisibleOnlineNodeCount;
+
+    public string NodeCountSummary => $"在线 {VisibleOnlineNodeCount} / 离线 {VisibleOfflineNodeCount} / 协议返回 {ReportedCount}";
+
+    public void SetFilter(string searchText)
     {
         foreach (var node in Nodes) node.ApplyEligibility(null, null);
         var query = Nodes.AsEnumerable();
-        if (filterType.HasValue)
-        {
-            query = query.Where(node => node.NodeType == filterType.Value);
-        }
         if (!string.IsNullOrWhiteSpace(searchText))
         {
             query = query.Where(node => node.NodeId.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 .Contains(searchText.Trim(), StringComparison.OrdinalIgnoreCase));
         }
-        VisibleNodes = query.ToArray();
+        VisibleNodes = SortByOnlineState(query);
         OnPropertyChanged(nameof(VisibleNodes));
         OnPropertyChanged(nameof(VisibleNodeCount));
+        OnPropertyChanged(nameof(VisibleOnlineNodeCount));
+        OnPropertyChanged(nameof(VisibleOfflineNodeCount));
         OnPropertyChanged(nameof(NodeCountSummary));
     }
 
@@ -6710,6 +9083,12 @@ public sealed class NodeGroupItem : ObservableObject
         foreach (var node in Nodes) node.IsSelected = selected && node.CanSelect;
         _selectionChanged();
     }
+
+    private static IReadOnlyList<SelectableNodeItem> SortByOnlineState(IEnumerable<SelectableNodeItem> nodes)
+        => nodes
+            .OrderByDescending(node => node.IsOnline)
+            .ThenBy(node => node.NodeId)
+            .ToArray();
 }
 
 public sealed record NodeTypeOption(int Value, string Name)
@@ -6865,9 +9244,15 @@ public sealed record GatewayStageViewItem(
     string LocalStartTime,
     double? ProgressPercent,
     bool FreezeRunningAnimation,
-    bool UsesCachedPackage)
+    bool UsesCachedPackage,
+    string TaskState)
 {
-    public string StateColor => StatusColor.For(State);
+    private string EffectiveState => State.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) &&
+                                     IsTerminalTaskState(TaskState)
+        ? TaskState
+        : State;
+
+    public string StateColor => StatusColor.For(EffectiveState);
 
     public string DisplayDuration => DurationDisplay.Format(DurationMs);
 
@@ -6875,27 +9260,33 @@ public sealed record GatewayStageViewItem(
 
     public string Direction => OtaStagePresentation.Direction(Stage, DeviceType, UsesCachedPackage);
 
-    public string DisplayState => OtaStatusDisplay.State(State);
+    public string DisplayState => OtaStatusDisplay.State(EffectiveState);
 
     public string DisplayReason => OtaStatusDisplay.Reason(Reason);
 
     public string ProgressText => ProgressPercent.HasValue ? $"{ProgressPercent.Value:0.0}%" : string.Empty;
 
-    public Visibility ProgressVisibility => State.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) && ProgressPercent.HasValue
+    public Visibility ProgressVisibility => EffectiveState.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) && ProgressPercent.HasValue
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    public Visibility IndeterminateProgressVisibility => State.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) &&
+    public Visibility IndeterminateProgressVisibility => EffectiveState.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) &&
         !ProgressPercent.HasValue &&
         !FreezeRunningAnimation
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    public Visibility PausedProgressVisibility => State.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) &&
+    public Visibility PausedProgressVisibility => EffectiveState.Equals("RUNNING", StringComparison.OrdinalIgnoreCase) &&
         !ProgressPercent.HasValue &&
         FreezeRunningAnimation
         ? Visibility.Visible
         : Visibility.Collapsed;
+
+    private static bool IsTerminalTaskState(string state)
+        => state.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase) ||
+           state.Equals("FAILED", StringComparison.OrdinalIgnoreCase) ||
+           state.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase) ||
+           state.Equals("TIMEDOUT", StringComparison.OrdinalIgnoreCase);
 }
 
 public sealed record GatewaySubtaskViewItem(
@@ -7089,6 +9480,11 @@ public static class OtaStatusDisplay
         "CANCELLED" => "已取消",
         "TIMEDOUT" => "已超时",
         "RUNNING" or "ACTIVE" => "进行中",
+        "PREFLIGHTING" => "预检中",
+        "VERIFYING" => "版本复查中",
+        "READY" => "就绪",
+        "NEEDSREVIEW" => "待复核",
+        "DRAFT" => "草稿",
         "PENDING" => "等待中",
         "UNKNOWN" => "未知状态",
         _ => "未识别状态",
@@ -7117,7 +9513,9 @@ public static class StatusColor
     {
         "SUCCESS" or "SUCCEEDED" or "COMPLETED" or "PASSED" or "SKIPPED" => "#168A55",
         "FAILED" or "CANCELLED" or "TIMEDOUT" => "#C73A3A",
-        "RUNNING" or "ACTIVE" => "#2C68D8",
+        "RUNNING" or "ACTIVE" or "PREFLIGHTING" or "VERIFYING" => "#2C68D8",
+        "READY" => "#168A55",
+        "NEEDSREVIEW" or "DRAFT" => "#B87500",
         "PENDING" => "#8A96A8",
         _ => "#65758B",
     };

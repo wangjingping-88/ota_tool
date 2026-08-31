@@ -93,7 +93,10 @@ public sealed record GatewayNodeInfo(ushort NodeId, byte NodeType, byte Software
 public sealed record GatewayNodeList(
     uint ExtenderId,
     ushort AsyncAddress,
-    IReadOnlyList<GatewayNodeInfo> Nodes);
+    IReadOnlyList<GatewayNodeInfo> Nodes,
+    byte PageIndex,
+    byte PageCount,
+    byte TotalCount);
 
 public sealed record GatewayExtenderStatus(
     uint ExtenderId,
@@ -465,20 +468,34 @@ public static class OtaMessageCodec
             return false;
         }
 
-        if (data.Length < 1)
+        if (data.Length < 4)
         {
-            protocolError = "0x0F 设备列表缺少设备数量字段。";
+            protocolError = "0x0F 设备列表缺少4字节分页头。";
             return false;
         }
         var count = data[0];
+        var pageIndex = data[1];
+        var pageCount = data[2];
+        var totalCount = data[3];
         if (count > MaxNodeListItemCount)
         {
             protocolError = $"0x0F 设备列表包含 {count} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
             return false;
         }
-        if (data.Length != 1 + count * 5)
+        if (pageCount is 0 or > 6 || pageIndex >= pageCount)
         {
-            protocolError = $"0x0F 数据结构长度错误：声明 {count} 项，实际数据 {data.Length} 字节。";
+            protocolError = $"0x0F 分页信息非法：页号 {pageIndex}，总页数 {pageCount}。";
+            return false;
+        }
+        if ((totalCount == 0 && (count != 0 || pageIndex != 0 || pageCount != 1)) ||
+            (totalCount > 0 && (count == 0 || totalCount < count || totalCount > pageCount * MaxNodeListItemCount)))
+        {
+            protocolError = $"0x0F 数量信息非法：本页 {count}，总数 {totalCount}，总页数 {pageCount}。";
+            return false;
+        }
+        if (data.Length != 4 + count * 5)
+        {
+            protocolError = $"0x0F 数据结构长度错误：分页头声明 {count} 项，实际数据 {data.Length} 字节。";
             return false;
         }
 
@@ -486,7 +503,7 @@ public static class OtaMessageCodec
         var nodeIds = new HashSet<ushort>();
         for (var index = 0; index < count; index++)
         {
-            var offset = 1 + index * 5;
+            var offset = 4 + index * 5;
             var nodeType = data[offset];
             var nodeId = (ushort)(data[offset + 1] | data[offset + 2] << 8);
             var rssiAbsolute = data[offset + 3];
@@ -513,7 +530,7 @@ public static class OtaMessageCodec
                 rssiAbsolute == 0 ? 0 : -rssiAbsolute));
         }
 
-        nodeList = new GatewayNodeList(sourceExtenderId, asyncAddress, nodes);
+        nodeList = new GatewayNodeList(sourceExtenderId, asyncAddress, nodes, pageIndex, pageCount, totalCount);
         return true;
     }
 

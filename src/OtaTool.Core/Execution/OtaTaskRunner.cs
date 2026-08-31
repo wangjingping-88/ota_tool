@@ -497,8 +497,15 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
     private static bool IsMatchingFinalResult(ActiveTask active, GatewayFinalResult final)
     {
         if (final.Sequence != 0 && final.Sequence != active.TaskSequence) return false;
-        return string.IsNullOrWhiteSpace(final.DeviceType)
-            || final.DeviceType.Equals(OtaMessageCodec.ToProtocolDeviceType(active.Task.DeviceType), StringComparison.OrdinalIgnoreCase);
+        if (!byte.TryParse(active.Task.OldVersion, out var expectedOldVersion) ||
+            !byte.TryParse(active.Task.NewVersion, out var expectedNewVersion) ||
+            final.OldVersion != expectedOldVersion ||
+            final.NewVersion != expectedNewVersion)
+        {
+            return false;
+        }
+        return string.IsNullOrWhiteSpace(final.DeviceType) ||
+            final.DeviceType.Equals(OtaMessageCodec.ToProtocolDeviceType(active.Task.DeviceType), StringComparison.OrdinalIgnoreCase);
     }
 
     private static string? ValidateDispatch(OtaTask task)
