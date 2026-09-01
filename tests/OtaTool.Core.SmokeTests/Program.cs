@@ -244,6 +244,10 @@ static void VerifyWindowChromeWorkAreaBounds()
         && viewModel.Contains("\"升级任务仍在进行\"", StringComparison.Ordinal)
         && viewModel.Contains("\"仍然关闭\"", StringComparison.Ordinal),
         "存在活动升级或循环等待时，关闭窗口必须使用应用内统一样式确认弹框。 ");
+    Assert(source.Contains("IsGlobalLogAtEnd(textBox) && eventArgs.Delta < 0", StringComparison.Ordinal)
+        && source.Contains("if (IsGlobalLogAtEnd(textBox)) _followGlobalLog = true;", StringComparison.Ordinal)
+        && xaml.Contains("滚回底部自动跟随", StringComparison.Ordinal),
+        "全局日志在底部向下滚动时应保持自动跟随，向上离开后暂停，滚回底部后自动恢复跟随。");
 }
 
 static void VerifyDefaultExternalMqttSettings()
@@ -326,6 +330,9 @@ static void VerifyStatusPanelLayout()
     Assert(viewModel.Contains("SelectedPlanTargetMode = \"动态匹配\";", StringComparison.Ordinal)
         && viewModel.Contains("Name = $\"{typeName} {directionName} {ProtocolVersionFormatter.FormatRaw(oldVersion)} to {ProtocolVersionFormatter.FormatRaw(newVersion)}\"", StringComparison.Ordinal),
         "新队列任务应默认使用动态目标，并根据升级类型、方向和版本自动生成名称。");
+    Assert(viewModel.Contains("ValidateSelectedNodeTypesForPlanItem", StringComparison.Ordinal)
+        && viewModel.Contains("已勾选的 Node 类型与当前任务不一致", StringComparison.Ordinal),
+        "添加 Node 任务时必须阻止异类型节点混入当前勾选结果，并列出具体设备。");
     Assert(xaml.Contains("<Grid Margin=\"0,20,0,0\">", StringComparison.Ordinal)
         && xaml.Contains("<ColumnDefinition Width=\"1.25*\" />", StringComparison.Ordinal)
         && xaml.Contains("Text=\"升级类型\"", StringComparison.Ordinal)
@@ -361,9 +368,18 @@ static void VerifyStatusPanelLayout()
         "状态机必须显示队列任务进度、整项启动时间、结束时间和不随循环轮次重置的总耗时。");
     Assert(xaml.Contains("Text=\"{Binding DisplayDuration}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding DisplayElapsed, Mode=OneWay}\"", StringComparison.Ordinal)
+        && viewModel.Contains("$\"{hours}小时{minutes}分{seconds}秒{remainderMilliseconds}毫秒\"", StringComparison.Ordinal)
         && viewModel.Contains("$\"{minutes}分{seconds}秒{remainderMilliseconds}毫秒\"", StringComparison.Ordinal)
+        && viewModel.Contains("$\"{seconds}秒{remainderMilliseconds}毫秒\"", StringComparison.Ordinal)
+        && viewModel.Contains("$\"{remainderMilliseconds}毫秒\"", StringComparison.Ordinal)
         && !viewModel.Contains(" min ", StringComparison.Ordinal),
-        "阶段和子任务耗时应使用无空格的中文分、秒、毫秒组合格式。");
+        "阶段、子任务和队列总耗时应按实际时长自适应显示小时、分钟、秒和毫秒。");
+    Assert(viewModel.Contains("类型不匹配", StringComparison.Ordinal)
+        && viewModel.Contains("版本不匹配", StringComparison.Ordinal)
+        && viewModel.Contains("RSSI 不达标", StringComparison.Ordinal)
+        && viewModel.Contains("离线 Node", StringComparison.Ordinal)
+        && viewModel.Contains("未返回固定 Node", StringComparison.Ordinal),
+        "Node 起始条件校验失败时必须按 Extender 和 Node 明确列出类型、版本、RSSI、离线或缺失项。");
     Assert(viewModel.Contains("PatchDialogAction.CancelTask", StringComparison.Ordinal)
         && viewModel.Contains("PatchDialogAction.CancelTestPlan", StringComparison.Ordinal)
         && viewModel.Contains("\"确认取消任务\"", StringComparison.Ordinal)
@@ -1621,6 +1637,16 @@ static async Task VerifyDeviceDiscoveryAsync()
            currentPagedNodes.PageCount == 1 && currentPagedNodes.TotalCount == 10 &&
            currentPagedNodes.Nodes.Count == 10 && currentPagedNodes.Nodes.Count(node => node.IsOnline) == 5,
         "实机 54 字节分页 0x0F 响应应解析为10个节点，其中5个在线。");
+    const string legacyNonPagedNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51912,\"fmt\":\"hex\",\"data\":\"E91100C8CA10030587B33B01053B123A0105A4ED3B01\"}]";
+    Assert(!OtaMessageCodec.TryParseAsyncNodeListResponse(
+               legacyNonPagedNodeResponse,
+               out _,
+               out var legacySource,
+               out var legacyFormatError) &&
+           legacySource == 51912 &&
+           legacyFormatError?.Contains("旧版非分页格式", StringComparison.Ordinal) == true &&
+           legacyFormatError.Contains("仅支持带4字节分页头的新版格式", StringComparison.Ordinal),
+        "旧版非分页 0x0F 响应不得静默兼容，必须提示升级 Extender 固件。");
     var ackAndNodeArray = $"[{{\"cmd\":100,\"src\":704027,\"uc\":{{\"res\":\"suc\"}}}},{CreateUserDataResponse(101, documentedNodeFrameHex, "hex")}]";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(ackAndNodeArray, out var mixedArrayNodes) &&
            mixedArrayNodes?.Nodes.Count == 2,
@@ -2124,6 +2150,19 @@ static async Task VerifyCycleRunnerAsync(string workspace)
         new StaticTaskLauncher(OtaTaskState.Succeeded));
     Assert(zeroDelayCalls == 0, "循环间隔为 0 秒时必须保持原有连续执行逻辑。");
 
+    var failedRunner = new OtaCycleRunner();
+    var failedResult = await failedRunner.RunAsync(
+        new OtaCycleDefinition(forward, reverse, 100),
+        new SequenceTaskLauncher(
+            OtaTaskState.Succeeded,
+            OtaTaskState.Succeeded,
+            OtaTaskState.Succeeded,
+            OtaTaskState.Failed));
+    Assert(
+        failedResult.State == OtaTaskState.Failed
+        && failedResult.Message.Contains("循环第 2/100 轮 · 反向失败", StringComparison.Ordinal),
+        "循环升级失败结果必须明确标出失败轮次、总轮数和方向。");
+
     var waitStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     var cancellableRunner = new OtaCycleRunner(async (_, cancellationToken) =>
     {
@@ -2565,6 +2604,17 @@ sealed class StaticTaskLauncher(OtaTaskState state) : IOtaTaskLauncher
     public Task<OtaTaskResult> StartAndWaitAsync(OtaTask task, CancellationToken cancellationToken)
     {
         CallCount++;
+        return Task.FromResult(new OtaTaskResult(state, state.ToString(), DateTimeOffset.Now));
+    }
+}
+
+sealed class SequenceTaskLauncher(params OtaTaskState[] states) : IOtaTaskLauncher
+{
+    private readonly Queue<OtaTaskState> _states = new(states);
+
+    public Task<OtaTaskResult> StartAndWaitAsync(OtaTask task, CancellationToken cancellationToken)
+    {
+        var state = _states.Count > 0 ? _states.Dequeue() : OtaTaskState.Succeeded;
         return Task.FromResult(new OtaTaskResult(state, state.ToString(), DateTimeOffset.Now));
     }
 }

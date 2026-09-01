@@ -468,20 +468,32 @@ public static class OtaMessageCodec
             return false;
         }
 
-        if (data.Length < 4)
+        if (data.Length == 0)
         {
-            protocolError = "0x0F 设备列表缺少4字节分页头。";
+            protocolError = "0x0F 设备列表缺少数量信息。";
             return false;
         }
         var count = data[0];
-        var pageIndex = data[1];
-        var pageCount = data[2];
-        var totalCount = data[3];
         if (count > MaxNodeListItemCount)
         {
             protocolError = $"0x0F 设备列表包含 {count} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
             return false;
         }
+
+        if (data.Length == 1 + count * 5)
+        {
+            protocolError = "0x0F 使用旧版非分页格式，当前工具仅支持带4字节分页头的新版格式，请升级 Extender 固件。";
+            return false;
+        }
+        if (data.Length < 4)
+        {
+            protocolError = "0x0F 设备列表缺少4字节分页头。";
+            return false;
+        }
+        var pageIndex = data[1];
+        var pageCount = data[2];
+        var totalCount = data[3];
+        const int nodeDataOffset = 4;
         if (pageCount is 0 or > 6 || pageIndex >= pageCount)
         {
             protocolError = $"0x0F 分页信息非法：页号 {pageIndex}，总页数 {pageCount}。";
@@ -493,7 +505,7 @@ public static class OtaMessageCodec
             protocolError = $"0x0F 数量信息非法：本页 {count}，总数 {totalCount}，总页数 {pageCount}。";
             return false;
         }
-        if (data.Length != 4 + count * 5)
+        if (data.Length != nodeDataOffset + count * 5)
         {
             protocolError = $"0x0F 数据结构长度错误：分页头声明 {count} 项，实际数据 {data.Length} 字节。";
             return false;
@@ -503,7 +515,7 @@ public static class OtaMessageCodec
         var nodeIds = new HashSet<ushort>();
         for (var index = 0; index < count; index++)
         {
-            var offset = 4 + index * 5;
+            var offset = nodeDataOffset + index * 5;
             var nodeType = data[offset];
             var nodeId = (ushort)(data[offset + 1] | data[offset + 2] << 8);
             var rssiAbsolute = data[offset + 3];

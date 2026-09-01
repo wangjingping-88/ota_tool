@@ -146,7 +146,7 @@ public partial class MainWindow : Window
         FooterBorder.Padding = isCompact ? new Thickness(18, 0, 18, 0) : new Thickness(28, 0, 28, 0);
         GlobalLogTitleText.Text = isCompact
             ? "全局运行日志（最近 300 行）"
-            : "全局运行日志（仅保留本次运行最近 300 行，滚轮可暂停查看，按 Enter 回到最新日志）";
+            : "全局运行日志（仅保留本次运行最近 300 行，向上滚动暂停，滚回底部自动跟随）";
         GlobalLogTextBox.Visibility = _isGlobalLogMinimized ? Visibility.Collapsed : Visibility.Visible;
         GlobalLogMinimizeButton.Content = _isGlobalLogMinimized ? "展开" : "最小化";
         GlobalLogMinimizeButton.ToolTip = _isGlobalLogMinimized ? "展开全局运行日志" : "收起全局运行日志";
@@ -273,7 +273,19 @@ public partial class MainWindow : Window
 
     private void OnGlobalLogPreviewMouseWheel(object sender, MouseWheelEventArgs eventArgs)
     {
+        if (sender is not TextBox textBox) return;
+
+        if (IsGlobalLogAtEnd(textBox) && eventArgs.Delta < 0)
+        {
+            _followGlobalLog = true;
+            return;
+        }
+
         _followGlobalLog = false;
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (IsGlobalLogAtEnd(textBox)) _followGlobalLog = true;
+        }, DispatcherPriority.Background);
     }
 
     private void OnGlobalLogTextChanged(object sender, TextChangedEventArgs eventArgs)
@@ -340,6 +352,14 @@ public partial class MainWindow : Window
         }
 
         return null;
+    }
+
+    private static bool IsGlobalLogAtEnd(TextBox textBox)
+    {
+        var scrollViewer = FindVisualChild<ScrollViewer>(textBox);
+        return scrollViewer is null ||
+               scrollViewer.ScrollableHeight <= 0 ||
+               scrollViewer.VerticalOffset >= scrollViewer.ScrollableHeight - 1;
     }
 
     private static IntPtr WindowProcedure(

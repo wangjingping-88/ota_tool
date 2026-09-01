@@ -7293,6 +7293,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             throw new InvalidOperationException("Patch 版本方向无效。");
         }
+        if (deviceType == DeviceType.Node &&
+            ValidateSelectedNodeTypesForPlanItem(targetRule.NodeType ?? NodeType) is { } selectedNodeError)
+        {
+            throw new InvalidOperationException(selectedNodeError);
+        }
         ValidatePatchSelectionForPlan(primaryPatch, deviceType, oldVersionByte, newVersionByte);
         if (reversePatch is not null)
         {
@@ -7347,6 +7352,31 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             throw new InvalidOperationException(targetError);
         }
         return template;
+    }
+
+    private string? ValidateSelectedNodeTypesForPlanItem(int expectedNodeType)
+    {
+        var selectedExtenderIds = DiscoveredExtenders
+            .Where(extender => extender.IsSelected)
+            .Select(extender => extender.ExtenderId)
+            .ToHashSet();
+        var mismatches = DiscoveredNodeGroups
+            .Where(group => selectedExtenderIds.Count == 0 || selectedExtenderIds.Contains(group.ExtenderId))
+            .SelectMany(group => group.Nodes
+                .Where(node => node.IsSelected && node.NodeType != expectedNodeType)
+                .Select(node => new
+                {
+                    group.ExtenderId,
+                    node.NodeId,
+                    node.NodeType,
+                }))
+            .ToArray();
+        if (mismatches.Length == 0) return null;
+
+        var details = string.Join("；", mismatches.Select(item =>
+            $"Extender {ProtocolIdentifierFormatter.Format(item.ExtenderId)} / " +
+            $"Node {ProtocolIdentifierFormatter.Format(item.NodeId)} 当前为 {NodeTypeCatalog.Format(item.NodeType)}"));
+        return $"已勾选的 Node 类型与当前任务不一致：{details}；当前任务要求 {NodeTypeCatalog.Format(expectedNodeType)}。";
     }
 
     private void ValidatePatchSelectionForPlan(
@@ -7453,18 +7483,78 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         foreach (var group in groups)
         {
             var hasMatch = group.Nodes.Any(node =>
+                node.IsOnline &&
                 node.NodeType == nodeType &&
                 ProtocolVersionFormatter.IsKnown(node.SoftwareVersion) &&
                 node.SoftwareVersion == expectedVersion &&
                 node.Rssi >= MinimumNodeRssi);
             if (!hasMatch)
             {
-                failures.Add($"Extender {ProtocolIdentifierFormatter.Format(group.ExtenderId)} 没有在线且类型、版本、RSSI 均匹配的 Node");
+                failures.Add(DescribeNodeEligibilityFailures(
+                    group.ExtenderId,
+                    group.Nodes.Select(node => new GatewayNodeInfo(
+                        node.NodeId,
+                        node.NodeType,
+                        node.SoftwareVersion,
+                        node.Rssi)).ToArray(),
+                    nodeType,
+                    expectedVersion));
             }
         }
         return failures.Count == 0
             ? null
             : $"Node 任务不满足起始条件：{string.Join("；", failures.Take(3))}。";
+    }
+
+    private string DescribeNodeEligibilityFailures(
+        uint extenderId,
+        IReadOnlyCollection<GatewayNodeInfo> nodes,
+        int expectedNodeType,
+        byte expectedVersion)
+    {
+        var prefix = $"Extender {ProtocolIdentifierFormatter.Format(extenderId)}";
+        if (nodes.Count == 0) return $"{prefix} 未返回任何 Node";
+
+        var details = new List<string>();
+        var offline = nodes.Where(node => !node.IsOnline).ToArray();
+        if (offline.Length > 0)
+        {
+            details.Add($"离线 Node {string.Join("、", offline.Select(node => ProtocolIdentifierFormatter.Format(node.NodeId)))}");
+        }
+
+        var online = nodes.Where(node => node.IsOnline).ToArray();
+        var typeMismatches = online.Where(node => node.NodeType != expectedNodeType).ToArray();
+        if (typeMismatches.Length > 0)
+        {
+            var actual = string.Join("、", typeMismatches.Select(node =>
+                $"{ProtocolIdentifierFormatter.Format(node.NodeId)}={NodeTypeCatalog.Format(node.NodeType)}"));
+            details.Add($"类型不匹配 {actual}（要求 {NodeTypeCatalog.Format(expectedNodeType)}）");
+        }
+
+        var versionMismatches = online.Where(node =>
+            !ProtocolVersionFormatter.IsKnown(node.SoftwareVersion) ||
+            node.SoftwareVersion != expectedVersion).ToArray();
+        if (versionMismatches.Length > 0)
+        {
+            var actual = string.Join("、", versionMismatches.Select(node =>
+                $"{ProtocolIdentifierFormatter.Format(node.NodeId)}=" +
+                (ProtocolVersionFormatter.IsKnown(node.SoftwareVersion)
+                    ? ProtocolVersionFormatter.FormatWithPrefix(node.SoftwareVersion)
+                    : "未知版本")));
+            details.Add($"版本不匹配 {actual}（要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}）");
+        }
+
+        var rssiMismatches = online.Where(node => node.Rssi < MinimumNodeRssi).ToArray();
+        if (rssiMismatches.Length > 0)
+        {
+            var actual = string.Join("、", rssiMismatches.Select(node =>
+                $"{ProtocolIdentifierFormatter.Format(node.NodeId)}={node.Rssi} dBm"));
+            details.Add($"RSSI 不达标 {actual}（要求 ≥ {MinimumNodeRssi} dBm）");
+        }
+
+        return details.Count == 0
+            ? $"{prefix} 没有满足全部条件的 Node"
+            : $"{prefix}：{string.Join("；", details)}";
     }
 
     private OtaTestPlanTargetRule BuildPlanTargetRule(DeviceType deviceType)
@@ -7843,17 +7933,24 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 nodes = group.Nodes.Where(node => configured.Contains(node.NodeId)).ToArray();
                 if (nodes.Count != configured.Count)
                 {
-                    nodeFailures.Add($"Extender {ProtocolIdentifierFormatter.Format(extenderId)} 部分固定 Node 已离线");
+                    var missing = configured.Except(nodes.Select(node => node.NodeId));
+                    nodeFailures.Add(
+                        $"Extender {ProtocolIdentifierFormatter.Format(extenderId)} 未返回固定 Node：" +
+                        string.Join("、", missing.Select(ProtocolIdentifierFormatter.Format)));
                     continue;
                 }
-                var invalid = nodes.FirstOrDefault(node => !node.IsOnline ||
+                var hasInvalid = nodes.Any(node => !node.IsOnline ||
                     node.NodeType != nodeType ||
                     node.SoftwareVersion is 0 or byte.MaxValue ||
                     node.SoftwareVersion != expectedVersion ||
                     node.Rssi < MinimumNodeRssi);
-                if (invalid is not null)
+                if (hasInvalid)
                 {
-                    nodeFailures.Add($"Node {ProtocolIdentifierFormatter.Format(invalid.NodeId)} 类型、版本或 RSSI 不满足条件");
+                    nodeFailures.Add(DescribeNodeEligibilityFailures(
+                        extenderId,
+                        nodes.ToArray(),
+                        nodeType,
+                        expectedVersion));
                     continue;
                 }
             }
@@ -7867,7 +7964,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     node.Rssi >= MinimumNodeRssi).ToArray();
                 if (nodes.Count == 0)
                 {
-                    nodeFailures.Add($"Extender {ProtocolIdentifierFormatter.Format(extenderId)} 没有满足类型、版本和 RSSI 条件的在线 Node");
+                    nodeFailures.Add(DescribeNodeEligibilityFailures(
+                        extenderId,
+                        group.Nodes.ToArray(),
+                        nodeType,
+                        expectedVersion));
                     continue;
                 }
             }
@@ -9227,10 +9328,23 @@ internal static class DurationDisplay
     public static string Format(long milliseconds)
     {
         var totalMilliseconds = Math.Max(0, milliseconds);
-        var minutes = totalMilliseconds / 60_000;
+        var hours = totalMilliseconds / 3_600_000;
+        var minutes = totalMilliseconds % 3_600_000 / 60_000;
         var seconds = totalMilliseconds % 60_000 / 1_000;
         var remainderMilliseconds = totalMilliseconds % 1_000;
-        return $"{minutes}分{seconds}秒{remainderMilliseconds}毫秒";
+        if (hours > 0)
+        {
+            return $"{hours}小时{minutes}分{seconds}秒{remainderMilliseconds}毫秒";
+        }
+        if (minutes > 0)
+        {
+            return $"{minutes}分{seconds}秒{remainderMilliseconds}毫秒";
+        }
+        if (seconds > 0)
+        {
+            return $"{seconds}秒{remainderMilliseconds}毫秒";
+        }
+        return $"{remainderMilliseconds}毫秒";
     }
 }
 

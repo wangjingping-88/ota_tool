@@ -1102,7 +1102,7 @@
                     <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                     <Grid>
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
-                        <TextBlock x:Name="GlobalLogTitleText" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Text="全局运行日志（仅保留本次运行最近 300 行，滚轮可暂停查看，按 Enter 回到最新日志）" TextTrimming="CharacterEllipsis" ToolTip="滚轮可暂停查看，按 Enter 回到最新日志" />
+                        <TextBlock x:Name="GlobalLogTitleText" VerticalAlignment="Center" FontSize="12" FontWeight="SemiBold" Text="全局运行日志（仅保留本次运行最近 300 行，向上滚动暂停，滚回底部自动跟随）" TextTrimming="CharacterEllipsis" ToolTip="向上滚动可暂停查看；滚回底部或按 Enter 后自动跟随最新日志" />
                         <Button Grid.Column="1" Height="24" MinWidth="56" Padding="10,0" Style="{StaticResource QuietButton}" Content="清空" Command="{Binding ClearGlobalLogCommand}" ToolTip="清空当前内存中的全局运行日志" />
                         <Button x:Name="GlobalLogMinimizeButton" Grid.Column="2" Height="24" MinWidth="64" Margin="8,0,0,0" Padding="10,0" Style="{StaticResource QuietButton}" Content="最小化" Click="OnGlobalLogMinimizeClick" ToolTip="收起全局运行日志" />
                     </Grid>

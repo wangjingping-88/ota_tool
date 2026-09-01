@@ -84,14 +84,20 @@ public sealed class OtaCycleRunner
             StepStarting?.Invoke(this, new OtaCycleStepUpdate(round, true, DateTimeOffset.Now));
             var forward = await launcher.StartAndWaitAsync(definition.ForwardTask, cancellationToken);
             Updated?.Invoke(this, new OtaCycleUpdate(round, true, forward, DateTimeOffset.Now));
-            if (forward.State != OtaTaskState.Succeeded) return forward;
+            if (forward.State != OtaTaskState.Succeeded)
+            {
+                return AddFailureContext(forward, round, definition.Rounds, isForward: true);
+            }
 
             await WaitBeforeNextStepAsync(definition.Interval, round, nextIsForward: false, cancellationToken);
 
             StepStarting?.Invoke(this, new OtaCycleStepUpdate(round, false, DateTimeOffset.Now));
             var reverse = await launcher.StartAndWaitAsync(definition.ReverseTask, cancellationToken);
             Updated?.Invoke(this, new OtaCycleUpdate(round, false, reverse, DateTimeOffset.Now));
-            if (reverse.State != OtaTaskState.Succeeded) return reverse;
+            if (reverse.State != OtaTaskState.Succeeded)
+            {
+                return AddFailureContext(reverse, round, definition.Rounds, isForward: false);
+            }
 
             if (round < definition.Rounds)
             {
@@ -100,6 +106,25 @@ public sealed class OtaCycleRunner
         }
 
         return new OtaTaskResult(OtaTaskState.Succeeded, "循环升级完成。", DateTimeOffset.Now);
+    }
+
+    private static OtaTaskResult AddFailureContext(
+        OtaTaskResult result,
+        int round,
+        int totalRounds,
+        bool isForward)
+    {
+        var outcome = result.State switch
+        {
+            OtaTaskState.TimedOut => "超时",
+            OtaTaskState.Cancelled => "已取消",
+            _ => "失败",
+        };
+        var direction = isForward ? "正向" : "反向";
+        return result with
+        {
+            Message = $"循环第 {round}/{totalRounds} 轮 · {direction}{outcome}：{result.Message}",
+        };
     }
 
     private static bool AreOppositeVersions(OtaTask forward, OtaTask reverse)
