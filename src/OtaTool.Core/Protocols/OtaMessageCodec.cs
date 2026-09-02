@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using OtaTool.Core.Models;
@@ -110,6 +111,9 @@ public sealed record GatewayExtenderStatus(
 
 public static class OtaMessageCodec
 {
+    public const int GatewayHttpAddressMaxUtf8Bytes = 255;
+    public const int GatewayFileNameMaxUtf8Bytes = 63;
+
     public const int UpgradeCommand = 5;
     public const int UpgradeCompletionCommand = 6;
     public const int StatusQueryCommand = 8;
@@ -133,6 +137,17 @@ public static class OtaMessageCodec
         ArgumentException.ThrowIfNullOrWhiteSpace(task.PatchUrl);
         ArgumentException.ThrowIfNullOrWhiteSpace(task.PatchMd5);
 
+        var transportValidationError = ValidateGatewayPatchUrl(task.PatchUrl);
+        if (transportValidationError is not null)
+        {
+            throw new InvalidOperationException(transportValidationError);
+        }
+        if (task.PatchMd5.Length != 32 || !task.PatchMd5.All(Uri.IsHexDigit))
+        {
+            throw new InvalidOperationException("Patch MD5 必须为 32 位十六进制字符串。");
+        }
+        var patchUri = new Uri(task.PatchUrl, UriKind.Absolute);
+
         if (!byte.TryParse(task.OldVersion, out var oldVersion) || oldVersion is < 1 or > 254 ||
             !byte.TryParse(task.NewVersion, out var newVersion) || newVersion is < 1 or > 254 ||
             oldVersion == newVersion)
@@ -154,7 +169,7 @@ public static class OtaMessageCodec
             {
                 ["access"] = options.HttpAccess,
                 ["addr"] = task.PatchUrl,
-                ["file"] = Path.GetFileName(new Uri(task.PatchUrl, UriKind.Absolute).AbsolutePath),
+                ["file"] = GetGatewayPatchFileName(patchUri),
             },
         };
 
@@ -211,6 +226,41 @@ public static class OtaMessageCodec
             .Replace("{gatewayId}", task.GatewayId, StringComparison.Ordinal)
             .Replace("{sequence}", sequence.ToString(System.Globalization.CultureInfo.InvariantCulture), StringComparison.Ordinal);
         return new OutboundOtaMessage(topic, root.ToJsonString(), sequence);
+    }
+
+    public static string? ValidateGatewayPatchUrl(string patchUrl)
+    {
+        if (!Uri.TryCreate(patchUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+        {
+            return "Patch URL 必须是 HTTP 或 HTTPS 地址。";
+        }
+
+        var byteCount = Encoding.UTF8.GetByteCount(patchUrl);
+        if (byteCount > GatewayHttpAddressMaxUtf8Bytes)
+        {
+            return $"Patch URL 长度为 {byteCount} 字节，超过 Gateway 地址缓存上限 {GatewayHttpAddressMaxUtf8Bytes} 字节。请缩短 HTTP 基地址或 Patch 文件名。";
+        }
+
+        var escapedFileName = Path.GetFileName(uri.AbsolutePath);
+        if (string.IsNullOrWhiteSpace(escapedFileName))
+        {
+            return "Patch URL 中缺少文件名。";
+        }
+        var fileName = Uri.UnescapeDataString(escapedFileName);
+        var fileNameByteCount = Encoding.UTF8.GetByteCount(fileName);
+        return fileNameByteCount <= GatewayFileNameMaxUtf8Bytes
+            ? null
+            : $"Patch 文件名长度为 {fileNameByteCount} 字节，超过 Gateway 文件名缓存上限 {GatewayFileNameMaxUtf8Bytes} 字节。请缩短 Patch 文件名。";
+    }
+
+    private static string GetGatewayPatchFileName(Uri patchUri)
+    {
+        var fileName = Uri.UnescapeDataString(Path.GetFileName(patchUri.AbsolutePath));
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            throw new InvalidOperationException("Patch URL 中缺少文件名。");
+        }
+        return fileName;
     }
 
     public static OutboundOtaMessage CreateCancelRequest(OtaTask task, int sequence, OtaProtocolOptions? options = null)
@@ -512,7 +562,7 @@ public static class OtaMessageCodec
         }
 
         var nodes = new List<GatewayNodeInfo>(count);
-        var nodeIds = new HashSet<ushort>();
+        var nodeKeys = new HashSet<(byte NodeType, ushort NodeId)>();
         for (var index = 0; index < count; index++)
         {
             var offset = nodeDataOffset + index * 5;
@@ -530,9 +580,9 @@ public static class OtaMessageCodec
                 protocolError = "0x0F 包含零 Node ID。";
                 return false;
             }
-            if (!nodeIds.Add(nodeId))
+            if (!nodeKeys.Add((nodeType, nodeId)))
             {
-                protocolError = $"0x0F 包含重复 Node ID {nodeId}。";
+                protocolError = $"0x0F 包含重复 Node：类型 {nodeType}，Node ID {nodeId}。";
                 return false;
             }
             nodes.Add(new GatewayNodeInfo(

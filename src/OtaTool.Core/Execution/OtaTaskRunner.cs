@@ -511,7 +511,8 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
     private static string? ValidateDispatch(OtaTask task)
     {
         if (string.IsNullOrWhiteSpace(task.GatewayId)) return "必须填写 Gateway ID。";
-        if (!Uri.TryCreate(task.PatchUrl, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https")) return "Patch URL 必须是 HTTP 或 HTTPS 地址。";
+        var patchUrlError = OtaMessageCodec.ValidateGatewayPatchUrl(task.PatchUrl);
+        if (patchUrlError is not null) return patchUrlError;
         if (task.PatchMd5.Length != 32 || !task.PatchMd5.All(Uri.IsHexDigit)) return "Patch MD5 必须为 32 位十六进制字符串。";
         return null;
     }

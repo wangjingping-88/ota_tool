@@ -2521,7 +2521,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 DiscoveredNodeGroups.Add(new NodeGroupItem(
                     group.ExtenderId,
                     nodes.Select(node => new GatewayNodeInfo(node.NodeId, node.NodeType, node.SoftwareVersion, node.Rssi)).ToArray(),
-                    nodes.Where(node => node.IsSelected).Select(node => node.NodeId).ToHashSet(),
+                    nodes.Where(node => node.IsSelected).Select(node => (node.NodeType, node.NodeId)).ToHashSet(),
                     group.Error,
                     group.ReportedCount ?? nodes.Count,
                     OnNodeSelectionChanged));
@@ -3010,8 +3010,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
             if (_oldFirmwareIdentity.Version.HasValue && _newFirmwareIdentity.Version.HasValue)
             {
-                ForwardPatchName = _oldFirmwareIdentity.SuggestedPatchNameTo(_newFirmwareIdentity);
-                ReversePatchName = _newFirmwareIdentity.SuggestedPatchNameTo(_oldFirmwareIdentity);
+                var createdAt = DateTimeOffset.Now;
+                ForwardPatchName = FirmwarePatchNaming.CreateTimestampedName(
+                    _oldFirmwareIdentity.PatchPrefix,
+                    _oldFirmwareIdentity.Version.Value,
+                    _newFirmwareIdentity.Version.Value,
+                    createdAt);
+                ReversePatchName = FirmwarePatchNaming.CreateTimestampedName(
+                    _newFirmwareIdentity.PatchPrefix,
+                    _newFirmwareIdentity.Version.Value,
+                    _oldFirmwareIdentity.Version.Value,
+                    createdAt);
             }
             TaskStatusMessage = $"已识别 A/B 镜像：{FormatFirmwareIdentity(_oldFirmwareIdentity)} → {FormatFirmwareIdentity(_newFirmwareIdentity)}。";
         }
@@ -3043,8 +3052,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             {
                 throw new InvalidOperationException("旧 ECO 镜像兼容模式下必须手动填写 1～254 的版本号后再制作 Patch。");
             }
-            ForwardPatchName = $"{_oldFirmwareIdentity.PatchPrefix}-v{oldVersion}-to-v{newVersion}.patch";
-            ReversePatchName = $"{_oldFirmwareIdentity.PatchPrefix}-v{newVersion}-to-v{oldVersion}.patch";
+            var createdAt = DateTimeOffset.Now;
+            ForwardPatchName = FirmwarePatchNaming.CreateTimestampedName(
+                _oldFirmwareIdentity.PatchPrefix,
+                oldVersion,
+                newVersion,
+                createdAt);
+            ReversePatchName = FirmwarePatchNaming.CreateTimestampedName(
+                _oldFirmwareIdentity.PatchPrefix,
+                newVersion,
+                oldVersion,
+                createdAt);
         }
         catch (Exception exception)
         {
@@ -4270,6 +4288,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                         .SelectMany(target => target.NodeIds)
                         .Select(value => ushort.TryParse(value, out var nodeId) ? nodeId : (ushort)0)
                         .Where(value => value > 0)
+                        .Select(nodeId => ((byte)_selectedNodeTypeValue, nodeId))
                         .ToHashSet());
             ClearDiscoveredNodeResults();
             NodeDiscoveryStatus = $"正在查询 {extenderIds.Length} 个 Extender 的 Node 注册列表…";
@@ -6369,7 +6388,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         var selectedNodes = DiscoveredNodeGroups
             .SelectMany(group => group.Nodes.Select(node => (group.ExtenderId, Node: node)))
-            .Where(item => targetKeys.Contains((item.ExtenderId, item.Node.NodeId)))
+            .Where(item => targetKeys.Contains((item.ExtenderId, item.Node.NodeId)) &&
+                           item.Node.NodeType == NodeType)
             .Select(item => item.Node)
             .ToArray();
         return selectedNodes.Length == targetKeys.Count &&
@@ -6410,7 +6430,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 .ToHashSet();
             foreach (var item in DiscoveredNodeGroups
                          .SelectMany(group => group.Nodes.Select(node => (group.ExtenderId, Node: node)))
-                         .Where(item => targetKeys.Contains((item.ExtenderId, item.Node.NodeId))))
+                         .Where(item => targetKeys.Contains((item.ExtenderId, item.Node.NodeId)) &&
+                                        item.Node.NodeType == task.NodeType))
             {
                 item.Node.ApplySoftwareVersion(newVersion);
             }
@@ -6506,9 +6527,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 .Select(nodeId => ushort.TryParse(nodeId, out var parsed) ? parsed : (ushort)0)
                 .Where(nodeId => nodeId > 0)
                 .ToHashSet();
-            foreach (var node in discoveredGroup.Nodes.Where(node => targetNodeIds.Contains(node.NodeId) && node.NodeType != expectedNodeType))
+            foreach (var nodeId in targetNodeIds)
             {
-                mismatches.Add($"Extender {extenderId} / Node {node.NodeId} 上报类型 {NodeTypeCatalog.Format(node.NodeType)}");
+                var matchingNodes = discoveredGroup.Nodes.Where(node => node.NodeId == nodeId).ToArray();
+                if (matchingNodes.Any(node => node.NodeType == expectedNodeType)) continue;
+                foreach (var node in matchingNodes)
+                {
+                    mismatches.Add($"Extender {extenderId} / Node {node.NodeId} 上报类型 {NodeTypeCatalog.Format(node.NodeType)}");
+                }
             }
         }
 
@@ -6612,7 +6638,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             .ToHashSet();
         var selectedNodes = DiscoveredNodeGroups
             .SelectMany(group => group.Nodes.Select(node => (group.ExtenderId, Node: node)))
-            .Where(item => selectedKeys.Contains((item.ExtenderId, item.Node.NodeId)))
+            .Where(item => selectedKeys.Contains((item.ExtenderId, item.Node.NodeId)) &&
+                           item.Node.NodeType == manifest.DeviceTypeCode)
             .Select(item => item.Node)
             .ToArray();
         if (selectedNodes.Length != selectedKeys.Count)
@@ -6822,13 +6849,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private string BuildTestPlanItemConfirmationMessage(OtaTestPlanItemTemplate template)
     {
+        var selectedNodeCount = template.TargetRule.ExtenderTargets.Sum(item => item.NodeIds.Count);
         var target = template.DeviceType switch
         {
             DeviceType.Gateway => $"动态目标：Gateway {template.GatewayId}",
-            DeviceType.Node when template.TargetRule.ExtenderTargets.Count == 0 =>
-                $"动态目标：当前 Gateway 下符合 Node 类型 {template.TargetRule.NodeType}、版本和 RSSI 条件的全部在线节点",
+            DeviceType.Node when selectedNodeCount > 0 =>
+                $"动态目标：已选择 {selectedNodeCount} 个 Node；执行时只复核这些节点的在线状态、类型、版本和 RSSI，不会自动扩展目标",
             DeviceType.Node =>
-                $"目标 Extender：{string.Join("、", template.TargetRule.ExtenderTargets.Select(item => item.ExtenderId))}",
+                $"动态目标：当前 Gateway 下符合 Node 类型 {template.TargetRule.NodeType}、版本和 RSSI 条件的全部在线节点",
             _ when template.TargetRule.DeviceIds.Count == 0 => "动态目标：当前 Gateway 下符合版本条件的全部在线 Extender",
             _ => $"目标 Extender：{string.Join("、", template.TargetRule.DeviceIds)}",
         };
@@ -7347,9 +7375,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     $"当前任务要求起始版本 {ProtocolVersionFormatter.FormatWithPrefix(oldVersionByte)}。");
             }
         }
-        else if (ValidateCurrentTargetsForPlanItem(deviceType, targetRule, oldVersionByte) is { } targetError)
+        else
         {
-            throw new InvalidOperationException(targetError);
+            if (deviceType == DeviceType.Node &&
+                ValidateSelectedNodeVersionsForPlanItem(
+                    targetRule.NodeType ?? NodeType,
+                    oldVersionByte) is { } selectedNodeVersionError)
+            {
+                throw new InvalidOperationException(selectedNodeVersionError);
+            }
+            if (ValidateCurrentTargetsForPlanItem(deviceType, targetRule, oldVersionByte) is { } targetError)
+            {
+                throw new InvalidOperationException(targetError);
+            }
         }
         return template;
     }
@@ -7377,6 +7415,48 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             $"Extender {ProtocolIdentifierFormatter.Format(item.ExtenderId)} / " +
             $"Node {ProtocolIdentifierFormatter.Format(item.NodeId)} 当前为 {NodeTypeCatalog.Format(item.NodeType)}"));
         return $"已勾选的 Node 类型与当前任务不一致：{details}；当前任务要求 {NodeTypeCatalog.Format(expectedNodeType)}。";
+    }
+
+    private string? ValidateSelectedNodeVersionsForPlanItem(int expectedNodeType, byte expectedVersion)
+    {
+        var selectedExtenderIds = DiscoveredExtenders
+            .Where(extender => extender.IsSelected)
+            .Select(extender => extender.ExtenderId)
+            .ToHashSet();
+        var mismatches = DiscoveredNodeGroups
+            .Where(group => selectedExtenderIds.Count == 0 || selectedExtenderIds.Contains(group.ExtenderId))
+            .SelectMany(group => group.Nodes
+                .Where(node => node.IsSelected &&
+                               node.NodeType == expectedNodeType &&
+                               node.SoftwareVersion != expectedVersion)
+                .Select(node => new
+                {
+                    group.ExtenderId,
+                    node.NodeId,
+                    node.SoftwareVersion,
+                }))
+            .ToArray();
+        if (mismatches.Length == 0) return null;
+
+        var details = string.Join("；", mismatches
+            .GroupBy(item => item.ExtenderId)
+            .Select(extenderGroup =>
+            {
+                var versions = string.Join("，", extenderGroup
+                    .GroupBy(item => item.SoftwareVersion)
+                    .Select(versionGroup =>
+                    {
+                        var version = ProtocolVersionFormatter.IsKnown(versionGroup.Key)
+                            ? ProtocolVersionFormatter.FormatWithPrefix(versionGroup.Key)
+                            : "未知版本";
+                        var nodes = string.Join("、", versionGroup.Select(item =>
+                            ProtocolIdentifierFormatter.Format(item.NodeId)));
+                        return $"当前 {version}：Node {nodes}";
+                    }));
+                return $"Extender {ProtocolIdentifierFormatter.Format(extenderGroup.Key)}：{versions}";
+            }));
+        return $"已勾选 Node 中有 {mismatches.Length} 个起始版本不匹配" +
+               $"（Patch 要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}）：{details}。";
     }
 
     private void ValidatePatchSelectionForPlan(
@@ -7569,21 +7649,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             .ToArray();
         if (deviceType == DeviceType.Node)
         {
-            if (dynamic)
-            {
-                return new OtaTestPlanTargetRule
-                {
-                    ResolutionMode = OtaTargetResolutionMode.DynamicMatch,
-                    ExtenderTargets = selectedExtenders.Select(id => new OtaExtenderTarget(id, [])).ToArray(),
-                    NodeType = NodeType,
-                };
-            }
-            if (selectedExtenders.Length == 0) throw new InvalidOperationException("固定 Node 目标请至少选择一个 Extender。 ");
+            if (selectedExtenders.Length == 0) throw new InvalidOperationException("Node 任务请至少选择一个 Extender。 ");
             var targets = ParseNodeTargets(NodeTargetsText);
             if (ValidateSelectedExtenderNodeCoverage(targets) is { } coverageError) throw new InvalidOperationException(coverageError);
             return new OtaTestPlanTargetRule
             {
-                ResolutionMode = OtaTargetResolutionMode.FixedIds,
+                ResolutionMode = dynamic ? OtaTargetResolutionMode.DynamicMatch : OtaTargetResolutionMode.FixedIds,
                 ExtenderTargets = targets,
                 NodeType = NodeType,
             };
@@ -7924,13 +7995,21 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 continue;
             }
             IReadOnlyList<GatewayNodeInfo> nodes;
-            if (item.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds)
+            var configuredTarget = item.TargetRule.ExtenderTargets
+                .FirstOrDefault(target => uint.TryParse(target.ExtenderId, out var id) && id == extenderId);
+            var configured = configuredTarget?.NodeIds
+                .Select(value => ushort.TryParse(value, out var parsed) ? parsed : (ushort)0)
+                .Where(value => value > 0)
+                .ToHashSet() ?? [];
+            var hasExplicitNodeCandidates = configured.Count > 0;
+            if (hasExplicitNodeCandidates || item.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds)
             {
-                var configured = item.TargetRule.ExtenderTargets.First(target => uint.Parse(target.ExtenderId) == extenderId).NodeIds
-                    .Select(value => ushort.TryParse(value, out var parsed) ? parsed : (ushort)0)
-                    .Where(value => value > 0)
-                    .ToHashSet();
-                nodes = group.Nodes.Where(node => configured.Contains(node.NodeId)).ToArray();
+                if (!hasExplicitNodeCandidates)
+                {
+                    nodeFailures.Add($"Extender {ProtocolIdentifierFormatter.Format(extenderId)} 没有已选 Node。");
+                    continue;
+                }
+                nodes = group.Nodes.Where(node => configured.Contains(node.NodeId) && node.NodeType == nodeType).ToArray();
                 if (nodes.Count != configured.Count)
                 {
                     var missing = configured.Except(nodes.Select(node => node.NodeId));
@@ -8224,7 +8303,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             foreach (var nodeIdText in target.NodeIds)
             {
                 var nodeId = ushort.Parse(nodeIdText);
-                var node = group?.Nodes.FirstOrDefault(item => item.NodeId == nodeId);
+                var node = group?.Nodes.FirstOrDefault(item =>
+                    item.NodeId == nodeId && item.NodeType == task.NodeType);
                 if (node is null || !node.IsOnline || node.SoftwareVersion != expectedVersion)
                 {
                     mismatches.Add($"{ProtocolIdentifierFormatter.Format(extenderId)}/{ProtocolIdentifierFormatter.Format(nodeId)}");
@@ -8603,6 +8683,11 @@ public sealed class OtaTestPlanItemViewItem : ObservableObject
             if (_template.DeviceType == OtaTool.Core.Models.DeviceType.Gateway) return $"Gateway {_template.GatewayId}";
             if (_template.TargetRule.ResolutionMode == OtaTargetResolutionMode.DynamicMatch)
             {
+                if (_template.DeviceType == OtaTool.Core.Models.DeviceType.Node)
+                {
+                    var selectedNodeCount = _template.TargetRule.ExtenderTargets.Sum(target => target.NodeIds.Count);
+                    if (selectedNodeCount > 0) return $"{selectedNodeCount} 个已选 Node";
+                }
                 var scope = _template.TargetRule.DeviceIds.Count + _template.TargetRule.ExtenderTargets.Count;
                 return scope == 0 ? "全部在线范围" : $"{scope} 个 Extender 范围";
             }
@@ -9118,7 +9203,7 @@ public sealed class NodeGroupItem : ObservableObject
     public NodeGroupItem(
         uint extenderId,
         IReadOnlyList<GatewayNodeInfo> nodes,
-        IReadOnlySet<ushort> selectedNodeIds,
+        IReadOnlySet<(byte NodeType, ushort NodeId)> selectedNodeKeys,
         string? error,
         int reportedCount,
         Action selectionChanged)
@@ -9131,7 +9216,7 @@ public sealed class NodeGroupItem : ObservableObject
             nodes.Select((node, index) => new SelectableNodeItem(
                 node,
                 index + 1,
-                selectedNodeIds.Contains(node.NodeId),
+                selectedNodeKeys.Contains((node.NodeType, node.NodeId)),
                 selectionChanged)));
         VisibleNodes = SortByOnlineState(Nodes);
     }
@@ -9189,6 +9274,7 @@ public sealed class NodeGroupItem : ObservableObject
         => nodes
             .OrderByDescending(node => node.IsOnline)
             .ThenBy(node => node.NodeId)
+            .ThenBy(node => node.NodeType)
             .ToArray();
 }
 

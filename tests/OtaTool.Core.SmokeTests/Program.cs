@@ -41,6 +41,7 @@ try
     await VerifySettingsPersistenceAsync(workspace);
     await VerifyHttpRangeServerAsync(workspace);
     await VerifyEmbeddedBrokerAndMqttClientAsync();
+    await VerifyMqttReconnectLifecycleAsync();
     await VerifyProtocolCodecAndRunnerAsync(workspace);
     await VerifyDeviceDiscoveryAsync();
     await VerifyCycleRunnerAsync(workspace);
@@ -330,9 +331,20 @@ static void VerifyStatusPanelLayout()
     Assert(viewModel.Contains("SelectedPlanTargetMode = \"动态匹配\";", StringComparison.Ordinal)
         && viewModel.Contains("Name = $\"{typeName} {directionName} {ProtocolVersionFormatter.FormatRaw(oldVersion)} to {ProtocolVersionFormatter.FormatRaw(newVersion)}\"", StringComparison.Ordinal),
         "新队列任务应默认使用动态目标，并根据升级类型、方向和版本自动生成名称。");
+    Assert(!viewModel.Contains("selectedExtenders.Select(id => new OtaExtenderTarget(id, []))", StringComparison.Ordinal)
+        && viewModel.Contains("var hasExplicitNodeCandidates = configured.Count > 0;", StringComparison.Ordinal)
+        && viewModel.Contains("执行时只复核这些节点的在线状态、类型、版本和 RSSI，不会自动扩展目标", StringComparison.Ordinal)
+        && viewModel.Contains("个已选 Node", StringComparison.Ordinal),
+        "Node 动态任务必须保存已勾选 Node ID，执行时只复核候选节点，不得扩展为同 Extender 下全部匹配节点。");
     Assert(viewModel.Contains("ValidateSelectedNodeTypesForPlanItem", StringComparison.Ordinal)
         && viewModel.Contains("已勾选的 Node 类型与当前任务不一致", StringComparison.Ordinal),
         "添加 Node 任务时必须阻止异类型节点混入当前勾选结果，并列出具体设备。");
+    Assert(viewModel.Contains("ValidateSelectedNodeVersionsForPlanItem", StringComparison.Ordinal)
+        && viewModel.Contains("个起始版本不匹配", StringComparison.Ordinal)
+        && viewModel.Contains("Patch 要求", StringComparison.Ordinal)
+        && viewModel.Contains("GroupBy(item => item.ExtenderId)", StringComparison.Ordinal)
+        && viewModel.Contains("当前 {version}：Node {nodes}", StringComparison.Ordinal),
+        "添加 Node 任务时必须阻止起始版本不一致的已勾选节点，并按 Extender 和当前版本紧凑列出错误节点。");
     Assert(xaml.Contains("<Grid Margin=\"0,20,0,0\">", StringComparison.Ordinal)
         && xaml.Contains("<ColumnDefinition Width=\"1.25*\" />", StringComparison.Ordinal)
         && xaml.Contains("Text=\"升级类型\"", StringComparison.Ordinal)
@@ -1003,7 +1015,9 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
     };
     Assert(!OtaTaskValidator.Validate(invalidTask, profile).IsValid, "传统模式必须拒绝 Node 任务。");
 
-    OtaTask CreateEcoNodeTask(IReadOnlyList<OtaExtenderTarget> targets) => new()
+    OtaTask CreateEcoNodeTask(
+        IReadOnlyList<OtaExtenderTarget> targets,
+        string patchUrl = "http://127.0.0.1:8080/sample.patch") => new()
     {
         Mode = OtaMode.EcoLink,
         DeviceType = DeviceType.Node,
@@ -1014,7 +1028,7 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
         OldVersion = "1",
         NewVersion = "2",
         PatchPath = patchPath,
-        PatchUrl = "http://127.0.0.1:8080/sample.patch",
+        PatchUrl = patchUrl,
         PatchMd5 = metadata.Md5,
     };
 
@@ -1043,6 +1057,30 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
         "Node OTA 应拒绝超过 256 个目标。");
     var nodeRequest = OtaMessageCodec.CreateUpgradeRequest(nodeTask, 2);
     Assert(nodeRequest.JsonPayload.Contains("\"node_type\":2", StringComparison.Ordinal) && nodeRequest.JsonPayload.Contains("\"nodes\":[1,2,3]", StringComparison.Ordinal), "Node 任务编码错误。");
+    const string timestampedPatchUrl = "http://127.0.0.1:8080/street-light-v1-to-v2-1788317157.patch";
+    var timestampedRequest = OtaMessageCodec.CreateUpgradeRequest(
+        CreateEcoNodeTask([new OtaExtenderTarget("10010001", ["1"])], timestampedPatchUrl),
+        3);
+    using (var requestJson = JsonDocument.Parse(timestampedRequest.JsonPayload))
+    {
+        var net = requestJson.RootElement.GetProperty("ota").GetProperty("net");
+        var gatewayFileName = net.GetProperty("file").GetString() ?? string.Empty;
+        Assert(net.GetProperty("addr").GetString() == timestampedPatchUrl,
+            "带时间戳的 Patch URL 不应被改写。");
+        Assert(gatewayFileName == "street-light-v1-to-v2-1788317157.patch"
+            && Encoding.UTF8.GetByteCount(gatewayFileName) <= OtaMessageCodec.GatewayFileNameMaxUtf8Bytes,
+            "Gateway 必须接收完整 Patch 文件名，且文件名应处于 64 字节缓存安全范围内。");
+    }
+    var oversizedPatchUrl = "http://127.0.0.1/" + new string('a', 240) + "/sample.patch";
+    Assert(OtaMessageCodec.ValidateGatewayPatchUrl(oversizedPatchUrl)?.Contains("超过 Gateway 地址缓存上限", StringComparison.Ordinal) == true,
+        "超过 Gateway 256 字节地址缓存的 Patch URL 必须在下发前被拒绝。");
+    Assert(!OtaTaskValidator.Validate(
+            CreateEcoNodeTask([new OtaExtenderTarget("10010001", ["1"])], oversizedPatchUrl),
+            new EcoLinkProtocolProfile()).IsValid,
+        "超过 Gateway 地址缓存的 Patch URL 必须在任务预检阶段被拒绝。");
+    var oversizedPatchFileNameUrl = "http://127.0.0.1:8080/" + new string('a', 58) + ".patch";
+    Assert(OtaMessageCodec.ValidateGatewayPatchUrl(oversizedPatchFileNameUrl)?.Contains("超过 Gateway 文件名缓存上限", StringComparison.Ordinal) == true,
+        "超过 Gateway 64 字节文件名缓存的 Patch 文件名必须在下发前被拒绝。");
     Assert(OtaMessageCodec.ToProtocolDeviceType(DeviceType.Sync) == "iote" && OtaMessageCodec.ToProtocolDeviceType(DeviceType.Async) == "ex_mcu", "Gateway OTA 设备类型映射错误。");
 }
 
@@ -1637,6 +1675,12 @@ static async Task VerifyDeviceDiscoveryAsync()
            currentPagedNodes.PageCount == 1 && currentPagedNodes.TotalCount == 10 &&
            currentPagedNodes.Nodes.Count == 10 && currentPagedNodes.Nodes.Count(node => node.IsOnline) == 5,
         "实机 54 字节分页 0x0F 响应应解析为10个节点，其中5个在线。");
+    const string duplicateIdAcrossTypesResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51890,\"fmt\":\"hex\",\"data\":\"E91100B2CA3B0B00010B05E8EE000005B3E200000587B30000074B8C00000555E5000005B9FC3A0205F2FA3A0205B0D23A02058EFC3A0206D503390105D5030001\"}]";
+    Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(duplicateIdAcrossTypesResponse, out var duplicateIdAcrossTypes) &&
+           duplicateIdAcrossTypes is not null && duplicateIdAcrossTypes.Nodes.Count == 11 &&
+           duplicateIdAcrossTypes.Nodes.Count(node => node.NodeId == 981) == 2 &&
+           duplicateIdAcrossTypes.Nodes.Where(node => node.NodeId == 981).Select(node => node.NodeType).Order().SequenceEqual([(byte)5, (byte)6]),
+        "2 字节 Node ID 仅在同一设备类型内唯一；相同 ID、不同设备类型必须允许解析。");
     const string legacyNonPagedNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51912,\"fmt\":\"hex\",\"data\":\"E91100C8CA10030587B33B01053B123A0105A4ED3B01\"}]";
     Assert(!OtaMessageCodec.TryParseAsyncNodeListResponse(
                legacyNonPagedNodeResponse,
@@ -1697,7 +1741,7 @@ static async Task VerifyDeviceDiscoveryAsync()
     var zeroNode = BuildNodeListFrame([((byte)5, (ushort)0, (byte)50, (byte)1)]);
     Assert(!OtaMessageCodec.TryParseAsyncNodeListResponse(CreateUserDataResponse(101, duplicateNodes, "hex"), out _) &&
            !OtaMessageCodec.TryParseAsyncNodeListResponse(CreateUserDataResponse(101, zeroNode, "hex"), out _),
-        "重复或零 Node ID 必须拒绝。");
+        "同类型重复或零 Node ID 必须拒绝。");
     var fiftyNodes = BuildNodeListFrame(Enumerable.Range(1, 50)
         .Select(value => ((byte)5, (ushort)value, value == 1 ? (byte)200 : (byte)50, (byte)1)));
     var fiftyOneNodes = BuildUserDataFrame(
@@ -1795,7 +1839,7 @@ static async Task VerifyDeviceDiscoveryAsync()
                 mqtt.Inject("ucchip/up/sgw/704027/unrelated-sequence",
                     CreateUserDataResponse(
                         extenderId,
-                        BuildNodeListFrame([((byte)5, (ushort)9, (byte)60, (byte)1)], 1, 2, 2),
+                        BuildNodeListFrame([((byte)6, (ushort)8, (byte)60, (byte)1)], 1, 2, 2),
                         "hex"));
                 mqtt.Inject("ucchip/up/sgw/704027/unrelated-sequence",
                     CreateUserDataResponse(
@@ -1856,9 +1900,9 @@ static async Task VerifyDeviceDiscoveryAsync()
     Assert(results[2].IsSuccess && results[2].Nodes.Count == 0,
         "Node 空列表解析错误。");
     Assert(results[3].IsSuccess &&
-           results[3].Nodes.Select(node => node.NodeId).SequenceEqual([(ushort)8, (ushort)9]) &&
+           results[3].Nodes.Select(node => (node.NodeType, node.NodeId)).SequenceEqual([((byte)5, (ushort)8), ((byte)6, (ushort)8)]) &&
            queryRequests[(404, OtaMessageCodec.AsyncNodeListQueryCommand)] == 2,
-        "Node 查询超时后应排空并重试，成功结果按 Node ID 稳定排序。");
+        "Node 查询超时后应排空并重试；多页响应必须允许相同 ID、不同类型，并按 Node ID 和类型稳定排序。");
 
     var sameExtenderNodeTask = discovery.DiscoverNodesAsync("704027", [505U]);
     var sameExtenderStatusTask = discovery.DiscoverExtenderStatusesAsync("704027", [505U]);
@@ -1992,6 +2036,38 @@ static async Task VerifyEmbeddedBrokerAndMqttClientAsync()
     await publisher.PublishAsync(new MqttApplicationMessage("smoke/ota", Encoding.UTF8.GetBytes("ignored"), QualityOfService: 1));
     await Task.Delay(100);
     Assert(Volatile.Read(ref receivedCount) == 1, "MQTT 取消订阅后不应继续收到旧主题消息。");
+}
+
+static async Task VerifyMqttReconnectLifecycleAsync()
+{
+    var first = new LifecycleMqttTransport();
+    var failedReplacement = new LifecycleMqttTransport(failConnect: true);
+    var recovered = new LifecycleMqttTransport();
+    var transports = new Queue<LifecycleMqttTransport>([first, failedReplacement, recovered]);
+    await using var reconnecting = new ReconnectingMqttTransport(() => transports.Dequeue());
+    var options = new MqttClientOptions("127.0.0.1", 1883, "reconnect-lifecycle");
+
+    await reconnecting.ConnectAsync(options);
+    first.ForceDisconnected();
+    var replacementFailed = false;
+    try
+    {
+        await reconnecting.ConnectAsync(options);
+    }
+    catch (InvalidOperationException exception) when (exception.Message == "模拟连接失败")
+    {
+        replacementFailed = true;
+    }
+    Assert(replacementFailed && first.DisposeCount == 1 && failedReplacement.DisposeCount == 1,
+        "MQTT 替换连接失败时必须释放旧连接和失败的新连接各一次。");
+
+    await reconnecting.ConnectAsync(options);
+    Assert(reconnecting.IsConnected && recovered.IsConnected,
+        "MQTT 替换连接失败后必须能够再次连接，不能复用已释放客户端。");
+
+    var mqttClient = new Mqtt311Client();
+    await mqttClient.DisposeAsync();
+    await mqttClient.DisposeAsync();
 }
 
 static async Task VerifyReportsAsync(string workspace)
@@ -2355,8 +2431,11 @@ static async Task VerifyDiffManifestGateAsync(string workspace)
     var output = await PackageManifestExporter.ExportAsync(manifest, patchPath + ".json");
     var oldIdentity = await FirmwareIdentityReader.ReadAsync(oldPath);
     var newIdentity = await FirmwareIdentityReader.ReadAsync(newPath);
+    var createdAt = new DateTimeOffset(2026, 9, 2, 10, 45, 57, 120, TimeSpan.FromHours(8));
     Assert(oldIdentity.DeviceType == FirmwareDeviceType.Socket && oldIdentity.Version == 1
         && oldIdentity.SuggestedPatchNameTo(newIdentity) == "socket-v1-to-v2.patch"
+        && FirmwarePatchNaming.CreateTimestampedName(oldIdentity.PatchPrefix, 1, 2, createdAt)
+            == "socket-v1-to-v2-1788317157.patch"
         && manifest.PatchType == "socket",
         "固件身份识别或 Patch 自动命名错误。");
     var expectedNodePrefixes = new Dictionary<FirmwareDeviceType, string>
@@ -2595,6 +2674,52 @@ sealed class FakeMqttTransport : IMqttTransport
     public void Inject(string topic, string payload) => MessageReceived?.Invoke(this, new MqttApplicationMessage(topic, Encoding.UTF8.GetBytes(payload)));
 
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+}
+
+sealed class LifecycleMqttTransport(bool failConnect = false) : IMqttTransport
+{
+    public bool IsConnected { get; private set; }
+
+    public int DisposeCount { get; private set; }
+
+    public event EventHandler<MqttApplicationMessage>? MessageReceived
+    {
+        add { }
+        remove { }
+    }
+
+    public Task ConnectAsync(MqttClientOptions options, CancellationToken cancellationToken = default)
+    {
+        if (DisposeCount > 0) throw new ObjectDisposedException(nameof(LifecycleMqttTransport));
+        if (failConnect) throw new InvalidOperationException("模拟连接失败");
+        IsConnected = true;
+        return Task.CompletedTask;
+    }
+
+    public Task DisconnectAsync(CancellationToken cancellationToken = default)
+    {
+        IsConnected = false;
+        return Task.CompletedTask;
+    }
+
+    public Task SubscribeAsync(string topicFilter, byte qualityOfService = 1, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
+
+    public Task UnsubscribeAsync(string topicFilter, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
+
+    public Task PublishAsync(MqttApplicationMessage message, CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
+
+    public void ForceDisconnected() => IsConnected = false;
+
+    public ValueTask DisposeAsync()
+    {
+        DisposeCount++;
+        if (DisposeCount > 1) throw new ObjectDisposedException(nameof(SemaphoreSlim));
+        IsConnected = false;
+        return ValueTask.CompletedTask;
+    }
 }
 
 sealed class StaticTaskLauncher(OtaTaskState state) : IOtaTaskLauncher

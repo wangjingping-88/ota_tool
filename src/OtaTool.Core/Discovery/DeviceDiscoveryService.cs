@@ -181,6 +181,7 @@ public sealed class DeviceDiscoveryService
                     var nodes = response.Nodes
                         .OrderByDescending(node => node.IsOnline)
                         .ThenBy(node => node.NodeId)
+                        .ThenBy(node => node.NodeType)
                         .ToArray();
                     return new ExtenderNodeDiscoveryResult(
                         extenderId,
@@ -332,9 +333,9 @@ public sealed class DeviceDiscoveryService
                         $"0x0F 分页汇总数量错误：声明 {response.TotalCount} 项，实际收到 {orderedNodes.Length} 项。"));
                     return;
                 }
-                if (orderedNodes.Select(node => node.NodeId).Distinct().Count() != orderedNodes.Length)
+                if (orderedNodes.Select(node => (node.NodeType, node.NodeId)).Distinct().Count() != orderedNodes.Length)
                 {
-                    completion.TrySetException(new InvalidDataException("0x0F 多页响应包含重复 Node ID。"));
+                    completion.TrySetException(new InvalidDataException("0x0F 多页响应包含设备类型和 Node ID 均相同的重复项。"));
                     return;
                 }
                 completion.TrySetResult(new GatewayNodeList(

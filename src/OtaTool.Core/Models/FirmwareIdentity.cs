@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using OtaTool.Core.Protocols;
 
@@ -36,6 +37,22 @@ public static class FirmwarePatchNaming
         => string.Equals(patchType, GetPrefix(deviceType), StringComparison.Ordinal) ||
            deviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight &&
            string.Equals(patchType, "node", StringComparison.Ordinal);
+
+    public static string CreateTimestampedName(
+        string patchPrefix,
+        byte oldVersion,
+        byte newVersion,
+        DateTimeOffset createdAt)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(patchPrefix);
+        if (oldVersion is < 1 or > 254 || newVersion is < 1 or > 254 || oldVersion == newVersion)
+        {
+            throw new InvalidOperationException("OTA 版本号必须是 1～254 且新旧版本不能相同。");
+        }
+
+        var timestamp = createdAt.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        return $"{patchPrefix}-v{oldVersion}-to-v{newVersion}-{timestamp}.patch";
+    }
 }
 
 public sealed record FirmwareIdentity(

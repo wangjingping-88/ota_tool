@@ -9,6 +9,8 @@ public sealed class ReconnectingMqttTransport : IMqttTransport
     private IMqttTransport? _current;
     private MqttClientOptions? _options;
     private Task? _reconnectTask;
+    private readonly object _disposeSync = new();
+    private Task? _disposeTask;
 
     public ReconnectingMqttTransport(Func<IMqttTransport> factory)
     {
@@ -71,7 +73,16 @@ public sealed class ReconnectingMqttTransport : IMqttTransport
         await _current!.PublishAsync(message, cancellationToken);
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeSync)
+        {
+            _disposeTask ??= DisposeCoreAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
     {
         _shutdown.Cancel();
         await DisconnectAsync();
@@ -89,16 +100,27 @@ public sealed class ReconnectingMqttTransport : IMqttTransport
             if (IsConnected) return;
             if (_current is not null)
             {
-                Unhook(_current);
-                await _current.DisposeAsync();
+                var previous = _current;
+                _current = null;
+                Unhook(previous);
+                await previous.DisposeAsync();
             }
             var transport = _factory();
             Hook(transport);
-            await transport.ConnectAsync(options, cancellationToken);
-            _current = transport;
-            foreach (var (filter, qos) in _subscriptions)
+            try
             {
-                await transport.SubscribeAsync(filter, qos, cancellationToken);
+                await transport.ConnectAsync(options, cancellationToken);
+                foreach (var (filter, qos) in _subscriptions)
+                {
+                    await transport.SubscribeAsync(filter, qos, cancellationToken);
+                }
+                _current = transport;
+            }
+            catch
+            {
+                Unhook(transport);
+                await transport.DisposeAsync();
+                throw;
             }
             ConnectionStateChanged?.Invoke(this, "MQTT 已连接。");
         }

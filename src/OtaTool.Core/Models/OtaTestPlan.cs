@@ -47,7 +47,7 @@ public sealed record OtaTestPlanTargetRule
     /// <summary>Sync/Async 的固定目标，或动态匹配时允许使用的 Extender 范围。</summary>
     public IReadOnlyList<string> DeviceIds { get; init; } = [];
 
-    /// <summary>Node 固定目标映射。动态匹配时 NodeIds 为空，只使用 ExtenderId 限定范围。</summary>
+    /// <summary>Node 目标映射。新建动态任务保存已选 Node ID 作为候选范围；旧模板允许仅用 ExtenderId 表示全量动态范围。</summary>
     public IReadOnlyList<OtaExtenderTarget> ExtenderTargets { get; init; } = [];
 
     public int? NodeType { get; init; }

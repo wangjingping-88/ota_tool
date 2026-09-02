@@ -18,6 +18,8 @@ public sealed class Mqtt311Client : IMqttTransport
     private Task? _receiveTask;
     private Task? _keepAliveTask;
     private int _packetIdentifier;
+    private readonly object _disposeSync = new();
+    private Task? _disposeTask;
 
     public bool IsConnected { get; private set; }
 
@@ -134,7 +136,16 @@ public sealed class Mqtt311Client : IMqttTransport
         await SendPacketAsync(_stream!, BuildPacket(flags, body.WrittenSpan), cancellationToken);
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeSync)
+        {
+            _disposeTask ??= DisposeCoreAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
     {
         await DisconnectAsync();
         _shutdown.Cancel();

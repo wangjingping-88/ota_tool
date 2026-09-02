@@ -193,6 +193,12 @@ public static class OtaTaskValidator
             return OtaTaskValidationResult.Failure("未选择有效 Patch 文件。");
         }
 
+        if (!string.IsNullOrWhiteSpace(task.PatchUrl)
+            && OtaMessageCodec.ValidateGatewayPatchUrl(task.PatchUrl) is { } patchUrlError)
+        {
+            return OtaTaskValidationResult.Failure(patchUrlError);
+        }
+
         var patchLength = new FileInfo(task.PatchPath).Length;
         return PatchCapacityPolicy.Check(task.DeviceType, patchLength) is { IsAllowed: true }
             ? OtaTaskValidationResult.Success()
