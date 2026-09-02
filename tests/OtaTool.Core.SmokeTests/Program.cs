@@ -13,6 +13,7 @@ using OtaTool.Core.Http;
 using OtaTool.Core.Mqtt;
 using OtaTool.Core.Models;
 using OtaTool.Core.Protocols;
+using OtaTool.Core.Publishing;
 using OtaTool.Core.Reports;
 using OtaTool.Core.Settings;
 
@@ -25,6 +26,7 @@ try
     VerifyStaticResourceReferences();
     VerifyReadOnlyRunBindings();
     VerifyPatchCenterWorkflow();
+    VerifyPublishedPatchKeys();
     VerifyWindowChromeWorkAreaBounds();
     VerifyStatusPanelLayout();
     VerifyFunctionalPanelLayout();
@@ -68,6 +70,23 @@ finally
         Console.Error.WriteLine($"清理冒烟测试临时目录失败：{exception.Message}");
         Environment.ExitCode = 1;
     }
+}
+
+static void VerifyPublishedPatchKeys()
+{
+    const string hash = "0123456789abcdef";
+    var first = PublishedPatchKeyBuilder.Build(
+        "example.com", 22, "/download/", "https://example.com/download/", @"D:\patch\node-v1-to-v2-100.patch", hash);
+    var sameTarget = PublishedPatchKeyBuilder.Build(
+        "example.com", 22, "/download", "https://example.com/download", @"D:\other\node-v1-to-v2-100.patch", hash);
+    var timestampedTarget = PublishedPatchKeyBuilder.Build(
+        "example.com", 22, "/download", "https://example.com/download", @"D:\patch\node-v1-to-v2-101.patch", hash);
+    var changedContent = PublishedPatchKeyBuilder.Build(
+        "example.com", 22, "/download", "https://example.com/download", @"D:\patch\node-v1-to-v2-100.patch", "fedcba9876543210");
+
+    Assert(first == sameTarget, "相同发布目标、文件名和内容应识别为同一次发布。");
+    Assert(first != timestampedTarget, "内容相同但时间戳文件名不同的 Patch 必须允许分别发布。");
+    Assert(first != changedContent, "文件名相同但内容变化的 Patch 必须允许重新发布覆盖。");
 }
 
 static void VerifyStageApplicability()

@@ -6231,7 +6231,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private string BuildPublishedPatchKey(PatchSelection patch)
     {
-        return string.Join("|", SftpHost.Trim(), SftpPort, SftpRemoteDirectory.Trim(), PublicHttpBaseUrl.Trim(), patch.Sha256);
+        return PublishedPatchKeyBuilder.Build(
+            SftpHost,
+            SftpPort,
+            SftpRemoteDirectory,
+            PublicHttpBaseUrl,
+            patch.FilePath,
+            patch.Sha256);
     }
 
     private void RefreshUpgradePatchChoices()
