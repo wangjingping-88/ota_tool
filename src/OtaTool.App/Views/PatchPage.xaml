@@ -52,22 +52,36 @@
                 </Grid>
                 <Grid Margin="0,10,29,0">
                     <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="*" />
                     </Grid.ColumnDefinitions>
                     <StackPanel Margin="0,0,8,0">
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="用户后缀（最多 16 字节）" />
+                        <TextBox Margin="0,4,0,0"
+                                 MaxLength="16"
+                                 FontFamily="Cascadia Mono"
+                                 Text="{Binding PatchNameSuffix, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="仅限 1～16 个 ASCII 字母或数字" />
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Margin="0,0,8,0">
                         <TextBlock Style="{StaticResource FieldLabel}" Text="Patch 正向名称" />
                         <Border Margin="0,4,0,0" Style="{StaticResource ReadOnlyValue}">
                             <TextBlock VerticalAlignment="Center" FontFamily="Cascadia Mono" Text="{Binding ForwardPatchName, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
                         </Border>
                     </StackPanel>
-                    <StackPanel Grid.Column="1">
+                    <StackPanel Grid.Column="2">
                         <TextBlock Style="{StaticResource FieldLabel}" Text="Patch 反向名称" />
                         <Border Margin="0,4,0,0" Style="{StaticResource ReadOnlyValue}">
                             <TextBlock VerticalAlignment="Center" FontFamily="Cascadia Mono" Text="{Binding ReversePatchName, Mode=OneWay}" TextTrimming="CharacterEllipsis" />
                         </Border>
                     </StackPanel>
                 </Grid>
+                <TextBlock Margin="0,5,29,0"
+                           FontSize="11"
+                           Foreground="{Binding PatchNameSuffixHintForeground}"
+                           Text="{Binding PatchNameSuffixHint}"
+                           TextWrapping="Wrap" />
                 <TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Patch 输出目录（本地 HTTP 服务根目录）" />
                 <Grid Margin="0,4,29,0">
                     <Grid.ColumnDefinitions><ColumnDefinition /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -79,7 +93,7 @@
                             Content="Patch 制作"
                             Command="{Binding GeneratePatchCommand}"
                             IsEnabled="{Binding CanGeneratePatch}"
-                            ToolTip="请先导入有效且相互兼容的 A/B 固件"
+                            ToolTip="请先导入有效且相互兼容的 A/B 固件，并填写用户后缀"
                             ToolTipService.ShowOnDisabled="True" />
                     <Button Margin="8,0,0,0" Style="{StaticResource QuietButton}" Content="打开 Patch 目录" Command="{Binding OpenPatchOutputDirectoryCommand}" />
                 </StackPanel>
@@ -88,40 +102,12 @@
                            Foreground="{StaticResource GreenBrush}"
                            Text="{Binding PatchStatus, Mode=OneWay}"
                            TextWrapping="Wrap" />
-                <Grid Margin="0,10,29,0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="120" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Margin="0,0,8,0">
-                        <TextBlock Style="{StaticResource FieldLabel}" Text="导入 Patch 验证" />
-                        <ComboBox Margin="0,4,0,0"
-                                  ItemsSource="{Binding PatchRestoreChoices}"
-                                  DisplayMemberPath="DisplayName"
-                                  SelectedItem="{Binding SelectedRestorePatch, Mode=TwoWay}" />
-                    </StackPanel>
-                    <StackPanel Grid.Column="1">
-                        <TextBlock Style="{StaticResource FieldLabel}" Text="还原方向" />
-                        <ComboBox Margin="0,4,0,0"
-                                  ItemsSource="{Binding PatchRestoreDirections}"
-                                  SelectedItem="{Binding SelectedPatchRestoreDirection, Mode=TwoWay}" />
-                    </StackPanel>
-                    <Button Grid.Column="2"
-                            Margin="8,21,0,0"
-                            VerticalAlignment="Top"
-                            Style="{StaticResource QuietButton}"
-                            Content="验证导入 Patch"
-                            Command="{Binding TestPatchRestoreCommand}"
-                            IsEnabled="{Binding CanTestSelectedPatchRestore}" />
-                </Grid>
-                <TextBlock Margin="0,6,0,0" FontSize="11" Foreground="{StaticResource GreenBrush}" Text="{Binding PatchRestoreTestStatus}" TextWrapping="Wrap" />
                 </StackPanel>
                 </Border>
                 <Border x:Name="PatchCatalogPanel" Margin="0,12,0,0" Style="{StaticResource FunctionalPanel}">
                 <StackPanel>
                 <TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="Patch 详情" />
-                <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="勾选本次需要发布的 Patch；取消勾选不会删除源文件。裸 Patch 完成还原验证后才能用于升级和发布。" TextWrapping="Wrap" />
+                <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="勾选本次需要发布的 Patch；取消勾选不会删除源文件。导入 Patch 必须附带有效的同名 JSON 清单。" TextWrapping="Wrap" />
                 <ScrollViewer Margin="0,7,0,12" MaxHeight="240" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled">
                     <Border Padding="0,0,12,8">
                     <ItemsControl ItemsSource="{Binding PatchCatalog}">

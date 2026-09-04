@@ -1,5 +1,5 @@
-using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using OtaTool.Core.Protocols;
 
 namespace OtaTool.Core.Models;
@@ -19,6 +19,8 @@ public enum FirmwareDeviceType : byte
 
 public static class FirmwarePatchNaming
 {
+    public const int MaxUserSuffixUtf8Bytes = 16;
+
     public static string GetPrefix(FirmwareDeviceType deviceType) => deviceType switch
     {
         FirmwareDeviceType.Server => "server",
@@ -38,11 +40,11 @@ public static class FirmwarePatchNaming
            deviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight &&
            string.Equals(patchType, "node", StringComparison.Ordinal);
 
-    public static string CreateTimestampedName(
+    public static string CreateName(
         string patchPrefix,
         byte oldVersion,
         byte newVersion,
-        DateTimeOffset createdAt)
+        string userSuffix)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(patchPrefix);
         if (oldVersion is < 1 or > 254 || newVersion is < 1 or > 254 || oldVersion == newVersion)
@@ -50,8 +52,39 @@ public static class FirmwarePatchNaming
             throw new InvalidOperationException("OTA 版本号必须是 1～254 且新旧版本不能相同。");
         }
 
-        var timestamp = createdAt.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
-        return $"{patchPrefix}-v{oldVersion}-to-v{newVersion}-{timestamp}.patch";
+        var normalizedSuffix = NormalizeUserSuffix(userSuffix);
+        return $"{patchPrefix}-v{oldVersion}-to-v{newVersion}-{normalizedSuffix}.patch";
+    }
+
+    public static bool IsValidUserSuffix(string? userSuffix)
+    {
+        try
+        {
+            _ = NormalizeUserSuffix(userSuffix);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    public static string NormalizeUserSuffix(string? userSuffix)
+    {
+        var normalized = userSuffix?.Trim() ?? string.Empty;
+        if (normalized.Length == 0)
+        {
+            throw new ArgumentException("请填写 Patch 用户后缀。", nameof(userSuffix));
+        }
+        if (Encoding.UTF8.GetByteCount(normalized) > MaxUserSuffixUtf8Bytes)
+        {
+            throw new ArgumentException($"Patch 用户后缀最多 {MaxUserSuffixUtf8Bytes} 个 UTF-8 字节。", nameof(userSuffix));
+        }
+        if (normalized.Any(character => character is not (>= 'a' and <= 'z') and not (>= 'A' and <= 'Z') and not (>= '0' and <= '9')))
+        {
+            throw new ArgumentException("Patch 用户后缀只能包含 ASCII 字母和数字。", nameof(userSuffix));
+        }
+        return normalized;
     }
 }
 

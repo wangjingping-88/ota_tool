@@ -58,6 +58,8 @@ public sealed class AppSettings
 
     public string NewVersion { get; init; } = "V1.3.0";
 
+    public string PatchNameSuffix { get; init; } = string.Empty;
+
     public string ForwardPatchName { get; init; } = "a-to-b";
 
     public string ReversePatchName { get; init; } = "b-to-a";
@@ -143,6 +145,7 @@ public sealed class ModeWorkspaceSettings
     public string SelectedTaskType { get; set; } = "网关升级";
     public string OldVersion { get; set; } = "V1.2.3";
     public string NewVersion { get; set; } = "V1.3.0";
+    public string PatchNameSuffix { get; set; } = string.Empty;
     public string ForwardPatchName { get; set; } = "a-to-b";
     public string ReversePatchName { get; set; } = "b-to-a";
     public bool IsSpecifiedTarget { get; set; } = true;
@@ -200,6 +203,7 @@ public sealed class ModeWorkspaceSettings
         SelectedTaskType = settings.SelectedTaskType,
         OldVersion = settings.OldVersion,
         NewVersion = settings.NewVersion,
+        PatchNameSuffix = settings.PatchNameSuffix,
         ForwardPatchName = settings.ForwardPatchName,
         ReversePatchName = settings.ReversePatchName,
         IsSpecifiedTarget = settings.IsSpecifiedTarget,

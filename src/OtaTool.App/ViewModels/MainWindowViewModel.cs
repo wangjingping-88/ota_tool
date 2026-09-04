@@ -69,8 +69,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private PatchSelection? _selectedUpgradePatch;
     private PackageManifest? _selectedPatchManifest;
     private PatchSelection? _selectedReverseUpgradePatch;
-    private PatchSelection? _selectedRestorePatch;
-    private string _selectedPatchRestoreDirection = "A → B";
     private readonly Dictionary<string, PatchSelection> _patchCatalog = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _publishedPatchKeys = new(StringComparer.OrdinalIgnoreCase);
     private PatchDialogAction _patchDialogAction;
@@ -104,7 +102,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private FirmwareIdentity? _newFirmwareIdentity;
     private bool _areFirmwareImagesCompatible;
     private string _patchStatus = "请先导入 A 版本和 B 版本固件。";
-    private string _patchRestoreTestStatus = "请选择尚未验证的外部 Patch。工具自产 Patch 已自动完成双向还原验证。";
     private string _httpServiceStatus = "未启动";
     private string _publicHttpServiceStatus = "未设置";
     private string _targetIdList = "10010001\n10010002\n10010003";
@@ -147,6 +144,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _reversePatchMd5 = string.Empty;
     private string _reversePatchSha256 = string.Empty;
     private long _reversePatchLength;
+    private string _patchNameSuffix = string.Empty;
     private string _forwardPatchName = "a-to-b";
     private string _reversePatchName = "b-to-a";
     private int _cycleRounds = 1;
@@ -255,7 +253,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         GeneratePatchCommand = new AsyncRelayCommand(GeneratePatchAsync);
         BrowsePatchOutputDirectoryCommand = new RelayCommand(BrowsePatchOutputDirectory);
         OpenPatchOutputDirectoryCommand = new RelayCommand(OpenPatchOutputDirectory);
-        TestPatchRestoreCommand = new AsyncRelayCommand(TestPatchRestoreAsync);
         SelectReversePatchCommand = new RelayCommand(SelectReversePatch);
         StartForwardTaskCommand = new AsyncRelayCommand(() => StartSingleTaskAsync(reverse: false));
         StartReverseTaskCommand = new AsyncRelayCommand(() => StartSingleTaskAsync(reverse: true));
@@ -342,27 +339,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         .Where(item => !string.Equals(item.FilePath, SelectedUpgradePatch?.FilePath, StringComparison.OrdinalIgnoreCase))
         .ToArray();
 
-    public ObservableCollection<string> PatchRestoreDirections { get; } = ["A → B", "B → A"];
-
     public IReadOnlyList<PatchSelection> PatchCatalog => _patchCatalog.Values
         .Where(item => IsInCurrentPatchWorkspace(item.FilePath))
         .OrderBy(item => item.FileName, StringComparer.OrdinalIgnoreCase)
         .ToArray();
-
-    public IReadOnlyList<PatchSelection> PatchRestoreChoices
-    {
-        get
-        {
-            if (string.IsNullOrWhiteSpace(_importedPatchPath) ||
-                !_patchCatalog.TryGetValue(_importedPatchPath, out var importedPatch) ||
-                importedPatch.IsFullImage)
-            {
-                return [];
-            }
-
-            return [importedPatch];
-        }
-    }
 
     public ObservableCollection<ReportListItem> RecentReports { get; } = [];
 
@@ -695,27 +675,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 : $"已识别完整镜像版本对：{pair}；当前 Gateway 版本 {ProtocolVersionFormatter.FormatWithPrefix(_gatewaySoftwareVersion.Value)} 不在该版本对中。";
     }
 
-    public PatchSelection? SelectedRestorePatch
-    {
-        get => _selectedRestorePatch;
-        set
-        {
-            if (!SetProperty(ref _selectedRestorePatch, value)) return;
-            if (value is not null)
-            {
-                SelectedPatchRestoreDirection = InferPatchRestoreDirection(value);
-            }
-            OnPropertyChanged(nameof(CanTestSelectedPatchRestore));
-        }
-    }
-
-    public bool CanTestSelectedPatchRestore => SelectedRestorePatch is
-    {
-        ManifestVerified: false,
-        IsFullImage: false,
-        FilePath.Length: > 0,
-    } patch && File.Exists(patch.FilePath);
-
     public PatchSelection? SelectedReverseUpgradePatch
     {
         get => _selectedReverseUpgradePatch;
@@ -750,12 +709,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(ReversePatchStatus));
             OnPropertyChanged(nameof(ReversePatchMetadataDetail));
         }
-    }
-
-    public string SelectedPatchRestoreDirection
-    {
-        get => _selectedPatchRestoreDirection;
-        set => SetProperty(ref _selectedPatchRestoreDirection, value);
     }
 
     public Visibility PatchDialogVisibility => IsPatchDialogOpen &&
@@ -825,8 +778,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public ICommand BrowsePatchOutputDirectoryCommand { get; }
 
     public ICommand OpenPatchOutputDirectoryCommand { get; }
-
-    public ICommand TestPatchRestoreCommand { get; }
 
     public ICommand SelectReversePatchCommand { get; }
 
@@ -1519,7 +1470,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         !string.IsNullOrWhiteSpace(_newImagePath) &&
         _oldFirmwareIdentity is not null &&
         _newFirmwareIdentity is not null &&
-        _areFirmwareImagesCompatible;
+        _areFirmwareImagesCompatible &&
+        IsPatchNameSuffixValid;
 
     public string PatchDetail => string.IsNullOrWhiteSpace(_patchPath) ? "导入 A/B 固件后制作 Patch，或导入已有 Patch。" : _patchPath;
 
@@ -1543,6 +1495,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public string ReversePatchMetadataDetail => string.IsNullOrWhiteSpace(_reversePatchPath)
         ? "暂无反向 Patch 详情"
         : $"大小：{_reversePatchLength:N0} B\nMD5：{_reversePatchMd5}\nSHA256：{_reversePatchSha256}";
+
+    public string PatchNameSuffix
+    {
+        get => _patchNameSuffix;
+        set
+        {
+            if (!SetProperty(ref _patchNameSuffix, value)) return;
+            UpdateGeneratedPatchNames();
+            OnPropertyChanged(nameof(IsPatchNameSuffixValid));
+            OnPropertyChanged(nameof(PatchNameSuffixHint));
+            OnPropertyChanged(nameof(PatchNameSuffixHintForeground));
+            OnPropertyChanged(nameof(CanGeneratePatch));
+            OnPropertyChanged(nameof(PatchOperationStatusText));
+            ScheduleSettingsAutoSave();
+        }
+    }
+
+    public bool IsPatchNameSuffixValid => FirmwarePatchNaming.IsValidUserSuffix(PatchNameSuffix);
+
+    public string PatchNameSuffixHint => IsPatchNameSuffixValid
+        ? $"文件名使用后缀 -{PatchNameSuffix.Trim()}；保持不变时再次制作会覆盖同名 Patch。"
+        : "请填写 1～16 个 ASCII 字母或数字；不同用户请自行约定不同后缀。";
+
+    public string PatchNameSuffixHintForeground => IsPatchNameSuffixValid ? "#18A665" : "#D64545";
 
     public string ForwardPatchName
     {
@@ -1686,11 +1662,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 return "Patch 已导入";
             }
 
+            if (_areFirmwareImagesCompatible && !IsPatchNameSuffixValid)
+            {
+                return "待填后缀";
+            }
+
             return CanGeneratePatch ? "待制作" : "待导入固件";
         }
     }
-
-    public string PatchRestoreTestStatus { get => _patchRestoreTestStatus; private set => SetProperty(ref _patchRestoreTestStatus, value); }
 
     public string DiffEngineStatus => new NativeBsdiffEngine().GetInfo().StatusMessage;
 
@@ -2217,10 +2196,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         state.ReversePatchSha256 = _reversePatchSha256;
         state.ReversePatchLength = _reversePatchLength;
         state.SelectedPatchManifest = _selectedPatchManifest;
-        state.SelectedRestorePatchPath = SelectedRestorePatch?.FilePath ?? string.Empty;
-        state.SelectedPatchRestoreDirection = SelectedPatchRestoreDirection;
         state.PatchStatus = PatchStatus;
-        state.PatchRestoreTestStatus = PatchRestoreTestStatus;
         state.PublishStatus = PublishStatus;
         state.PublishConnectionTestStatus = PublishConnectionTestStatus;
         state.HasPublishedPatches = HasPublishedPatches;
@@ -2295,14 +2271,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _reversePatchSha256 = state.ReversePatchSha256;
         _reversePatchLength = state.ReversePatchLength;
         _selectedPatchManifest = state.SelectedPatchManifest;
-        _selectedPatchRestoreDirection = state.SelectedPatchRestoreDirection;
         PatchStatus = state.PatchStatus;
-        PatchRestoreTestStatus = state.PatchRestoreTestStatus;
         _publishStatus = state.PublishStatus;
         _publishConnectionTestStatus = state.PublishConnectionTestStatus;
         _hasPublishedPatches = state.HasPublishedPatches;
-        SelectedRestorePatch = _patchCatalog.Values.FirstOrDefault(item =>
-            string.Equals(item.FilePath, state.SelectedRestorePatchPath, StringComparison.OrdinalIgnoreCase));
         NotifyPatchWorkspaceChanged();
 
         GatewayStages.Clear();
@@ -2332,7 +2304,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         OnPropertyChanged(nameof(ReversePatchFileName));
         OnPropertyChanged(nameof(ReversePatchStatus));
         OnPropertyChanged(nameof(ReversePatchMetadataDetail));
-        OnPropertyChanged(nameof(SelectedPatchRestoreDirection));
         OnPropertyChanged(nameof(PublishStatus));
         OnPropertyChanged(nameof(PublishConnectionTestStatus));
         OnPropertyChanged(nameof(HasPublishedPatches));
@@ -2366,6 +2337,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         SelectedTaskType = SelectedTaskType,
         OldVersion = OldVersion,
         NewVersion = NewVersion,
+        PatchNameSuffix = PatchNameSuffix,
         ForwardPatchName = ForwardPatchName,
         ReversePatchName = ReversePatchName,
         IsSpecifiedTarget = IsSpecifiedTarget,
@@ -2459,6 +2431,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             SelectedTaskType = TaskTypes.Contains(workspace.SelectedTaskType) ? workspace.SelectedTaskType : TaskTypes[0];
             OldVersion = workspace.OldVersion;
             NewVersion = workspace.NewVersion;
+            PatchNameSuffix = workspace.PatchNameSuffix ?? string.Empty;
             ForwardPatchName = string.IsNullOrWhiteSpace(workspace.ForwardPatchName) ? "a-to-b" : workspace.ForwardPatchName;
             ReversePatchName = string.IsNullOrWhiteSpace(workspace.ReversePatchName) ? "b-to-a" : workspace.ReversePatchName;
             IsSpecifiedTarget = workspace.IsSpecifiedTarget;
@@ -2552,10 +2525,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         SelectedReverseUpgradePatch = UpgradePatchChoices.FirstOrDefault(item =>
             string.Equals(item.FilePath, workspace.SelectedReverseUpgradePatchPath, StringComparison.OrdinalIgnoreCase));
         var state = IsEcoLink ? _ecoLinkUpgradeUiState : _traditionalUpgradeUiState;
-        SelectedRestorePatch = _patchCatalog.Values.FirstOrDefault(item =>
-            string.Equals(item.FilePath, state.SelectedRestorePatchPath, StringComparison.OrdinalIgnoreCase));
-        _selectedPatchRestoreDirection = state.SelectedPatchRestoreDirection;
-        OnPropertyChanged(nameof(SelectedPatchRestoreDirection));
         _taskStatusMessage = state.TaskStatusMessage;
         OnPropertyChanged(nameof(TaskStatusMessage));
     }
@@ -2725,9 +2694,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             DeviceType? patchDeviceType = isFullImage ? DeviceType.Gateway : null;
             var manifestNote = isFullImage
                 ? " · Gateway 完整镜像（传统模式）"
-                : " · 缺少 Package Manifest，请导入 A/B 固件并执行还原测试";
-            if (!isFullImage && File.Exists(metadata.FilePath + ".json"))
+                : string.Empty;
+            if (!isFullImage)
             {
+                if (!File.Exists(metadata.FilePath + ".json"))
+                {
+                    throw new InvalidOperationException("Patch 缺少同名 .json 清单，无法导入。请使用工具生成的完整 Patch 产物。");
+                }
                 manifestNote = await ApplySidecarManifestAsync(metadata.FilePath);
                 manifestVerified = true;
                 patchDeviceType = _selectedPatchManifest?.OtaDeviceType;
@@ -2739,14 +2712,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _importedPatchLength = publishedMetadata.Length;
             PatchStatus = isFullImage
                 ? $"已导入 Gateway 完整镜像 · {publishedMetadata.Length:N0} B · SHA256 {publishedMetadata.Sha256[..12]}…"
-                : manifestVerified
-                ? $"已校验 · {publishedMetadata.Length:N0} B · SHA256 {publishedMetadata.Sha256[..12]}…{manifestNote}"
-                : $"已导入待验证 · {publishedMetadata.Length:N0} B · SHA256 {publishedMetadata.Sha256[..12]}…{manifestNote}";
+                : $"已校验 · {publishedMetadata.Length:N0} B · SHA256 {publishedMetadata.Sha256[..12]}…{manifestNote}";
             TaskStatusMessage = isFullImage
                 ? "Gateway 完整镜像已保存到输出目录，可在 EcoLink 或传统模式下直接用于升级。"
-                : manifestVerified
-                ? "Patch 已保存到输出目录；启动本地 HTTP Range 服务后即可下载。"
-                : "Patch 已加入详情列表；请导入对应 A/B 固件并执行“导入 Patch 验证”，验证通过后才能升级或发布。";
+                : "Patch 及其 JSON 清单已保存到输出目录；启动本地 HTTP Range 服务后即可下载。";
             OnPropertyChanged(nameof(ImportedPatchFileName));
             OnPropertyChanged(nameof(ImportedPatchMetadataDetail));
             RegisterPatch(
@@ -2976,6 +2945,27 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             : $"{identity.DisplayName}（类型 {identity.DeviceTypeCode}） · {identity.VersionText}" +
               (identity.IsLegacyEcoMarker ? " · 旧 ECO 标识，版本需手动填写" : string.Empty);
 
+    private void UpdateGeneratedPatchNames()
+    {
+        if (_oldFirmwareIdentity?.Version is not { } oldVersion ||
+            _newFirmwareIdentity?.Version is not { } newVersion ||
+            !IsPatchNameSuffixValid)
+        {
+            return;
+        }
+
+        ForwardPatchName = FirmwarePatchNaming.CreateName(
+            _oldFirmwareIdentity.PatchPrefix,
+            oldVersion,
+            newVersion,
+            PatchNameSuffix);
+        ReversePatchName = FirmwarePatchNaming.CreateName(
+            _newFirmwareIdentity.PatchPrefix,
+            newVersion,
+            oldVersion,
+            PatchNameSuffix);
+    }
+
     private void ApplyFirmwareIdentityDefaults()
     {
         _areFirmwareImagesCompatible = false;
@@ -3010,17 +3000,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
             if (_oldFirmwareIdentity.Version.HasValue && _newFirmwareIdentity.Version.HasValue)
             {
-                var createdAt = DateTimeOffset.Now;
-                ForwardPatchName = FirmwarePatchNaming.CreateTimestampedName(
-                    _oldFirmwareIdentity.PatchPrefix,
-                    _oldFirmwareIdentity.Version.Value,
-                    _newFirmwareIdentity.Version.Value,
-                    createdAt);
-                ReversePatchName = FirmwarePatchNaming.CreateTimestampedName(
-                    _newFirmwareIdentity.PatchPrefix,
-                    _newFirmwareIdentity.Version.Value,
-                    _oldFirmwareIdentity.Version.Value,
-                    createdAt);
+                UpdateGeneratedPatchNames();
             }
             TaskStatusMessage = $"已识别 A/B 镜像：{FormatFirmwareIdentity(_oldFirmwareIdentity)} → {FormatFirmwareIdentity(_newFirmwareIdentity)}。";
         }
@@ -3052,17 +3032,16 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             {
                 throw new InvalidOperationException("旧 ECO 镜像兼容模式下必须手动填写 1～254 的版本号后再制作 Patch。");
             }
-            var createdAt = DateTimeOffset.Now;
-            ForwardPatchName = FirmwarePatchNaming.CreateTimestampedName(
+            ForwardPatchName = FirmwarePatchNaming.CreateName(
                 _oldFirmwareIdentity.PatchPrefix,
                 oldVersion,
                 newVersion,
-                createdAt);
-            ReversePatchName = FirmwarePatchNaming.CreateTimestampedName(
+                PatchNameSuffix);
+            ReversePatchName = FirmwarePatchNaming.CreateName(
                 _oldFirmwareIdentity.PatchPrefix,
                 newVersion,
                 oldVersion,
-                createdAt);
+                PatchNameSuffix);
         }
         catch (Exception exception)
         {
@@ -3214,76 +3193,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             {
                 // 临时目录清理失败不覆盖原始制作结果。
             }
-        }
-    }
-
-    private async Task TestPatchRestoreAsync()
-    {
-        if (string.IsNullOrWhiteSpace(_oldImagePath) || string.IsNullOrWhiteSpace(_newImagePath))
-        {
-            PatchRestoreTestStatus = "导入 Patch 验证失败：请先导入 A、B 版本固件。";
-            return;
-        }
-
-        var patch = SelectedRestorePatch;
-        if (patch is null || !File.Exists(patch.FilePath))
-        {
-            PatchRestoreTestStatus = "导入 Patch 验证失败：请选择尚未验证的外部 Patch。";
-            return;
-        }
-
-        var isReverse = string.Equals(SelectedPatchRestoreDirection, "B → A", StringComparison.Ordinal);
-        var testName = $"{patch.FileName}（{SelectedPatchRestoreDirection}）";
-        var sourceImage = isReverse ? _newImagePath : _oldImagePath;
-        var expectedImage = isReverse ? _oldImagePath : _newImagePath;
-        PatchRestoreTestStatus = $"正在验证导入 Patch：{testName}…";
-        try
-        {
-            var identity = await FirmwareIdentityReader.ReadAsync(sourceImage);
-            var metadata = await PatchMetadata.FromFileAsync(patch.FilePath);
-            var capacity = PatchCapacityPolicy.Check(
-                identity.OtaDeviceType,
-                metadata.Length,
-                GetPatchCapacityLimits());
-            if (!capacity.IsAllowed)
-            {
-                throw new InvalidOperationException(capacity.Message);
-            }
-            var engine = new NativeBsdiffEngine();
-            await RunNativePatchVerificationAsync(
-                testName,
-                engine,
-                sourceImage,
-                expectedImage,
-                patch.FilePath);
-            var request = new DiffRequest(
-                sourceImage,
-                expectedImage,
-                patch.FilePath,
-                identity.OtaDeviceType,
-                isReverse ? NewVersion : OldVersion,
-                isReverse ? OldVersion : NewVersion);
-            var manifest = await PackageManifestFactory.CreateAsync(engine.GetInfo(), request, metadata, true);
-            await PackageManifestExporter.ExportAsync(manifest, patch.FilePath + ".json");
-            RegisterPatch(
-                patch.Source,
-                patch.FilePath,
-                metadata.Length,
-                metadata.Md5,
-                metadata.Sha256,
-                manifestVerified: true,
-                otaDeviceType: identity.OtaDeviceType,
-                oldVersion: manifest.OldVersion,
-                newVersion: manifest.NewVersion);
-            await ApplySidecarManifestAsync(patch.FilePath);
-            RefreshUpgradePatchChoices();
-            PatchRestoreTestStatus = $"{testName} 原生还原验证通过。";
-            TaskStatusMessage = PatchRestoreTestStatus;
-        }
-        catch (Exception exception)
-        {
-            PatchRestoreTestStatus = $"导入 Patch 验证失败：{CompactError(exception.Message)}";
-            TaskStatusMessage = PatchRestoreTestStatus;
         }
     }
 
@@ -3640,6 +3549,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    private static string FormatUpgradeVersionDirection(string? oldVersion, string? newVersion)
+    {
+        static string FormatVersion(string? value)
+            => byte.TryParse(value, out var version)
+                ? ProtocolVersionFormatter.FormatWithPrefix(version)
+                : string.IsNullOrWhiteSpace(value) ? "未知版本" : value;
+
+        return $"{FormatVersion(oldVersion)} → {FormatVersion(newVersion)}";
+    }
+
+    private static string FormatUpgradeVersionDirection(OtaTask task)
+        => FormatUpgradeVersionDirection(task.OldVersion, task.NewVersion);
+
     private async Task StartValidatedTaskAsync(OtaTask task, IOtaProtocolProfile profile)
     {
         if (_runner?.HasActiveTask == true)
@@ -3665,7 +3587,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         GatewayStageSummary = task.Mode == OtaMode.EcoLink
             ? "等待 Gateway 阶段状态…"
             : "等待 Gateway 最终升级结果上报…";
-        UpgradeRunModeText = $"单次 {task.OldVersion} to {task.NewVersion}";
+        UpgradeRunModeText = $"单次 · {FormatUpgradeVersionDirection(task)}";
         UpgradeRunModeForeground = "#2570E8";
         UpgradeRunModeBackground = "#E9F0FF";
         UpgradeRunProgressText = $"{SelectedTaskType} · 正在发送升级请求";
@@ -5002,13 +4924,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         cycle.StepStarting += (_, update) => RunOnUi(() =>
         {
             var task = update.IsForward ? forward : reverse;
-            UpgradeRunModeText = $"循环 {update.Round}/{cycleRounds} {task.OldVersion} to {task.NewVersion}";
+            UpgradeRunModeText = $"循环 {update.Round}/{cycleRounds} · {FormatUpgradeVersionDirection(task)}";
             UpgradeRunProgressText = $"第 {update.Round}/{cycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")}升级正在执行";
         });
         cycle.Waiting += (_, update) => RunOnUi(() =>
         {
             var task = update.NextIsForward ? forward : reverse;
-            UpgradeRunModeText = $"循环 {update.NextRound}/{cycleRounds} 间隔 {update.DelaySeconds} s";
+            UpgradeRunModeText = $"循环 {update.NextRound}/{cycleRounds} · {FormatUpgradeVersionDirection(task)} · 间隔 {update.DelaySeconds} s";
             UpgradeRunProgressText = $"等待 {update.DelaySeconds} s 后执行 {task.OldVersion} to {task.NewVersion}";
         });
         cycle.Updated += (_, update) =>
@@ -5020,15 +4942,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 TaskStatusMessage = $"第 {update.Round} 轮{(update.IsForward ? "正向" : "反向")}：{update.Result.Message}";
                 UpgradeRunProgressText = $"第 {update.Round}/{cycleRounds} 轮 · {(update.IsForward ? "正向" : "反向")} · {update.Result.Message}";
                 UpgradeRunModeText = update.Result.State != OtaTaskState.Succeeded
-                    ? $"循环 {update.Round}/{cycleRounds} {(update.IsForward ? $"{forward.OldVersion} to {forward.NewVersion}" : $"{reverse.OldVersion} to {reverse.NewVersion}")}"
+                    ? $"循环 {update.Round}/{cycleRounds} · {FormatUpgradeVersionDirection(update.IsForward ? forward : reverse)}"
                     : update.IsForward
-                        ? $"循环 {update.Round}/{cycleRounds} {reverse.OldVersion} to {reverse.NewVersion}"
+                        ? $"循环 {update.Round}/{cycleRounds} · {FormatUpgradeVersionDirection(reverse)}"
                         : update.Round < cycleRounds
-                            ? $"循环 {update.Round + 1}/{cycleRounds} {forward.OldVersion} to {forward.NewVersion}"
+                            ? $"循环 {update.Round + 1}/{cycleRounds} · {FormatUpgradeVersionDirection(forward)}"
                             : $"循环 {cycleRounds}/{cycleRounds} 已完成";
             });
         };
-        UpgradeRunModeText = $"循环 1/{cycleRounds} {forward.OldVersion} to {forward.NewVersion}";
+        UpgradeRunModeText = $"循环 1/{cycleRounds} · {FormatUpgradeVersionDirection(forward)}";
         UpgradeRunModeForeground = "#7A4CC2";
         UpgradeRunModeBackground = "#F1EAFE";
         UpgradeRunProgressText = $"共 {cycleRounds} 轮 · 准备执行第 1 轮正向升级";
@@ -5213,7 +5135,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             .ToArray();
         if (patches.Length == 0)
         {
-            PublishStatus = "已勾选的 Patch 尚未通过还原验证，不能发布。请先导入对应 A/B 固件并执行“导入 Patch 验证”。";
+            PublishStatus = "已勾选的 Patch 缺少有效 Package Manifest，不能发布。请重新导入带同名 .json 清单的 Patch。";
             return Task.CompletedTask;
         }
         if (string.IsNullOrWhiteSpace(PublicHttpBaseUrl))
@@ -5650,6 +5572,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 SelectedTaskType = SelectedTaskType,
                 OldVersion = OldVersion,
                 NewVersion = NewVersion,
+                PatchNameSuffix = PatchNameSuffix,
                 ForwardPatchName = ForwardPatchName,
                 ReversePatchName = ReversePatchName,
                 IsSpecifiedTarget = IsSpecifiedTarget,
@@ -5909,7 +5832,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 }
                 catch
                 {
-                    // 裸 Patch 或元数据不完整时仍应出现在详情列表中，但不能直接用于升级或发布。
+                    // 缺少有效 JSON 清单的历史 Patch 仍显示在详情列表中，但不能用于升级或发布。
                 }
                 RegisterPatch(
                     isFullImage ? "目录完整镜像" : "目录 Patch",
@@ -5927,7 +5850,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
             RefreshUpgradePatchChoices();
             OnPropertyChanged(nameof(PatchCatalog));
-            OnPropertyChanged(nameof(PatchRestoreChoices));
         }
         catch (Exception exception)
         {
@@ -5984,7 +5906,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(ImportedPatchFileName));
             OnPropertyChanged(nameof(ImportedPatchMetadataDetail));
             OnPropertyChanged(nameof(PatchCatalog));
-            OnPropertyChanged(nameof(PatchRestoreChoices));
             RefreshUpgradePatchChoices();
             TaskStatusMessage = $"已删除 Patch：{patch.FileName}";
         }
@@ -6218,8 +6139,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             oldVersion,
             newVersion);
         OnPropertyChanged(nameof(PatchCatalog));
-        OnPropertyChanged(nameof(PatchRestoreChoices));
-        OnPropertyChanged(nameof(CanTestSelectedPatchRestore));
     }
 
     private static bool IsUpgradeFile(string filePath)
@@ -6244,7 +6163,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         var previousPath = SelectedUpgradePatch?.FilePath;
         var previousReversePath = SelectedReverseUpgradePatch?.FilePath;
-        var previousRestorePath = SelectedRestorePatch?.FilePath;
         var selectedDeviceType = GetSelectedTaskDeviceType();
         UpgradePatchChoices.Clear();
         foreach (var patch in _patchCatalog.Values
@@ -6268,9 +6186,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ?? UpgradePatchChoices.FirstOrDefault(item => item.Source.StartsWith("正向 Patch", StringComparison.Ordinal))
             ?? previousForwardPatch
             ?? UpgradePatchChoices.FirstOrDefault();
-        var restoreChoices = PatchRestoreChoices.Where(item => File.Exists(item.FilePath)).ToArray();
-        SelectedRestorePatch = restoreChoices.FirstOrDefault(item => string.Equals(item.FilePath, previousRestorePath, StringComparison.OrdinalIgnoreCase))
-            ?? restoreChoices.FirstOrDefault();
         var previousReversePatch = ReverseUpgradePatchChoices.FirstOrDefault(item =>
             string.Equals(item.FilePath, previousReversePath, StringComparison.OrdinalIgnoreCase));
         SelectedReverseUpgradePatch = (previousReversePatch is not null && MatchesPatchDirection(previousReversePatch, reverse: true)
@@ -6475,17 +6390,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             fileDirectory?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
             GetPatchOutputDirectory().TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
             StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string InferPatchRestoreDirection(PatchSelection patch)
-    {
-        if (patch.Source.Contains("反向", StringComparison.Ordinal)
-            || patch.FileName.Contains("b-to-a", StringComparison.OrdinalIgnoreCase))
-        {
-            return "B → A";
-        }
-
-        return "A → B";
     }
 
     private string GetPatchDownloadUrl(string patchPath)
@@ -8178,7 +8082,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             cycle.StepStarting += (_, update) => RunOnUi(() =>
             {
                 var task = update.IsForward ? prepared.PrimaryTask : prepared.ReverseTask;
-                UpgradeRunModeText = $"计划 {prepared.Template.Order}/{TestPlanItems.Count} · 循环 {update.Round}/{prepared.Template.CycleRounds}";
+                UpgradeRunModeText = $"计划 {prepared.Template.Order}/{TestPlanItems.Count} · 循环 {update.Round}/{prepared.Template.CycleRounds} · {FormatUpgradeVersionDirection(task)}";
                 UpgradeRunProgressText = $"{prepared.Template.Name} · {(update.IsForward ? "正向" : "反向")} {task.OldVersion} to {task.NewVersion}";
             });
             cycle.Updated += (_, update) =>
@@ -8206,7 +8110,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         else
         {
-            UpgradeRunModeText = $"计划 {prepared.Template.Order}/{TestPlanItems.Count} · 单次";
+            UpgradeRunModeText = $"计划 {prepared.Template.Order}/{TestPlanItems.Count} · 单次 · {FormatUpgradeVersionDirection(prepared.PrimaryTask)}";
             UpgradeRunProgressText = $"{prepared.Template.Name} · 正在执行";
             result = await _runner.StartAndWaitAsync(prepared.PrimaryTask, cancellationToken);
         }
@@ -8336,7 +8240,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     reportItem.FinishedAt = update.OccurredAt;
                 }
             }
-            UpgradeRunModeText = $"任务队列 {update.Index}/{update.Total}";
+            UpgradeRunModeText = item is not null && update.State is OtaTestPlanItemState.Running or OtaTestPlanItemState.Verifying
+                ? $"任务队列 {update.Index}/{update.Total} · {FormatUpgradeVersionDirection(item.Template.OldVersion, item.Template.NewVersion)}"
+                : $"任务队列 {update.Index}/{update.Total}";
             UpgradeRunProgressText = $"{item?.Name ?? "任务"} · {update.Message}";
             OnPropertyChanged(nameof(TestPlanProgressSummary));
         });
@@ -8632,7 +8538,7 @@ public sealed class PatchSelection : ObservableObject
         ? "Gateway 完整镜像（EcoLink / 传统模式）"
         : ManifestVerified
         ? "已通过还原验证，可用于升级和发布"
-        : "待还原验证：暂不可用于升级和发布";
+        : "缺少有效 JSON 清单：不可用于升级和发布";
 
     public string ValidationColor => ManifestVerified ? "#159E68" : "#B87500";
 
@@ -9397,10 +9303,7 @@ internal sealed class UpgradeModeUiState
     public string ReversePatchSha256 { get; set; } = string.Empty;
     public long ReversePatchLength { get; set; }
     public PackageManifest? SelectedPatchManifest { get; set; }
-    public string SelectedRestorePatchPath { get; set; } = string.Empty;
-    public string SelectedPatchRestoreDirection { get; set; } = "A → B";
     public string PatchStatus { get; set; } = "请先导入 A 版本和 B 版本固件。";
-    public string PatchRestoreTestStatus { get; set; } = "请选择尚未验证的外部 Patch。工具自产 Patch 已自动完成双向还原验证。";
     public string PublishStatus { get; set; } = "未发布";
     public string PublishConnectionTestStatus { get; set; } = "尚未测试 SFTP 和 HTTP 连接。";
     public bool HasPublishedPatches { get; set; }

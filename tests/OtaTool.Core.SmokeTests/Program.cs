@@ -171,10 +171,13 @@ static void VerifyPatchCenterWorkflow()
     var viewModel = File.ReadAllText(Path.Combine(assetDirectory, "MainWindowViewModel.cs"));
 
     Assert(
-        xaml.Contains("ItemsSource=\"{Binding PatchRestoreChoices}\"", StringComparison.Ordinal)
-        && xaml.Contains("ItemsControl ItemsSource=\"{Binding PatchCatalog}\"", StringComparison.Ordinal)
-        && xaml.Contains("Text=\"{Binding PublishState}\"", StringComparison.Ordinal),
-        "Patch details must show all upgrade files while restore selection excludes full images.");
+        xaml.Contains("ItemsControl ItemsSource=\"{Binding PatchCatalog}\"", StringComparison.Ordinal)
+        && xaml.Contains("Text=\"{Binding PublishState}\"", StringComparison.Ordinal)
+        && !xaml.Contains("导入 Patch 验证", StringComparison.Ordinal)
+        && !xaml.Contains("TestPatchRestoreCommand", StringComparison.Ordinal)
+        && !viewModel.Contains("TestPatchRestoreAsync", StringComparison.Ordinal)
+        && viewModel.Contains("Patch 缺少同名 .json 清单，无法导入", StringComparison.Ordinal),
+        "Patch 详情应保留，但手动导入验证入口必须移除，外部 Patch 改为强制携带有效 JSON 清单。");
     Assert(
         mainWindow.Contains("<StackPanel Margin=\"0,14,0,0\" Orientation=\"Horizontal\"><CheckBox Content=\"公网连接使用 TLS\"", StringComparison.Ordinal)
         && mainWindow.Contains("<CheckBox Margin=\"18,0,0,0\" Content=\"允许不受信任证书（仅测试）\"", StringComparison.Ordinal)
@@ -221,7 +224,7 @@ static void VerifyPatchCenterWorkflow()
         && viewModel.Contains("完整 .bin 镜像仅支持网关升级", StringComparison.Ordinal),
         "Existing upgrade-file import must accept Gateway full images in both protocol modes.");
     Assert(
-        viewModel.Contains("裸 Patch 或元数据不完整时仍应出现在详情列表中", StringComparison.Ordinal)
+        viewModel.Contains("缺少有效 JSON 清单的历史 Patch 仍显示在详情列表中", StringComparison.Ordinal)
         && viewModel.Contains("item.IsFullImage", StringComparison.Ordinal)
         && viewModel.Contains("selectedDeviceType == DeviceType.Gateway", StringComparison.Ordinal)
         && viewModel.Contains("!IsEcoLink || item.ManifestVerified", StringComparison.Ordinal)
@@ -231,11 +234,10 @@ static void VerifyPatchCenterWorkflow()
     Assert(
         nativeGate >= 0
         && viewModel.Contains("已制作并通过原生还原验证", StringComparison.Ordinal)
-        && viewModel.Contains("原生还原验证通过", StringComparison.Ordinal)
         && viewModel.Contains("PatchCapacityPolicy.Check", StringComparison.Ordinal)
         && !viewModel.Contains("RunOtaToolPatchTestAsync", StringComparison.Ordinal)
         && !viewModel.Contains("OTA_TOOL.exe", StringComparison.Ordinal),
-        "Patch 制作和导入必须通过原生还原及容量校验，且不得再依赖 OTA_TOOL 或 UI Automation。");
+        "Patch 制作必须通过原生还原及容量校验，且不得再依赖 OTA_TOOL 或 UI Automation。");
 }
 
 static void VerifyWindowChromeWorkAreaBounds()
@@ -394,9 +396,12 @@ static void VerifyStatusPanelLayout()
         && xaml.Contains("Text=\"{Binding UpgradeTaskStartedAtText}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding UpgradeTaskFinishedAtText}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding UpgradeTaskTotalDurationText}\"", StringComparison.Ordinal)
+        && viewModel.Contains("FormatUpgradeVersionDirection(prepared.PrimaryTask)", StringComparison.Ordinal)
+        && viewModel.Contains("FormatUpgradeVersionDirection(task)", StringComparison.Ordinal)
+        && viewModel.Contains("FormatUpgradeVersionDirection(item.Template.OldVersion, item.Template.NewVersion)", StringComparison.Ordinal)
         && viewModel.Contains("BeginUpgradeTaskTiming(_activeTestPlanReport.StartedAt);", StringComparison.Ordinal)
         && viewModel.Contains("CompleteUpgradeTaskTiming(result.OccurredAt);", StringComparison.Ordinal),
-        "状态机必须显示队列任务进度、整项启动时间、结束时间和不随循环轮次重置的总耗时。");
+        "状态机必须显示队列任务进度、当前版本方向、整项启动时间、结束时间和不随循环轮次重置的总耗时。");
     Assert(xaml.Contains("Text=\"{Binding DisplayDuration}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding DisplayElapsed, Mode=OneWay}\"", StringComparison.Ordinal)
         && viewModel.Contains("$\"{hours}小时{minutes}分{seconds}秒{remainderMilliseconds}毫秒\"", StringComparison.Ordinal)
@@ -732,9 +737,10 @@ static void VerifyStatusPanelLayout()
         && codeBehind.Contains("GlobalLogTextBox.Visibility = _isGlobalLogMinimized ? Visibility.Collapsed : Visibility.Visible;", StringComparison.Ordinal)
         && viewModel.Contains("ClearGlobalLogCommand = new RelayCommand(_ => GlobalLogText = string.Empty);", StringComparison.Ordinal),
         "全局日志应明确仅为运行时缓存，并提供紧凑的清空和最小化入口。");
-    Assert(viewModel.Contains("if (SetProperty(ref _forwardPatchName, value)) ScheduleSettingsAutoSave();", StringComparison.Ordinal)
-        && viewModel.Contains("if (SetProperty(ref _reversePatchName, value)) ScheduleSettingsAutoSave();", StringComparison.Ordinal),
-        "正反向 Patch 名称修改后应自动持久化。");
+    Assert(viewModel.Contains("if (!SetProperty(ref _patchNameSuffix, value)) return;", StringComparison.Ordinal)
+        && viewModel.Contains("UpdateGeneratedPatchNames();", StringComparison.Ordinal)
+        && viewModel.Contains("PatchNameSuffix = workspace.PatchNameSuffix", StringComparison.Ordinal),
+        "Patch 用户后缀修改后应立即更新正反向名称并自动持久化。");
     Assert(viewModel.Contains("public DeviceType? OtaDeviceType { get; }", StringComparison.Ordinal)
         && viewModel.Contains("item.OtaDeviceType == selectedDeviceType", StringComparison.Ordinal)
         && viewModel.Contains("ApplyManifestDetails(manifest, updateTaskType: false);", StringComparison.Ordinal)
@@ -984,9 +990,11 @@ static void VerifyGeneratedMetadataPresentation()
 
     Assert(patchPage.Contains("Text=\"{Binding ForwardPatchName, Mode=OneWay}\"", StringComparison.Ordinal)
         && patchPage.Contains("Text=\"{Binding ReversePatchName, Mode=OneWay}\"", StringComparison.Ordinal)
+        && patchPage.Contains("Text=\"{Binding PatchNameSuffix, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
+        && patchPage.Contains("MaxLength=\"16\"", StringComparison.Ordinal)
         && !patchPage.Contains("IsReadOnly=\"True\" Text=\"{Binding ForwardPatchName}", StringComparison.Ordinal)
         && !patchPage.Contains("IsReadOnly=\"True\" Text=\"{Binding ReversePatchName}", StringComparison.Ordinal),
-        "自动生成的 Patch 名称应使用只读文本展示，不应继续使用编辑框控件。");
+        "Patch 名称应由最多 16 字节的用户后缀自动生成，并使用只读文本展示。");
     Assert(mainWindow.Contains("ToolTip=\"由所选 Patch 自动识别\"", StringComparison.Ordinal)
         && mainWindow.Contains("Text=\"{Binding OldVersionDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
         && mainWindow.Contains("Text=\"{Binding NewVersionDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
@@ -1114,7 +1122,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         MqttUseTls = true, MqttUserName = "tester", MqttClientUsesLocalBroker = false, LocalBrokerPort = 1885, LocalBrokerUserName = "local-user",
         HttpUsesLocalServer = false, PublicHttpBaseUrl = "https://files.example/ota/", SftpHost = "sftp.example", SftpPort = 2222,
         SftpPrivateKeyPath = "D:\\keys\\ota", LogDirectory = "D:\\logs",
-        ForwardPatchName = "socket-v1-to-v2.patch", ReversePatchName = "socket-v2-to-v1.patch",
+        PatchNameSuffix = "jp01", ForwardPatchName = "socket-v1-to-v2-jp01.patch", ReversePatchName = "socket-v2-to-v1-jp01.patch",
         CycleIntervalMode = "随机间隔", CycleRandomMinimumSeconds = 3, CycleRandomMaximumSeconds = 9,
         GatewayIdHistory = ["704027", "704065"],
         CustomNodeTypes = [new NodeTypeDefinitionSettings(9, "烟感")],
@@ -1162,6 +1170,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         && actual.LocalBrokerPort == expected.LocalBrokerPort && actual.LocalBrokerUserName == expected.LocalBrokerUserName
         && !actual.HttpUsesLocalServer && actual.PublicHttpBaseUrl == expected.PublicHttpBaseUrl && actual.SftpPort == expected.SftpPort
         && actual.SftpPrivateKeyPath == expected.SftpPrivateKeyPath && actual.LogDirectory == expected.LogDirectory
+        && actual.PatchNameSuffix == expected.PatchNameSuffix
         && actual.ForwardPatchName == expected.ForwardPatchName && actual.ReversePatchName == expected.ReversePatchName
         && actual.CycleIntervalMode == expected.CycleIntervalMode
         && actual.CycleRandomMinimumSeconds == expected.CycleRandomMinimumSeconds
@@ -1198,6 +1207,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
     var migrated = ModeWorkspaceSettings.FromLegacy(expected);
     Assert(migrated.MqttHost == expected.MqttHost
         && migrated.SelectedTaskType == expected.SelectedTaskType
+        && migrated.PatchNameSuffix == expected.PatchNameSuffix
         && migrated.GatewayIdHistory.SequenceEqual(expected.GatewayIdHistory)
         && migrated.CustomNodeTypes.Count == 1
         && migrated.DiscoveredNodeGroups.Count == 1,
@@ -2450,11 +2460,14 @@ static async Task VerifyDiffManifestGateAsync(string workspace)
     var output = await PackageManifestExporter.ExportAsync(manifest, patchPath + ".json");
     var oldIdentity = await FirmwareIdentityReader.ReadAsync(oldPath);
     var newIdentity = await FirmwareIdentityReader.ReadAsync(newPath);
-    var createdAt = new DateTimeOffset(2026, 9, 2, 10, 45, 57, 120, TimeSpan.FromHours(8));
     Assert(oldIdentity.DeviceType == FirmwareDeviceType.Socket && oldIdentity.Version == 1
         && oldIdentity.SuggestedPatchNameTo(newIdentity) == "socket-v1-to-v2.patch"
-        && FirmwarePatchNaming.CreateTimestampedName(oldIdentity.PatchPrefix, 1, 2, createdAt)
-            == "socket-v1-to-v2-1788317157.patch"
+        && FirmwarePatchNaming.CreateName(oldIdentity.PatchPrefix, 1, 2, "jp01")
+            == "socket-v1-to-v2-jp01.patch"
+        && FirmwarePatchNaming.IsValidUserSuffix("tester01")
+        && FirmwarePatchNaming.IsValidUserSuffix("A123456789012345")
+        && !FirmwarePatchNaming.IsValidUserSuffix("A1234567890123456")
+        && !FirmwarePatchNaming.IsValidUserSuffix("中文")
         && manifest.PatchType == "socket",
         "固件身份识别或 Patch 自动命名错误。");
     var expectedNodePrefixes = new Dictionary<FirmwareDeviceType, string>
