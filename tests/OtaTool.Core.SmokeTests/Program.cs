@@ -171,7 +171,7 @@ static void VerifyPatchCenterWorkflow()
     var viewModel = File.ReadAllText(Path.Combine(assetDirectory, "MainWindowViewModel.cs"));
 
     Assert(
-        xaml.Contains("ItemsControl ItemsSource=\"{Binding PatchCatalog}\"", StringComparison.Ordinal)
+        xaml.Contains("ItemsSource=\"{Binding PatchCatalog}\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"{Binding PublishState}\"", StringComparison.Ordinal)
         && !xaml.Contains("导入 Patch 验证", StringComparison.Ordinal)
         && !xaml.Contains("TestPatchRestoreCommand", StringComparison.Ordinal)
@@ -188,10 +188,16 @@ static void VerifyPatchCenterWorkflow()
     Assert(
         xaml.Contains("IsChecked=\"{Binding IsSelectedForPublish, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
         && xaml.Contains("取消勾选不会删除源文件", StringComparison.Ordinal)
+        && xaml.Contains("SelectionMode=\"Extended\"", StringComparison.Ordinal)
+        && xaml.Contains("Value=\"{Binding IsSelectedForPublish, Mode=TwoWay}\"", StringComparison.Ordinal)
+        && xaml.Contains("Text=\"{Binding SequenceDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
+        && xaml.Contains("Text=\"{Binding PatchCatalogCountSummary}\"", StringComparison.Ordinal)
+        && viewModel.Contains("public string PatchCatalogCountSummary", StringComparison.Ordinal)
+        && viewModel.Contains("OnPropertyChanged(nameof(PatchCatalogCountSummary));", StringComparison.Ordinal)
         && viewModel.Contains(".Where(item => item.IsSelectedForPublish)", StringComparison.Ordinal)
         && viewModel.Contains("patch.IsSelectedForPublish = false;", StringComparison.Ordinal)
         && viewModel.Contains("public sealed class PatchSelection : ObservableObject", StringComparison.Ordinal),
-        "Patch publication must use an independently mutable per-file mark and clear successful marks without deleting source files.");
+        "Patch 详情应显示序号和总数，并通过 Ctrl/Shift 或勾选框批量选择待发布文件；发布成功后清除选择但不得删除源文件。");
     var repeatedPublishStart = viewModel.IndexOf("if (unpublishedPatches.Length == 0)", StringComparison.Ordinal);
     var repeatedPublishEnd = viewModel.IndexOf("var patchDetails", repeatedPublishStart, StringComparison.Ordinal);
     Assert(
@@ -203,8 +209,8 @@ static void VerifyPatchCenterWorkflow()
         "重复发布未变化的 Patch 时应保留勾选，并在当前界面提供明确反馈。");
     Assert(
         System.Text.RegularExpressions.Regex.Matches(xaml, "VerticalScrollBarVisibility=\"Visible\"").Count >= 3
-        && xaml.Contains("Margin=\"0,7,0,12\" MaxHeight=\"240\"", StringComparison.Ordinal)
-        && xaml.Contains("Padding=\"0,0,12,8\"", StringComparison.Ordinal),
+        && xaml.Contains("MaxHeight=\"240\"", StringComparison.Ordinal)
+        && xaml.Contains("Margin=\"0,0,12,6\"", StringComparison.Ordinal),
         "Patch columns must reserve scrollbar gutters and keep the final catalog item fully visible.");
     Assert(
         xaml.Contains("Content=\"Patch 制作\"", StringComparison.Ordinal)
@@ -554,6 +560,9 @@ static void VerifyStatusPanelLayout()
         "Node 筛选无结果时应保持稳定的列表高度并显示明确空状态。");
     Assert(taskLayout.Contains("Text=\"{Binding SequenceDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding NodeCountSummary, Mode=OneWay}\"", StringComparison.Ordinal)
+        && taskLayout.Contains("Text=\"{Binding ExtenderCountSummary}\"", StringComparison.Ordinal)
+        && viewModel.Contains("public string ExtenderCountSummary", StringComparison.Ordinal)
+        && viewModel.Contains("private void RefreshExtenderSequenceNumbers()", StringComparison.Ordinal)
         && taskLayout.Contains("Text=\"{Binding OnlineStatusText, Mode=OneWay}\"", StringComparison.Ordinal)
         && taskLayout.Contains("MaxHeight=\"250\"", StringComparison.Ordinal)
         && viewModel.Contains("public string SequenceDisplay", StringComparison.Ordinal)
@@ -562,7 +571,7 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("CanSelect = IsOnline &&", StringComparison.Ordinal)
         && viewModel.Contains("OrderByDescending(node => node.IsOnline)", StringComparison.Ordinal)
         && viewModel.Contains("OnPropertyChanged(nameof(NodeCountSummary));", StringComparison.Ordinal),
-        "Node 长列表应保持内部滚动，显示稳定序号和在线状态，并按在线、离线分组排序；离线 Node 不得选中。");
+        "Extender 列表应显示序号和总数；Node 长列表应保持内部滚动，显示稳定序号和在线状态，并按在线、离线分组排序；离线 Node 不得选中。");
     Assert(taskLayout.Contains("x:Name=\"TaskConfigurationScrollViewer\"", StringComparison.Ordinal)
         && taskLayout.Contains("PreviewMouseWheel=\"OnNodeListPreviewMouseWheel\"", StringComparison.Ordinal)
         && codeBehind.Contains("nodeListScrollViewer.ScrollableHeight > 0", StringComparison.Ordinal)
@@ -656,11 +665,20 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("public bool IsShowingActiveReports => !_showArchivedReports;", StringComparison.Ordinal)
         && viewModel.Contains("public bool IsShowingArchivedReports => _showArchivedReports;", StringComparison.Ordinal)
         && xaml.Contains("Key=\"Delete\" Command=\"{Binding DeleteReportCommand}\"", StringComparison.Ordinal)
+        && xaml.Contains("SelectionMode=\"Extended\" SelectionChanged=\"OnReportSelectionChanged\"", StringComparison.Ordinal)
+        && xaml.Contains("ItemsSource=\"{Binding ReportStatusFilters}\"", StringComparison.Ordinal)
+        && xaml.Contains("ItemsSource=\"{Binding ReportTimeFilters}\"", StringComparison.Ordinal)
+        && xaml.Contains("Command=\"{Binding ClearReportsCommand}\"", StringComparison.Ordinal)
+        && xaml.Contains("Command=\"{Binding ClearReportFiltersCommand}\"", StringComparison.Ordinal)
+        && codeBehind.Contains("viewModel.UpdateSelectedReports(listBox.SelectedItems.Cast<ReportListItem>());", StringComparison.Ordinal)
+        && viewModel.Contains("private void ApplyReportFilters(Guid? preferredSelectionId = null)", StringComparison.Ordinal)
+        && viewModel.Contains("filtered[index].SetSequenceNumber(index + 1);", StringComparison.Ordinal)
+        && viewModel.Contains("private async Task DeleteReportsAsync(IReadOnlyList<ReportListItem> reports)", StringComparison.Ordinal)
         && xaml.Contains("Text=\"报告总结\"", StringComparison.Ordinal)
         && xaml.Contains("ItemsSource=\"{Binding SelectedReport.StageTimeline, Mode=OneWay}\"", StringComparison.Ordinal)
         && !xaml.Contains("Text=\"最近事件\"", StringComparison.Ordinal)
         && xaml.Contains("Visibility=\"{Binding GlobalDialogVisibility}\"", StringComparison.Ordinal),
-        "历史报告应显示去重后的阶段时间线，并支持查看、归档、删除与应用内确认弹框。");
+        "历史报告应显示序号和去重后的阶段时间线，支持 Ctrl/Shift 多选、状态/时间筛选、批量归档删除和清空筛选结果，并使用应用内确认弹框。");
     Assert(xaml.Contains("Command=\"{Binding ConfirmPatchDialogCommand}\" IsDefault=\"{Binding IsGlobalDialogConfirmDefault}\"", StringComparison.Ordinal)
         && patchPage.Contains("Command=\"{Binding ConfirmPatchDialogCommand}\" IsDefault=\"{Binding IsPatchDialogConfirmDefault}\"", StringComparison.Ordinal)
         && viewModel.Contains("_patchDialogAction is PatchDialogAction.Delete or PatchDialogAction.Publish;", StringComparison.Ordinal)
@@ -708,14 +726,21 @@ static void VerifyStatusPanelLayout()
         && !xaml.Contains("<ScrollViewer VerticalScrollBarVisibility=\"Auto\" HorizontalScrollBarVisibility=\"Disabled\">\n                                        <TextBlock Padding=\"18\"", StringComparison.Ordinal),
         "日志分析页应显示 100 分制质量评估、使用舒展排版，并仅在内容溢出时允许左右面板独立滚动。");
     Assert(xaml.Contains("ItemsSource=\"{Binding ImportedLogFiles}\"", StringComparison.Ordinal)
-        && xaml.Contains("Content=\"删除\" Command=\"{Binding DataContext.RemoveImportedLogFileCommand", StringComparison.Ordinal)
+        && xaml.Contains("SelectionMode=\"Extended\"", StringComparison.Ordinal)
+        && xaml.Contains("SelectionChanged=\"OnImportedLogSelectionChanged\"", StringComparison.Ordinal)
+        && xaml.Contains("Text=\"{Binding SequenceDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
+        && xaml.Contains("Content=\"移出\" Command=\"{Binding DataContext.RemoveImportedLogFileCommand", StringComparison.Ordinal)
+        && xaml.Contains("Content=\"移出所选\" Command=\"{Binding RemoveImportedLogFileCommand}\"", StringComparison.Ordinal)
         && xaml.Contains("Content=\"分析列表日志\"", StringComparison.Ordinal)
         && xaml.Contains("IsEnabled=\"{Binding HasImportedLogFiles}\"", StringComparison.Ordinal)
         && xaml.Contains("循环日志会按全部 SID 分轮解析", StringComparison.Ordinal)
+        && codeBehind.Contains("viewModel.UpdateSelectedImportedLogFiles(listBox.SelectedItems.Cast<ImportedLogFileItem>());", StringComparison.Ordinal)
+        && viewModel.Contains("public void UpdateSelectedImportedLogFiles(IEnumerable<ImportedLogFileItem> files)", StringComparison.Ordinal)
+        && viewModel.Contains("_selectedImportedLogFiles.ToArray()", StringComparison.Ordinal)
         && viewModel.Contains("Directory.EnumerateFiles(LogDirectory, \"*.log\", SearchOption.TopDirectoryOnly)", StringComparison.Ordinal)
         && viewModel.Contains("File.Copy(item.FilePath, Path.Combine(analysisInputDirectory, item.FileName));", StringComparison.Ordinal)
         && viewModel.Contains("new LogAnalysisRequest(OtaMode.EcoLink, LogAnalyzerExecutablePath, analysisInputDirectory, outputDirectory)", StringComparison.Ordinal),
-        "日志目录导入后应显示可删除清单，分析器必须仅处理清单快照，并支持按全部 SID 解析循环日志。");
+        "日志目录导入后应显示带序号的清单，支持 Ctrl/Shift 多选和批量移出；分析器必须仅处理清单快照，并支持按全部 SID 解析循环日志。");
     Assert(viewModel.Contains("_lastLogBrowseDirectory = GetExistingBrowseDirectory(configuredLogDirectory)", StringComparison.Ordinal)
         && viewModel.Contains("? _lastLogBrowseDirectory", StringComparison.Ordinal)
         && viewModel.Contains("var initialDirectory = GetExistingBrowseDirectory(preferredBrowseDirectory);", StringComparison.Ordinal)

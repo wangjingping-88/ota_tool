@@ -74,7 +74,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private PatchDialogAction _patchDialogAction;
     private IReadOnlyList<PatchSelection> _pendingPublication = [];
     private PatchSelection? _pendingDeletion;
-    private ReportListItem? _pendingReportDeletion;
+    private IReadOnlyList<ReportListItem> _pendingReportDeletions = [];
     private OtaTask? _pendingUpgradeTask;
     private IOtaProtocolProfile? _pendingUpgradeProfile;
     private OtaTask? _pendingCycleForwardTask;
@@ -194,6 +194,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _logAnalyzerExecutablePath = GetDefaultLogAnalyzerPath();
     private string _logDirectory = string.Empty;
     private string? _lastLogBrowseDirectory;
+    private readonly List<ImportedLogFileItem> _selectedImportedLogFiles = [];
     private string _logAnalysisStatus = "未导入日志";
     private string _logAnalysisResultText = "尚未执行日志分析。";
     private IReadOnlyList<LogAnalysisLineViewItem> _logAnalysisResultLines =
@@ -218,6 +219,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private DeviceType _gatewayStatusDeviceType = DeviceType.Gateway;
     private ReportListItem? _selectedReport;
     private bool _showArchivedReports;
+    private readonly List<ReportListItem> _loadedReports = [];
+    private readonly List<ReportListItem> _selectedReports = [];
+    private string _selectedReportStatusFilter = "全部状态";
+    private string _selectedReportTimeFilter = "全部时间";
+    private string _reportSearchText = string.Empty;
     private readonly OtaTestPlanRunner _testPlanRunner = new();
     private bool _isTestPlanRunning;
     private bool _isTestPlanPreflighting;
@@ -299,6 +305,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         OpenReportCommand = new AsyncRelayCommand(OpenSelectedReportAsync);
         ToggleReportArchiveCommand = new AsyncRelayCommand(ToggleSelectedReportArchiveAsync);
         DeleteReportCommand = new RelayCommand(_ => RequestSelectedReportDeletion());
+        ClearReportsCommand = new RelayCommand(_ => RequestFilteredReportsClear());
+        ClearReportFiltersCommand = new RelayCommand(_ => ClearReportFilters());
         ShowActiveReportsCommand = new RelayCommand(_ => ShowReportScope(showArchived: false));
         ShowArchivedReportsCommand = new RelayCommand(_ => ShowReportScope(showArchived: true));
         RefreshExtendersCommand = new AsyncRelayCommand(
@@ -339,12 +347,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         .Where(item => !string.Equals(item.FilePath, SelectedUpgradePatch?.FilePath, StringComparison.OrdinalIgnoreCase))
         .ToArray();
 
-    public IReadOnlyList<PatchSelection> PatchCatalog => _patchCatalog.Values
-        .Where(item => IsInCurrentPatchWorkspace(item.FilePath))
-        .OrderBy(item => item.FileName, StringComparer.OrdinalIgnoreCase)
-        .ToArray();
+    public IReadOnlyList<PatchSelection> PatchCatalog
+    {
+        get
+        {
+            var items = _patchCatalog.Values
+                .Where(item => IsInCurrentPatchWorkspace(item.FilePath))
+                .OrderBy(item => item.FileName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            for (var index = 0; index < items.Length; index++)
+            {
+                items[index].SetSequenceNumber(index + 1);
+            }
+            return items;
+        }
+    }
+
+    public string PatchCatalogCountSummary => $"共 {PatchCatalog.Count} 个 Patch";
 
     public ObservableCollection<ReportListItem> RecentReports { get; } = [];
+
+    public IReadOnlyList<string> ReportStatusFilters { get; } =
+        ["全部状态", "成功", "失败", "已超时", "已取消", "已跳过", "进行中", "预检中", "就绪", "草稿"];
+
+    public IReadOnlyList<string> ReportTimeFilters { get; } = ["全部时间", "今天", "近 7 天", "近 30 天"];
 
     public ObservableCollection<OtaTestPlanItemViewItem> TestPlanItems { get; } = [];
 
@@ -496,6 +522,61 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(SelectedReportVisibility));
             OnPropertyChanged(nameof(ReportSelectionHintVisibility));
         }
+    }
+
+    public string SelectedReportStatusFilter
+    {
+        get => _selectedReportStatusFilter;
+        set
+        {
+            if (!SetProperty(ref _selectedReportStatusFilter, value)) return;
+            ApplyReportFilters();
+        }
+    }
+
+    public string SelectedReportTimeFilter
+    {
+        get => _selectedReportTimeFilter;
+        set
+        {
+            if (!SetProperty(ref _selectedReportTimeFilter, value)) return;
+            ApplyReportFilters();
+        }
+    }
+
+    public string ReportSearchText
+    {
+        get => _reportSearchText;
+        set
+        {
+            if (!SetProperty(ref _reportSearchText, value)) return;
+            ApplyReportFilters();
+        }
+    }
+
+    public int SelectedReportCount => _selectedReports.Count;
+
+    public string ReportFilterSummary =>
+        $"显示 {RecentReports.Count}/{_loadedReports.Count} 条 · 已选择 {SelectedReportCount} 条";
+
+    public void UpdateSelectedReports(IEnumerable<ReportListItem> reports)
+    {
+        _selectedReports.Clear();
+        _selectedReports.AddRange(reports
+            .GroupBy(item => item.Id)
+            .Select(group => group.First()));
+
+        if (_selectedReports.Count == 0)
+        {
+            SelectedReport = null;
+        }
+        else if (SelectedReport is null || _selectedReports.All(item => item.Id != SelectedReport.Id))
+        {
+            SelectedReport = _selectedReports[^1];
+        }
+
+        OnPropertyChanged(nameof(SelectedReportCount));
+        OnPropertyChanged(nameof(ReportFilterSummary));
     }
 
     public ObservableCollection<MqttMessageListItem> MqttMessages { get; } = [];
@@ -870,6 +951,10 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public ICommand ToggleReportArchiveCommand { get; }
 
     public ICommand DeleteReportCommand { get; }
+
+    public ICommand ClearReportsCommand { get; }
+
+    public ICommand ClearReportFiltersCommand { get; }
 
     public ICommand ShowActiveReportsCommand { get; }
 
@@ -1784,9 +1869,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public bool HasImportedLogFiles => ImportedLogFiles.Count > 0;
 
+    public bool HasSelectedImportedLogFiles => _selectedImportedLogFiles.Count > 0;
+
     public string ImportedLogFilesSummary => ImportedLogFiles.Count == 0
         ? "尚未导入 .log 文件"
-        : $"本次分析包含 {ImportedLogFiles.Count} 个 .log 文件";
+        : $"共 {ImportedLogFiles.Count} 个 .log 文件 · 已选择 {_selectedImportedLogFiles.Count} 个";
+
+    public void UpdateSelectedImportedLogFiles(IEnumerable<ImportedLogFileItem> files)
+    {
+        _selectedImportedLogFiles.Clear();
+        _selectedImportedLogFiles.AddRange(files.DistinctBy(item => item.FilePath));
+        OnPropertyChanged(nameof(HasSelectedImportedLogFiles));
+        OnPropertyChanged(nameof(ImportedLogFilesSummary));
+    }
 
     public string LogAnalysisStatus { get => _logAnalysisStatus; private set => SetProperty(ref _logAnalysisStatus, value); }
 
@@ -1874,6 +1969,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         DiscoveredExtenders.All(item => item.IsSelected)
         ? "全部取消"
         : "全部选择";
+
+    public string ExtenderCountSummary => $"共 {DiscoveredExtenders.Count} 个 Extender";
 
     public string NodeSelectionToggleText
     {
@@ -2487,6 +2584,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     extender.TotalCount,
                     extender.IsSelected, OnExtenderSelectionChanged));
             }
+            RefreshExtenderSequenceNumbers();
             DiscoveredNodeGroups.Clear();
             foreach (var group in workspace.DiscoveredNodeGroups ?? [])
             {
@@ -2506,6 +2604,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _suppressSelectionSync = false;
         }
         OnPropertyChanged(nameof(ExtenderSelectionToggleText));
+        OnPropertyChanged(nameof(ExtenderCountSummary));
         OnPropertyChanged(nameof(NodeSelectionToggleText));
         RefreshNodeEligibility();
         if (_selectedNodeTypeValue > 0 && DiscoveredNodeGroups.Count > 0)
@@ -2843,14 +2942,30 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void RemoveImportedLogFile(object? parameter)
     {
-        if (parameter is not ImportedLogFileItem item || !ImportedLogFiles.Remove(item)) return;
+        var files = parameter is ImportedLogFileItem item
+            ? [item]
+            : _selectedImportedLogFiles.ToArray();
+        if (files.Length == 0)
+        {
+            LogAnalysisStatus = "请先选择要从本次分析列表移出的日志。";
+            return;
+        }
+
+        var removed = files.Count(ImportedLogFiles.Remove);
+        if (removed == 0) return;
+        _selectedImportedLogFiles.RemoveAll(selected => !ImportedLogFiles.Contains(selected));
         NotifyImportedLogFilesChanged();
-        LogAnalysisStatus = $"已从本次分析列表删除 {item.FileName}，磁盘源文件未删除。";
+        LogAnalysisStatus = $"已从本次分析列表移出 {removed} 个日志，磁盘源文件未删除。";
     }
 
     private void NotifyImportedLogFilesChanged()
     {
+        for (var index = 0; index < ImportedLogFiles.Count; index++)
+        {
+            ImportedLogFiles[index].SetSequenceNumber(index + 1);
+        }
         OnPropertyChanged(nameof(HasImportedLogFiles));
+        OnPropertyChanged(nameof(HasSelectedImportedLogFiles));
         OnPropertyChanged(nameof(ImportedLogFilesSummary));
     }
 
@@ -4100,6 +4215,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     selectedIds.Contains(extender.ExtenderId),
                     OnExtenderSelectionChanged));
             }
+            RefreshExtenderSequenceNumbers();
             if (SelectedTaskType == NodeTaskType &&
                 DiscoveredExtenders.Count > 0 &&
                 DiscoveredExtenders.All(item => !item.IsSelected))
@@ -4266,7 +4382,17 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         DiscoveredNodeGroups.Clear();
         _suppressSelectionSync = false;
         OnPropertyChanged(nameof(ExtenderSelectionToggleText));
+        OnPropertyChanged(nameof(ExtenderCountSummary));
         OnPropertyChanged(nameof(NodeSelectionToggleText));
+    }
+
+    private void RefreshExtenderSequenceNumbers()
+    {
+        for (var index = 0; index < DiscoveredExtenders.Count; index++)
+        {
+            DiscoveredExtenders[index].SetSequenceNumber(index + 1);
+        }
+        OnPropertyChanged(nameof(ExtenderCountSummary));
     }
 
     private void ClearDiscoveredNodeResults()
@@ -5325,15 +5451,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             .Where(report => report.Plan.Mode == mode)
             .Where(report => report.IsArchived == _showArchivedReports)
             .Select(report => new ReportListItem(report, outputDirectory));
-        RecentReports.Clear();
-        foreach (var report in reports.Concat(planReports)
-                     .OrderByDescending(item => item.StartedAtValue)
-                     .Take(100))
-        {
-            RecentReports.Add(report);
-        }
-        SelectedReport = RecentReports.FirstOrDefault(item => item.Id == selectedId)
-            ?? RecentReports.FirstOrDefault();
+        _loadedReports.Clear();
+        _loadedReports.AddRange(reports.Concat(planReports)
+            .OrderByDescending(item => item.StartedAtValue)
+            .Take(100));
+        ApplyReportFilters(selectedId);
         modeState.SelectedReportId = SelectedReport?.Id;
         if (updateStatus)
         {
@@ -5341,6 +5463,49 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 ? (_showArchivedReports ? "暂无归档报告。" : "暂无历史报告。")
                 : $"已加载 {RecentReports.Count} 条{(_showArchivedReports ? "归档" : "历史")}报告。";
         }
+    }
+
+    private void ApplyReportFilters(Guid? preferredSelectionId = null)
+    {
+        var selectedId = preferredSelectionId ?? SelectedReport?.Id;
+        var now = DateTimeOffset.Now;
+        var filtered = _loadedReports
+            .Where(item => SelectedReportStatusFilter == "全部状态" ||
+                           string.Equals(item.State, SelectedReportStatusFilter, StringComparison.Ordinal))
+            .Where(item => SelectedReportTimeFilter switch
+            {
+                "今天" => item.StartedAtValue.LocalDateTime.Date == now.LocalDateTime.Date,
+                "近 7 天" => item.StartedAtValue >= now.AddDays(-7),
+                "近 30 天" => item.StartedAtValue >= now.AddDays(-30),
+                _ => true,
+            })
+            .Where(item => string.IsNullOrWhiteSpace(ReportSearchText) || item.Matches(ReportSearchText))
+            .ToArray();
+
+        RecentReports.Clear();
+        for (var index = 0; index < filtered.Length; index++)
+        {
+            filtered[index].SetSequenceNumber(index + 1);
+            RecentReports.Add(filtered[index]);
+        }
+
+        SelectedReport = RecentReports.FirstOrDefault(item => item.Id == selectedId)
+            ?? RecentReports.FirstOrDefault();
+        _selectedReports.Clear();
+        if (SelectedReport is not null) _selectedReports.Add(SelectedReport);
+        OnPropertyChanged(nameof(SelectedReportCount));
+        OnPropertyChanged(nameof(ReportFilterSummary));
+    }
+
+    private void ClearReportFilters()
+    {
+        _selectedReportStatusFilter = "全部状态";
+        _selectedReportTimeFilter = "全部时间";
+        _reportSearchText = string.Empty;
+        OnPropertyChanged(nameof(SelectedReportStatusFilter));
+        OnPropertyChanged(nameof(SelectedReportTimeFilter));
+        OnPropertyChanged(nameof(ReportSearchText));
+        ApplyReportFilters();
     }
 
     private async Task RefreshCurrentReportsAfterExportAsync()
@@ -5401,57 +5566,96 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private async Task ToggleSelectedReportArchiveAsync()
     {
-        if (SelectedReport is null)
+        var selectedReports = GetSelectedReports();
+        if (selectedReports.Count == 0)
         {
             TaskStatusMessage = "请先选择要归档或恢复的报告。";
             return;
         }
 
-        var wasArchived = SelectedReport.IsArchived;
-        if (SelectedReport.PlanReport is { } planReport)
+        var wasArchived = selectedReports[0].IsArchived;
+        foreach (var item in selectedReports)
         {
-            planReport.ArchivedAt = wasArchived ? null : DateTimeOffset.Now;
-            await _reportStore.SavePlanAsync(planReport);
+            if (item.PlanReport is { } planReport)
+            {
+                planReport.ArchivedAt = wasArchived ? null : DateTimeOffset.Now;
+                await _reportStore.SavePlanAsync(planReport);
+            }
+            else
+            {
+                var report = item.Report ?? throw new InvalidOperationException("报告数据不存在。");
+                report.ArchivedAt = wasArchived ? null : DateTimeOffset.Now;
+                await _reportStore.SaveAsync(report);
+            }
         }
-        else
-        {
-            var report = SelectedReport.Report ?? throw new InvalidOperationException("报告数据不存在。");
-            report.ArchivedAt = wasArchived ? null : DateTimeOffset.Now;
-            await _reportStore.SaveAsync(report);
-        }
-        TaskStatusMessage = wasArchived ? "报告已恢复到当前报告。" : "报告已归档。";
+        TaskStatusMessage = wasArchived
+            ? $"已恢复 {selectedReports.Count} 条报告到当前报告。"
+            : $"已归档 {selectedReports.Count} 条报告。";
         await LoadReportsAsync(updateStatus: false);
     }
 
     private void RequestSelectedReportDeletion()
     {
-        if (SelectedReport is null)
+        var selectedReports = GetSelectedReports();
+        if (selectedReports.Count == 0)
         {
             TaskStatusMessage = "请先选择要删除的报告。";
             return;
         }
 
-        _pendingReportDeletion = SelectedReport;
+        RequestReportDeletion(
+            selectedReports,
+            selectedReports.Count == 1 ? "删除历史报告" : $"删除 {selectedReports.Count} 条报告");
+    }
+
+    private void RequestFilteredReportsClear()
+    {
+        if (RecentReports.Count == 0)
+        {
+            TaskStatusMessage = "当前筛选结果中没有可清空的报告。";
+            return;
+        }
+
+        RequestReportDeletion(
+            RecentReports.ToArray(),
+            $"清空当前筛选结果（{RecentReports.Count} 条）");
+    }
+
+    private void RequestReportDeletion(IReadOnlyList<ReportListItem> reports, string title)
+    {
+        _pendingReportDeletions = reports;
+        var preview = string.Join(
+            "\n",
+            reports.Take(5).Select(item => $"• {item.StartedAt} · {item.DeviceType} · {item.State}"));
+        if (reports.Count > 5) preview += $"\n• 另有 {reports.Count - 5} 条";
         OpenPatchDialog(
             PatchDialogAction.DeleteReport,
-            "删除历史报告",
-            $"确认删除以下报告及其导出的 HTML、JSON 文件吗？\n\n{SelectedReport.StartedAt}\n{SelectedReport.Mode} · {SelectedReport.DeviceType} · {SelectedReport.State}\n\n此操作不可恢复。",
+            title,
+            $"确认删除以下报告及其导出的 HTML、JSON 文件吗？\n\n{preview}\n\n此操作不可恢复。",
             "确认删除");
     }
 
-    private async Task DeleteReportAsync(ReportListItem item)
+    private IReadOnlyList<ReportListItem> GetSelectedReports()
+        => _selectedReports.Count > 0
+            ? _selectedReports.ToArray()
+            : SelectedReport is null ? [] : [SelectedReport];
+
+    private async Task DeleteReportsAsync(IReadOnlyList<ReportListItem> reports)
     {
-        if (item.PlanReport is not null)
+        foreach (var item in reports)
         {
-            await _reportStore.DeletePlanAsync(item.Id);
+            if (item.PlanReport is not null)
+            {
+                await _reportStore.DeletePlanAsync(item.Id);
+            }
+            else
+            {
+                await _reportStore.DeleteAsync(item.Id);
+            }
+            if (File.Exists(item.HtmlPath)) File.Delete(item.HtmlPath);
+            if (File.Exists(item.JsonPath)) File.Delete(item.JsonPath);
         }
-        else
-        {
-            await _reportStore.DeleteAsync(item.Id);
-        }
-        if (File.Exists(item.HtmlPath)) File.Delete(item.HtmlPath);
-        if (File.Exists(item.JsonPath)) File.Delete(item.JsonPath);
-        TaskStatusMessage = $"已删除报告：{item.StartedAt}";
+        TaskStatusMessage = $"已删除 {reports.Count} 条报告。";
         await LoadReportsAsync(updateStatus: false);
     }
 
@@ -5792,7 +5996,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             if (!Directory.Exists(root))
             {
                 RefreshUpgradePatchChoices();
-                OnPropertyChanged(nameof(PatchCatalog));
+                NotifyPatchCatalogChanged();
                 return;
             }
 
@@ -5849,7 +6053,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
 
             RefreshUpgradePatchChoices();
-            OnPropertyChanged(nameof(PatchCatalog));
+            NotifyPatchCatalogChanged();
         }
         catch (Exception exception)
         {
@@ -5905,7 +6109,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             OnPropertyChanged(nameof(ReversePatchMetadataDetail));
             OnPropertyChanged(nameof(ImportedPatchFileName));
             OnPropertyChanged(nameof(ImportedPatchMetadataDetail));
-            OnPropertyChanged(nameof(PatchCatalog));
+            NotifyPatchCatalogChanged();
             RefreshUpgradePatchChoices();
             TaskStatusMessage = $"已删除 Patch：{patch.FileName}";
         }
@@ -5947,7 +6151,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _patchDialogAction = PatchDialogAction.None;
         _pendingPublication = [];
         _pendingDeletion = null;
-        _pendingReportDeletion = null;
+        _pendingReportDeletions = [];
         _pendingUpgradeTask = null;
         _pendingUpgradeProfile = null;
         _pendingCycleForwardTask = null;
@@ -5992,7 +6196,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var action = _patchDialogAction;
         var publication = _pendingPublication;
         var deletion = _pendingDeletion;
-        var reportDeletion = _pendingReportDeletion;
+        var reportDeletions = _pendingReportDeletions;
         var upgradeTask = _pendingUpgradeTask;
         var upgradeProfile = _pendingUpgradeProfile;
         var cycleForwardTask = _pendingCycleForwardTask;
@@ -6014,9 +6218,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
-        if (action == PatchDialogAction.DeleteReport && reportDeletion is not null)
+        if (action == PatchDialogAction.DeleteReport && reportDeletions.Count > 0)
         {
-            await DeleteReportAsync(reportDeletion);
+            await DeleteReportsAsync(reportDeletions);
             return;
         }
 
@@ -6138,7 +6342,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             otaDeviceType,
             oldVersion,
             newVersion);
+        NotifyPatchCatalogChanged();
+    }
+
+    private void NotifyPatchCatalogChanged()
+    {
         OnPropertyChanged(nameof(PatchCatalog));
+        OnPropertyChanged(nameof(PatchCatalogCountSummary));
     }
 
     private static bool IsUpgradeFile(string filePath)
@@ -8477,6 +8687,7 @@ public enum PatchDialogAction
 public sealed class PatchSelection : ObservableObject
 {
     private bool _isSelectedForPublish;
+    private int _sequenceNumber;
 
     public PatchSelection(
         string source,
@@ -8518,6 +8729,13 @@ public sealed class PatchSelection : ObservableObject
     {
         get => _isSelectedForPublish;
         set => SetProperty(ref _isSelectedForPublish, value);
+    }
+
+    public string SequenceDisplay => _sequenceNumber.ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+
+    public void SetSequenceNumber(int sequenceNumber)
+    {
+        if (!SetProperty(ref _sequenceNumber, sequenceNumber, nameof(SequenceDisplay))) return;
     }
 
     public bool ManifestVerified { get; }
@@ -8739,6 +8957,8 @@ public sealed class OtaTestPlanItemViewItem : ObservableObject
 
 public sealed class ReportListItem
 {
+    private int _sequenceNumber;
+
     public ReportListItem(OtaReport report, string outputDirectory)
     {
         Report = report;
@@ -8801,6 +9021,20 @@ public sealed class ReportListItem
     public Visibility StageTimelineEmptyVisibility => StageTimeline.Count == 0
         ? Visibility.Visible
         : Visibility.Collapsed;
+
+    public string SequenceDisplay => _sequenceNumber.ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+
+    public void SetSequenceNumber(int sequenceNumber) => _sequenceNumber = sequenceNumber;
+
+    public bool Matches(string searchText)
+    {
+        var query = searchText.Trim();
+        return StartedAt.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+               Mode.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+               DeviceType.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+               State.Contains(query, StringComparison.OrdinalIgnoreCase) ||
+               Version.Contains(query, StringComparison.OrdinalIgnoreCase);
+    }
 
     private static IReadOnlyList<ReportStageSummaryItem> BuildStageTimeline(OtaReport report)
     {
@@ -8875,6 +9109,7 @@ public sealed class SelectableExtenderItem : ObservableObject
 {
     private readonly Action _selectionChanged;
     private bool _isSelected;
+    private int _sequenceNumber;
 
     public SelectableExtenderItem(
         uint extenderId,
@@ -8905,6 +9140,13 @@ public sealed class SelectableExtenderItem : ObservableObject
     }
 
     public uint ExtenderId { get; }
+
+    public string SequenceDisplay => _sequenceNumber.ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+
+    public void SetSequenceNumber(int sequenceNumber)
+    {
+        if (!SetProperty(ref _sequenceNumber, sequenceNumber, nameof(SequenceDisplay))) return;
+    }
 
     public string ExtenderIdDisplay => ProtocolIdentifierFormatter.Format(ExtenderId);
 
@@ -9002,13 +9244,35 @@ public sealed class SelectableExtenderItem : ObservableObject
 
 public sealed record LogAnalysisLineViewItem(string Text, bool IsProblem, bool IsHeader);
 
-public sealed record ImportedLogFileItem(string FilePath, long Length, DateTime LastWriteTime)
+public sealed class ImportedLogFileItem : ObservableObject
 {
+    private int _sequenceNumber;
+
+    public ImportedLogFileItem(string filePath, long length, DateTime lastWriteTime)
+    {
+        FilePath = filePath;
+        Length = length;
+        LastWriteTime = lastWriteTime;
+    }
+
+    public string FilePath { get; }
+
+    public long Length { get; }
+
+    public DateTime LastWriteTime { get; }
+
+    public string SequenceDisplay => _sequenceNumber.ToString("D2", System.Globalization.CultureInfo.InvariantCulture);
+
     public string FileName => Path.GetFileName(FilePath);
 
     public string Detail => Length >= 1024 * 1024
         ? $"{Length / 1024d / 1024d:N1} MB · {LastWriteTime:yyyy-MM-dd HH:mm:ss}"
         : $"{Math.Max(1, Length / 1024d):N1} KB · {LastWriteTime:yyyy-MM-dd HH:mm:ss}";
+
+    public void SetSequenceNumber(int sequenceNumber)
+    {
+        if (!SetProperty(ref _sequenceNumber, sequenceNumber, nameof(SequenceDisplay))) return;
+    }
 }
 
 public sealed class SelectableNodeItem : ObservableObject

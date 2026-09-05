@@ -111,6 +111,18 @@ public partial class MainWindow : Window
         }, DispatcherPriority.Loaded);
     }
 
+    private void OnReportSelectionChanged(object sender, SelectionChangedEventArgs eventArgs)
+    {
+        if (DataContext is not MainWindowViewModel viewModel || sender is not ListBox listBox) return;
+        viewModel.UpdateSelectedReports(listBox.SelectedItems.Cast<ReportListItem>());
+    }
+
+    private void OnImportedLogSelectionChanged(object sender, SelectionChangedEventArgs eventArgs)
+    {
+        if (DataContext is not MainWindowViewModel viewModel || sender is not ListBox listBox) return;
+        viewModel.UpdateSelectedImportedLogFiles(listBox.SelectedItems.Cast<ImportedLogFileItem>());
+    }
+
     private void OnCompactTaskConfigurationChecked(object sender, RoutedEventArgs eventArgs)
     {
         if (!_responsiveLayoutReady) return;
