@@ -186,6 +186,7 @@ public sealed class OtaTestPlanRunner
                     failed++;
                     var itemState = execution.State switch
                     {
+                        OtaTaskState.PartiallySucceeded => OtaTestPlanItemState.PartiallySucceeded,
                         OtaTaskState.Cancelled => OtaTestPlanItemState.Cancelled,
                         OtaTaskState.TimedOut => OtaTestPlanItemState.TimedOut,
                         _ => OtaTestPlanItemState.Failed,

@@ -106,6 +106,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _publicHttpServiceStatus = "未设置";
     private string _targetIdList = "10010001\n10010002\n10010003";
     private int _nodeType = 5;
+    private int _nodeRetryCount;
     private int _selectedNodeTypeValue = 5;
     private string _nodeIdSearch = string.Empty;
     private string _newNodeTypeName = string.Empty;
@@ -212,6 +213,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _gatewayStageSummary = "尚未收到 Gateway 阶段状态。";
     private string _gatewayStageColor = "#65758B";
     private string _gatewayPackageSourceSummary = string.Empty;
+    private string _gatewayNodeRetrySummary = string.Empty;
+    private string _gatewayFailedNodeSummary = string.Empty;
     private string _gatewayPackageSourceColor = "#65758B";
     private GatewayOtaStatus? _lastGatewayStatus;
     private int? _gatewayTaskSequence;
@@ -378,6 +381,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public IReadOnlyList<string> PlanTargetModes { get; } = ["固定目标", "动态匹配"];
 
+    public IReadOnlyList<NodeRetryPolicyOption> NodeRetryPolicies { get; } =
+    [
+        new(0, "整批失败（基线）"),
+        new(1, "失败隔离并重试一次"),
+    ];
+
     public OtaTestPlanItemViewItem? SelectedTestPlanItem
     {
         get => _selectedTestPlanItem;
@@ -501,7 +510,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         get
         {
             var success = TestPlanItems.Count(item => item.State == OtaTestPlanItemState.Succeeded);
-            var failed = TestPlanItems.Count(item => item.State is OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut);
+            var failed = TestPlanItems.Count(item => item.State is OtaTestPlanItemState.PartiallySucceeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut);
             var skipped = TestPlanItems.Count(item => item.State == OtaTestPlanItemState.Skipped);
             var active = TestPlanItems.FirstOrDefault(item => item.State is OtaTestPlanItemState.Preflighting or OtaTestPlanItemState.Running or OtaTestPlanItemState.Verifying);
             var current = active is null
@@ -1157,6 +1166,16 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             _selectedNodeTypeValue = value;
             OnPropertyChanged(nameof(SelectedNodeTypeOption));
             RefreshNodeEligibility();
+            ScheduleSettingsAutoSave();
+        }
+    }
+
+    public int NodeRetryCount
+    {
+        get => _nodeRetryCount;
+        set
+        {
+            if (!SetProperty(ref _nodeRetryCount, value)) return;
             ScheduleSettingsAutoSave();
         }
     }
@@ -2016,6 +2035,32 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ? Visibility.Collapsed
             : Visibility.Visible;
 
+    public string GatewayNodeRetrySummary
+    {
+        get => _gatewayNodeRetrySummary;
+        private set
+        {
+            if (!SetProperty(ref _gatewayNodeRetrySummary, value)) return;
+            OnPropertyChanged(nameof(GatewayNodeRetryVisibility));
+        }
+    }
+
+    public Visibility GatewayNodeRetryVisibility =>
+        string.IsNullOrWhiteSpace(GatewayNodeRetrySummary) ? Visibility.Collapsed : Visibility.Visible;
+
+    public string GatewayFailedNodeSummary
+    {
+        get => _gatewayFailedNodeSummary;
+        private set
+        {
+            if (!SetProperty(ref _gatewayFailedNodeSummary, value)) return;
+            OnPropertyChanged(nameof(GatewayFailedNodeVisibility));
+        }
+    }
+
+    public Visibility GatewayFailedNodeVisibility =>
+        string.IsNullOrWhiteSpace(GatewayFailedNodeSummary) ? Visibility.Collapsed : Visibility.Visible;
+
     public string UpgradeRunModeText
     {
         get => _upgradeRunModeText;
@@ -2377,6 +2422,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         GatewayStages.Clear();
         GatewaySubtasks.Clear();
         GatewayPackageSourceSummary = string.Empty;
+        GatewayNodeRetrySummary = string.Empty;
+        GatewayFailedNodeSummary = string.Empty;
         if (_lastGatewayStatus is not null)
         {
             UpdateGatewayStatus(_lastGatewayStatus);
@@ -2440,6 +2487,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         IsSpecifiedTarget = IsSpecifiedTarget,
         TargetIdList = TargetIdList,
         NodeType = NodeType,
+        NodeRetryCount = NodeRetryCount,
         CustomNodeTypes = NodeTypeCatalog.CustomOptions
             .Select(item => new NodeTypeDefinitionSettings(item.Value, item.Name))
             .ToArray(),
@@ -2535,6 +2583,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             TargetIdList = workspace.TargetIdList;
             NodeTypeCatalog.ReplaceCustom(workspace.CustomNodeTypes ?? []);
             NodeType = NodeTypeCatalog.IsSelectable(workspace.NodeType) ? workspace.NodeType : 5;
+            NodeRetryCount = workspace.NodeRetryCount is 0 or 1 ? workspace.NodeRetryCount : 0;
             NodeTargetsText = workspace.NodeTargetsText;
             RestoreGatewayIdHistory(workspace.GatewayIdHistory, workspace.GatewayId);
             GatewayId = workspace.GatewayId;
@@ -3215,8 +3264,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var forwardMetadata = forward.Patch ?? await PatchMetadata.FromFileAsync(_patchPath);
         var reverseMetadata = reverse.Patch ?? await PatchMetadata.FromFileAsync(_reversePatchPath);
         var limits = GetPatchCapacityLimits();
-        var forwardCapacity = PatchCapacityPolicy.Check(otaDeviceType, forwardMetadata.Length, limits);
-        var reverseCapacity = PatchCapacityPolicy.Check(otaDeviceType, reverseMetadata.Length, limits);
+        int? patchNodeType = otaDeviceType == DeviceType.Node ? _oldFirmwareIdentity.DeviceTypeCode : null;
+        var forwardCapacity = PatchCapacityPolicy.Check(otaDeviceType, forwardMetadata.Length, limits, patchNodeType);
+        var reverseCapacity = PatchCapacityPolicy.Check(otaDeviceType, reverseMetadata.Length, limits, patchNodeType);
         if (!forwardCapacity.IsAllowed || !reverseCapacity.IsAllowed)
         {
             PatchStatus = !forwardCapacity.IsAllowed ? forwardCapacity.Message : reverseCapacity.Message;
@@ -3560,6 +3610,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             GatewayId = GatewayId,
             Target = BuildTaskTarget(deviceType, deviceIds, extenderTargets),
             NodeType = deviceType == DeviceType.Node ? NodeType : null,
+            NodeRetryCount = deviceType == DeviceType.Node ? NodeRetryCount : 0,
             ExtenderTargets = extenderTargets,
             OldVersion = reverse ? NewVersion : OldVersion,
             NewVersion = reverse ? OldVersion : NewVersion,
@@ -3677,6 +3728,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private static string FormatUpgradeVersionDirection(OtaTask task)
         => FormatUpgradeVersionDirection(task.OldVersion, task.NewVersion);
 
+    private static string FormatNodeRetryPolicy(int retryCount)
+        => retryCount == 1 ? "失败隔离并重试一次" : "整批失败（基线）";
+
+    private static string FormatFailedNode(OtaFailedNode node)
+        => $"Extender {ProtocolIdentifierFormatter.Format(node.ExtenderId)} / " +
+           $"{NodeTypeCatalog.Format(node.NodeType)} / Node {ProtocolIdentifierFormatter.Format(node.NodeId)}";
+
     private async Task StartValidatedTaskAsync(OtaTask task, IOtaProtocolProfile profile)
     {
         if (_runner?.HasActiveTask == true)
@@ -3697,6 +3755,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         GatewayStages.Clear();
         GatewaySubtasks.Clear();
         GatewayPackageSourceSummary = string.Empty;
+        GatewayNodeRetrySummary = string.Empty;
+        GatewayFailedNodeSummary = string.Empty;
         _gatewayTaskSequence = null;
         _gatewayTaskStartedAt = null;
         GatewayStageSummary = task.Mode == OtaMode.EcoLink
@@ -3768,6 +3828,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             $"升级方向：{directionText}",
             $"Gateway dev ID：{task.GatewayId}",
             target,
+            task.DeviceType == DeviceType.Node
+                ? $"失败处理：{FormatNodeRetryPolicy(task.NodeRetryCount)}"
+                : "失败处理：不适用",
             warningText,
             $"版本：{task.OldVersion} → {task.NewVersion}",
             $"Patch：{patch.FileName}",
@@ -3811,6 +3874,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             $"升级类型：{type}",
             $"Gateway dev ID：{forward.GatewayId}",
             target,
+            forward.DeviceType == DeviceType.Node
+                ? $"失败处理：{FormatNodeRetryPolicy(forward.NodeRetryCount)}（两个方向相同）"
+                : "失败处理：不适用",
             $"循环轮数：{rounds} 轮（共 {rounds * 2} 次单次升级）",
             $"循环顺序：{forward.OldVersion} → {forward.NewVersion} → {reverse.NewVersion}",
             $"单次间隔：{intervalText}",
@@ -4539,6 +4605,25 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             : string.Equals(status.PackageSource, "TRANSFER", StringComparison.OrdinalIgnoreCase)
                 ? "#2C68D8"
                 : "#65758B";
+        if (_gatewayStatusDeviceType == DeviceType.Node)
+        {
+            var requestedRetryCount = _activeReport?.Task.NodeRetryCount ?? 0;
+            var echo = status.NodeRetryCount.HasValue
+                ? $"设备回显 {status.NodeRetryCount.Value}"
+                : requestedRetryCount == 1 ? "设备未回显，重试能力未确认" : "设备未回显";
+            var mismatch = status.NodeRetryCount.HasValue && status.NodeRetryCount.Value != requestedRetryCount
+                ? " · 警告：回显与请求不一致"
+                : string.Empty;
+            GatewayNodeRetrySummary = $"失败处理：{FormatNodeRetryPolicy(requestedRetryCount)} · {echo} · 实际重试轮次 {status.RetryRound ?? 0}{mismatch}";
+            GatewayFailedNodeSummary = status.FailedNodes.Count == 0
+                ? string.Empty
+                : $"最终失败节点（{status.FailedNodes.Count}）：{string.Join("；", status.FailedNodes.Select(FormatFailedNode))}";
+        }
+        else
+        {
+            GatewayNodeRetrySummary = string.Empty;
+            GatewayFailedNodeSummary = string.Empty;
+        }
         var displayStage = status.Stage;
         var progressPercent = displayStage.Equals("TRANSFER", StringComparison.OrdinalIgnoreCase) && !usesCachedPackage
             ? transferProgressPercent
@@ -4618,6 +4703,23 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    private void UpdateGatewayAcceptanceStatus(OtaExecutionUpdate update)
+    {
+        if (update.GatewayStatus is not null) return;
+        if (update.RequestAck is { Accepted: true } ack)
+        {
+            GatewayStageSummary = $"已受理 · SID {ack.SessionId} · {OtaStatusDisplay.State(ack.Status)} · 正在查询任务状态";
+            GatewayStageColor = StatusColor.For(ack.Status);
+            return;
+        }
+        if (update.Message.Contains("等待 Gateway 业务受理", StringComparison.Ordinal) ||
+            update.Message.Contains("正在等待 Gateway 业务受理", StringComparison.Ordinal))
+        {
+            GatewayStageSummary = "等待网关受理 · 尚未进入设备升级阶段";
+            GatewayStageColor = "#2C68D8";
+        }
+    }
+
     private static double? CalculateProgressPercent(GatewayOtaStatus status)
     {
         if (status.FileSize is not > 0 || status.TransferredBytes is not { } transferredBytes)
@@ -4662,6 +4764,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             UpgradeRunProgressText = $"单次升级 · {update.Message}";
         }
+        UpdateGatewayAcceptanceStatus(update);
         UpdateGatewayStatus(update.GatewayStatus);
         UpdateTerminalSummary(update);
         OnPropertyChanged(nameof(PollingToggleText));
@@ -4692,12 +4795,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     }
 
     private static bool IsTerminalState(OtaTaskState state)
-        => state is OtaTaskState.Succeeded or OtaTaskState.Failed or OtaTaskState.Cancelled or OtaTaskState.TimedOut;
+        => state is OtaTaskState.Succeeded or OtaTaskState.PartiallySucceeded or OtaTaskState.Failed or OtaTaskState.Cancelled or OtaTaskState.TimedOut;
 
     private void UpdateTerminalSummary(OtaExecutionUpdate update)
     {
         if (update.GatewayStatus is not null ||
             update.State is not (OtaTaskState.Succeeded or
+                OtaTaskState.PartiallySucceeded or
                 OtaTaskState.Failed or
                 OtaTaskState.Cancelled or
                 OtaTaskState.TimedOut))
@@ -4707,6 +4811,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var stateCode = update.State switch
         {
             OtaTaskState.Succeeded => "SUCCESS",
+            OtaTaskState.PartiallySucceeded => "PARTIAL_SUCCESS",
             OtaTaskState.Cancelled => "CANCELLED",
             OtaTaskState.TimedOut => "TIMEDOUT",
             _ => "FAILED",
@@ -4948,7 +5053,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 TaskStatusMessage = "循环任务未启动：反向 Patch 元数据不是正向 Patch 的严格逆向版本。";
                 return;
             }
-            var reverseCapacity = PatchCapacityPolicy.Check(deviceType, reverseMetadata.Length, GetPatchCapacityLimits());
+            var reverseCapacity = PatchCapacityPolicy.Check(
+                deviceType,
+                reverseMetadata.Length,
+                GetPatchCapacityLimits(),
+                deviceType == DeviceType.Node ? forwardManifest?.DeviceTypeCode ?? NodeType : null);
             if (IsEcoLink && !selectedReversePatch.IsFullImage && !reverseCapacity.IsAllowed)
             {
                 TaskStatusMessage = $"循环任务未启动：{reverseCapacity.Message}";
@@ -4976,6 +5085,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             Mode = mode, DeviceType = deviceType, GatewayId = GatewayId, Target = target,
             ExtenderTargets = extenderTargets, NodeType = deviceType == DeviceType.Node ? NodeType : null,
+            NodeRetryCount = deviceType == DeviceType.Node ? NodeRetryCount : 0,
             OldVersion = OldVersion, NewVersion = NewVersion, PatchPath = _patchPath, PatchUrl = SelectedHttpPatchUrl, PatchMd5 = _patchMd5, PatchSha256 = _patchSha256,
             ProtocolProfileId = mode == OtaMode.EcoLink ? "ecolink-gateway" : "traditional", ProtocolProfileVersion = "1.0",
         };
@@ -4983,6 +5093,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             Mode = mode, DeviceType = deviceType, GatewayId = GatewayId, Target = target,
             ExtenderTargets = extenderTargets, NodeType = deviceType == DeviceType.Node ? NodeType : null,
+            NodeRetryCount = deviceType == DeviceType.Node ? NodeRetryCount : 0,
             OldVersion = NewVersion, NewVersion = OldVersion, PatchPath = _reversePatchPath, PatchUrl = _reversePatchUrl, PatchMd5 = _reversePatchMd5, PatchSha256 = _reversePatchSha256,
             ProtocolProfileId = mode == OtaMode.EcoLink ? "ecolink-gateway" : "traditional", ProtocolProfileVersion = "1.0",
         };
@@ -5039,6 +5150,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         GatewayStages.Clear();
         GatewaySubtasks.Clear();
         GatewayPackageSourceSummary = string.Empty;
+        GatewayNodeRetrySummary = string.Empty;
+        GatewayFailedNodeSummary = string.Empty;
         _activeReport = new OtaReport { Task = forward, LogAnalysisConclusion = forward.Mode == OtaMode.Traditional ? "日志解析不支持" : null };
         _reportTaskIds.Clear();
         _reportTaskIds.Add(forward.Id);
@@ -5174,15 +5287,21 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private void NotifyReportExported(OtaReport report, (string HtmlPath, string JsonPath) paths)
     {
         var outputDirectory = Path.GetDirectoryName(paths.HtmlPath) ?? paths.HtmlPath;
-        TaskStatusMessage = $"测试完成，报告已导出到 {outputDirectory}";
+        var result = report.FinalState switch
+        {
+            OtaTaskState.Succeeded => (Title: "测试完成", Badge: "通过", Color: "#159E68"),
+            OtaTaskState.PartiallySucceeded => (Title: "测试部分成功", Badge: "部分成功", Color: "#B87500"),
+            _ => (Title: "测试结束", Badge: "失败", Color: "#C73A3A"),
+        };
+        TaskStatusMessage = $"{result.Title}，报告已导出到 {outputDirectory}";
         OpenPatchDialog(
             PatchDialogAction.Information,
-            report.FinalState == OtaTaskState.Succeeded ? "测试完成" : "测试结束",
-            $"测试完成，报告已自动导出到：{Environment.NewLine}{outputDirectory}{Environment.NewLine}{Environment.NewLine}" +
+            result.Title,
+            $"{result.Title}，报告已自动导出到：{Environment.NewLine}{outputDirectory}{Environment.NewLine}{Environment.NewLine}" +
             $"HTML：{Path.GetFileName(paths.HtmlPath)}{Environment.NewLine}JSON：{Path.GetFileName(paths.JsonPath)}",
             "知道了",
-            report.FinalState == OtaTaskState.Succeeded ? "通过" : "失败",
-            report.FinalState == OtaTaskState.Succeeded ? "#159E68" : "#C73A3A");
+            result.Badge,
+            result.Color);
     }
 
     private void NotifyReportExportFailed(Exception exception)
@@ -5782,6 +5901,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 IsSpecifiedTarget = IsSpecifiedTarget,
                 TargetIdList = TargetIdList,
                 NodeType = NodeType,
+                NodeRetryCount = NodeRetryCount,
                 CustomNodeTypes = NodeTypeCatalog.CustomOptions
                     .Select(item => new NodeTypeDefinitionSettings(item.Value, item.Name))
                     .ToArray(),
@@ -6709,7 +6829,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             return $"当前版本 {ProtocolVersionFormatter.FormatRaw(expectedOldVersion)} → {ProtocolVersionFormatter.FormatRaw(expectedNewVersion)} 与 Patch 元数据 {ProtocolVersionFormatter.Format(manifest.OldVersion)} → {ProtocolVersionFormatter.Format(manifest.NewVersion)} 不一致。";
         }
-        var capacity = PatchCapacityPolicy.Check(deviceType, patch.Length, GetPatchCapacityLimits());
+        var capacity = PatchCapacityPolicy.Check(
+            deviceType,
+            patch.Length,
+            GetPatchCapacityLimits(),
+            deviceType == DeviceType.Node ? manifest.DeviceTypeCode : null);
         if (!capacity.IsAllowed)
         {
             return capacity.Message;
@@ -6993,6 +7117,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             $"执行方式：{execution}",
             $"Gateway dev ID：{template.GatewayId}",
             target,
+            template.DeviceType == DeviceType.Node
+                ? $"失败处理：{FormatNodeRetryPolicy(template.NodeRetryCount)}"
+                : "失败处理：不适用",
             $"版本：{ProtocolVersionFormatter.FormatRaw(template.OldVersion)} → {ProtocolVersionFormatter.FormatRaw(template.NewVersion)}",
             $"Patch：{Path.GetFileName(template.ForwardPatch.FilePath)}",
             $"MD5：{template.ForwardPatch.Md5}",
@@ -7039,6 +7166,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var template = item.Template;
         TestPlanItemName = template.Name;
         SelectedTaskType = GetTaskTypeName(template.DeviceType);
+        NodeRetryCount = template.DeviceType == DeviceType.Node && template.NodeRetryCount is 0 or 1
+            ? template.NodeRetryCount
+            : 0;
         SelectedPlanTargetMode = template.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds
             ? "固定目标"
             : "动态匹配";
@@ -7479,6 +7609,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             ForwardPatch = primaryReference,
             ReversePatch = reverseReference,
             TargetRule = targetRule,
+            NodeRetryCount = deviceType == DeviceType.Node ? NodeRetryCount : 0,
             CycleRounds = kind == OtaTestPlanExecutionKind.Cycle ? CycleRounds : 1,
             CycleInterval = interval,
         };
@@ -7585,6 +7716,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         byte expectedOldVersion,
         byte expectedNewVersion)
     {
+        var capacity = PatchCapacityPolicy.Check(
+            deviceType,
+            patch.Length,
+            GetPatchCapacityLimits(),
+            deviceType == DeviceType.Node ? NodeType : null);
+        if (!capacity.IsAllowed) throw new InvalidOperationException(capacity.Message);
+
         if (patch.IsFullImage)
         {
             if (deviceType != DeviceType.Gateway || patch.OtaDeviceType != DeviceType.Gateway)
@@ -8200,6 +8338,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             Target = targets.Target,
             ExtenderTargets = targets.ExtenderTargets,
             NodeType = targets.NodeType,
+            NodeRetryCount = item.DeviceType == DeviceType.Node && item.NodeRetryCount is 0 or 1
+                ? item.NodeRetryCount
+                : 0,
             OldVersion = oldVersion,
             NewVersion = newVersion,
             PatchPath = patch.Path,
@@ -8272,6 +8413,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         GatewayStages.Clear();
         GatewaySubtasks.Clear();
         GatewayPackageSourceSummary = string.Empty;
+        GatewayNodeRetrySummary = string.Empty;
+        GatewayFailedNodeSummary = string.Empty;
         _activePreparedPlanItem = prepared;
         _activeReport = new OtaReport
         {
@@ -8445,7 +8588,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 reportItem.State = update.State;
                 reportItem.Message = update.Message;
                 if (update.State == OtaTestPlanItemState.Running && reportItem.StartedAt is null) reportItem.StartedAt = update.OccurredAt;
-                if (update.State is OtaTestPlanItemState.Succeeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut or OtaTestPlanItemState.Cancelled or OtaTestPlanItemState.Skipped)
+                if (update.State is OtaTestPlanItemState.Succeeded or OtaTestPlanItemState.PartiallySucceeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut or OtaTestPlanItemState.Cancelled or OtaTestPlanItemState.Skipped)
                 {
                     reportItem.FinishedAt = update.OccurredAt;
                 }
@@ -8589,7 +8732,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             var capacity = PatchCapacityPolicy.Check(
                 manifest?.OtaDeviceType ?? DeviceType.Gateway,
                 metadata.Length,
-                _owner.GetPatchCapacityLimits());
+                _owner.GetPatchCapacityLimits(),
+                manifest?.OtaDeviceType == DeviceType.Node ? manifest.DeviceTypeCode : null);
             if (!capacity.IsAllowed) throw new InvalidOperationException(capacity.Message);
             var url = _owner.GetPatchDownloadUrl(reference.FilePath);
             if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) throw new InvalidOperationException("没有可用的 Patch HTTP 地址。 ");
@@ -8830,6 +8974,10 @@ public sealed class OtaTestPlanItemViewItem : ObservableObject
 
     public string PatchName => Path.GetFileName(_template.ForwardPatch.FilePath);
 
+    public string RetryPolicy => _template.DeviceType == OtaTool.Core.Models.DeviceType.Node
+        ? _template.NodeRetryCount == 1 ? "失败隔离并重试一次" : "整批失败（基线）"
+        : string.Empty;
+
     public OtaTestPlanItemState State => _state;
 
     public string StateDisplay => _state switch
@@ -8840,6 +8988,7 @@ public sealed class OtaTestPlanItemViewItem : ObservableObject
         OtaTestPlanItemState.Running => "执行中",
         OtaTestPlanItemState.Verifying => "版本复查中",
         OtaTestPlanItemState.Succeeded => "成功",
+        OtaTestPlanItemState.PartiallySucceeded => "部分成功",
         OtaTestPlanItemState.Failed => "失败",
         OtaTestPlanItemState.TimedOut => "超时",
         OtaTestPlanItemState.Cancelled => "已取消",
@@ -8853,6 +9002,7 @@ public sealed class OtaTestPlanItemViewItem : ObservableObject
 
     public string FailureDetail => _state switch
     {
+        OtaTestPlanItemState.PartiallySucceeded => $"部分成功：{_message}",
         OtaTestPlanItemState.Failed => $"失败原因：{_message}",
         OtaTestPlanItemState.TimedOut => $"超时原因：{_message}",
         OtaTestPlanItemState.Cancelled => $"取消原因：{_message}",
@@ -8889,7 +9039,7 @@ public sealed class OtaTestPlanItemViewItem : ObservableObject
             _startedAt = timestamp;
             timingChanged = true;
         }
-        if (state is OtaTestPlanItemState.Succeeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut or OtaTestPlanItemState.Cancelled or OtaTestPlanItemState.Skipped)
+        if (state is OtaTestPlanItemState.Succeeded or OtaTestPlanItemState.PartiallySucceeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut or OtaTestPlanItemState.Cancelled or OtaTestPlanItemState.Skipped)
         {
             _startedAt ??= timestamp;
             _finishedAt = timestamp;
@@ -8944,6 +9094,7 @@ public sealed class OtaTestPlanItemViewItem : ObservableObject
         OnPropertyChanged(nameof(TargetMode));
         OnPropertyChanged(nameof(TargetSummary));
         OnPropertyChanged(nameof(PatchName));
+        OnPropertyChanged(nameof(RetryPolicy));
         NotifyTimingChanged();
     }
 
@@ -9459,6 +9610,8 @@ public sealed record NodeTypeOption(int Value, string Name)
     public string DisplayName => $"{Name}（{Value}）";
 }
 
+public sealed record NodeRetryPolicyOption(int Value, string Name);
+
 public static class NodeTypeCatalog
 {
     private static readonly IReadOnlyList<NodeTypeOption> BuiltInOptions =
@@ -9850,6 +10003,7 @@ public static class OtaStatusDisplay
         "PASSED" => "已通过",
         "SKIPPED" => "已跳过",
         "FAILED" => "失败",
+        "PARTIAL_SUCCESS" or "PARTIALLYSUCCEEDED" => "部分成功",
         "CANCELLED" => "已取消",
         "TIMEDOUT" => "已超时",
         "RUNNING" or "ACTIVE" => "进行中",
@@ -9886,6 +10040,7 @@ public static class StatusColor
     {
         "SUCCESS" or "SUCCEEDED" or "COMPLETED" or "PASSED" or "SKIPPED" => "#168A55",
         "FAILED" or "CANCELLED" or "TIMEDOUT" => "#C73A3A",
+        "PARTIAL_SUCCESS" or "PARTIALLYSUCCEEDED" => "#B87500",
         "RUNNING" or "ACTIVE" or "PREFLIGHTING" or "VERIFYING" => "#2C68D8",
         "READY" => "#168A55",
         "NEEDSREVIEW" or "DRAFT" => "#B87500",

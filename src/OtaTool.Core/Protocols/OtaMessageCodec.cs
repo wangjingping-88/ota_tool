@@ -22,6 +22,15 @@ public sealed record GatewayFinalResult(
     string Prompt,
     bool IsSuccess);
 
+public sealed record GatewayOtaRequestAck(
+    int TaskSequence,
+    uint SessionId,
+    bool Accepted,
+    bool Duplicate,
+    string Result,
+    string Status,
+    string Reason);
+
 public sealed record GatewayOtaStage(
     string Stage,
     string State,
@@ -59,6 +68,12 @@ public sealed record GatewayOtaStatus(
     IReadOnlyList<GatewayOtaStage> Stages,
     IReadOnlyList<GatewayOtaSubtask> Subtasks)
 {
+    public int? NodeRetryCount { get; init; }
+
+    public int? RetryRound { get; init; }
+
+    public IReadOnlyList<OtaFailedNode> FailedNodes { get; init; } = [];
+
     public string PackageSource { get; init; } = string.Empty;
 
     public int? CacheTargetTotal { get; init; }
@@ -118,6 +133,7 @@ public static class OtaMessageCodec
     public const int UpgradeCompletionCommand = 6;
     public const int StatusQueryCommand = 8;
     public const int StatusResponseCommand = 9;
+    public const int UpgradeRequestAckCommand = 10;
     public const int UserDataCommand = 100;
     public const byte AsyncNodeListQueryCommand = 0x0E;
     public const byte AsyncNodeListResponseCommand = 0x0F;
@@ -180,6 +196,11 @@ public static class OtaMessageCodec
                 throw new InvalidOperationException("Node OTA 必须填写 2～63 的 node_type。");
             }
             ota["node_type"] = task.NodeType.Value;
+            if (task.NodeRetryCount is not (0 or 1))
+            {
+                throw new InvalidOperationException("Node OTA 重试次数只能是数字 0 或 1。");
+            }
+            ota["node_retry_count"] = task.NodeRetryCount;
             var targets = new JsonArray();
             foreach (var target in task.ExtenderTargets)
             {
@@ -756,12 +777,42 @@ public static class OtaMessageCodec
                 stages,
                 subtasks)
             {
+                NodeRetryCount = GetOptionalInt(otaStatus, "node_retry_count"),
+                RetryRound = GetOptionalInt(otaStatus, "retry_round"),
+                FailedNodes = ParseFailedNodes(otaStatus),
                 PackageSource = GetString(otaStatus, "package_source"),
                 CacheTargetTotal = GetOptionalNonNegativeInt(otaStatus, "cache_target_total"),
                 CacheHitCount = GetOptionalNonNegativeInt(otaStatus, "cache_hit_count"),
                 CacheQueryElapsedMs = GetOptionalNonNegativeLong(otaStatus, "cache_query_elapsed_ms"),
             };
             return true;
+        }
+        catch (Exception exception) when (IsMalformedPayloadException(exception))
+        {
+            return false;
+        }
+    }
+
+    public static bool TryParseGatewayOtaRequestAck(string json, out GatewayOtaRequestAck? ack)
+    {
+        ack = null;
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                return TryParseGatewayOtaRequestAckElement(root, out ack);
+            }
+            if (root.ValueKind != JsonValueKind.Array)
+            {
+                return false;
+            }
+            foreach (var element in root.EnumerateArray())
+            {
+                if (TryParseGatewayOtaRequestAckElement(element, out ack)) return true;
+            }
+            return false;
         }
         catch (Exception exception) when (IsMalformedPayloadException(exception))
         {
@@ -780,6 +831,44 @@ public static class OtaMessageCodec
     };
 
     private static string GetString(JsonElement element, string name) => element.TryGetProperty(name, out var value) ? value.GetString() ?? string.Empty : string.Empty;
+
+    private static bool TryParseGatewayOtaRequestAckElement(JsonElement root, out GatewayOtaRequestAck? ack)
+    {
+        ack = null;
+        if (root.ValueKind != JsonValueKind.Object ||
+            !root.TryGetProperty("cmd", out var command) ||
+            !command.TryGetInt32(out var commandValue) ||
+            commandValue != UpgradeRequestAckCommand ||
+            !root.TryGetProperty("ota_ack", out var ackElement) ||
+            ackElement.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var taskSequence = GetInt(ackElement, "task_seq");
+        var sessionId = GetOptionalUInt(ackElement, "session_id") ?? 0;
+        var accepted = GetOptionalInt(ackElement, "accepted");
+        var duplicate = GetOptionalInt(ackElement, "duplicate");
+        var result = GetString(ackElement, "result");
+        var status = GetString(ackElement, "status");
+        var reason = GetString(ackElement, "reason");
+        if (taskSequence <= 0 || accepted is not (0 or 1) || duplicate is not (0 or 1) ||
+            (accepted == 1 && sessionId == 0) ||
+            string.IsNullOrWhiteSpace(result) || string.IsNullOrWhiteSpace(status))
+        {
+            return false;
+        }
+
+        ack = new GatewayOtaRequestAck(
+            taskSequence,
+            sessionId,
+            accepted == 1,
+            duplicate == 1,
+            result,
+            status,
+            reason);
+        return true;
+    }
 
     private static int GetInt(JsonElement element, string name) => element.TryGetProperty(name, out var value) && value.TryGetInt32(out var number) ? number : 0;
 
@@ -809,6 +898,34 @@ public static class OtaMessageCodec
                 GetOptionalLong(stage, "start_offset_ms") ?? 0,
                 GetOptionalLong(stage, "duration_ms") ?? 0,
                 GetString(stage, "reason")));
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<OtaFailedNode> ParseFailedNodes(JsonElement otaStatus)
+    {
+        if (!otaStatus.TryGetProperty("failed_node_list", out var nodes) || nodes.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<OtaFailedNode>();
+        }
+
+        var result = new List<OtaFailedNode>();
+        var unique = new HashSet<(uint ExtenderId, byte NodeType, ushort NodeId)>();
+        foreach (var node in nodes.EnumerateArray())
+        {
+            if (node.ValueKind != JsonValueKind.Object) continue;
+            var extenderId = GetOptionalUInt(node, "extender_id");
+            var nodeType = GetOptionalInt(node, "node_type");
+            var nodeId = GetOptionalInt(node, "node_id");
+            if (extenderId is not > 0 ||
+                nodeType is not (>= 2 and <= 63) ||
+                nodeId is not (>= 1 and <= ushort.MaxValue))
+            {
+                continue;
+            }
+
+            var key = (extenderId.Value, (byte)nodeType.Value, (ushort)nodeId.Value);
+            if (unique.Add(key)) result.Add(new OtaFailedNode(key.Item1, key.Item2, key.Item3));
         }
         return result;
     }

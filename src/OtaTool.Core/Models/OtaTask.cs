@@ -29,6 +29,7 @@ public enum OtaTaskState
     Failed,
     TimedOut,
     Cancelled,
+    PartiallySucceeded,
 }
 
 public sealed record OtaTaskTarget(
@@ -42,6 +43,9 @@ public sealed record OtaTaskTarget(
 
 /// <summary>Node OTA 中一个 Extender 与其下属 Node 目标的显式映射。</summary>
 public sealed record OtaExtenderTarget(string ExtenderId, IReadOnlyList<string> NodeIds);
+
+/// <summary>Node OTA 最终失败目标；三元组共同构成唯一键。</summary>
+public sealed record OtaFailedNode(uint ExtenderId, byte NodeType, ushort NodeId);
 
 public sealed class OtaTask
 {
@@ -58,6 +62,9 @@ public sealed class OtaTask
 
     /// <summary>仅 EcoLink Node 任务使用，范围 2～63。</summary>
     public int? NodeType { get; init; }
+
+    /// <summary>Node OTA 失败处理策略：0=整批失败，1=失败隔离并由固件自动重试一次。</summary>
+    public int NodeRetryCount { get; init; }
 
     public string GatewayId { get; init; } = string.Empty;
 
@@ -88,4 +95,6 @@ public sealed record OtaTaskResult(
     string Message,
     DateTimeOffset OccurredAt,
     int? SuccessCount = null,
-    int? FailedCount = null);
+    int? FailedCount = null,
+    int? RetryRound = null,
+    IReadOnlyList<OtaFailedNode>? FailedNodes = null);

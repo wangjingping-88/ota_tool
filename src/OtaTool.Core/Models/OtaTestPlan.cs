@@ -27,6 +27,7 @@ public enum OtaTestPlanItemState
     TimedOut,
     Cancelled,
     Skipped,
+    PartiallySucceeded,
 }
 
 public enum OtaTestPlanState
@@ -96,6 +97,9 @@ public sealed record OtaTestPlanItemTemplate
     public OtaTestPlanPatchReference? ReversePatch { get; init; }
 
     public OtaTestPlanTargetRule TargetRule { get; init; } = new();
+
+    /// <summary>Node OTA 失败处理策略；旧历史缺少该字段时默认使用整批失败。</summary>
+    public int NodeRetryCount { get; init; }
 
     public int CycleRounds { get; init; } = 1;
 

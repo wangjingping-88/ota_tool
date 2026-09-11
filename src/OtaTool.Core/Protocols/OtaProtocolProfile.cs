@@ -154,6 +154,10 @@ public static class OtaTaskValidator
             {
                 return OtaTaskValidationResult.Failure("Node OTA 必须填写 2～63 的 node_type。");
             }
+            if (task.NodeRetryCount is not (0 or 1))
+            {
+                return OtaTaskValidationResult.Failure("Node OTA 重试次数只能是数字 0 或 1。");
+            }
             if (task.ExtenderTargets.Count is < 1 or > 16)
             {
                 return OtaTaskValidationResult.Failure("Node OTA 必须配置 1～16 个 Extender 目标。");
@@ -187,6 +191,10 @@ public static class OtaTaskValidator
                 return OtaTaskValidationResult.Failure("单个 Node OTA 任务最多允许 256 个 Node。");
             }
         }
+        else if (task.NodeRetryCount != 0)
+        {
+            return OtaTaskValidationResult.Failure("非 Node 任务不能启用 Node 失败隔离重试。");
+        }
 
         if (string.IsNullOrWhiteSpace(task.PatchPath) || !File.Exists(task.PatchPath))
         {
@@ -200,8 +208,8 @@ public static class OtaTaskValidator
         }
 
         var patchLength = new FileInfo(task.PatchPath).Length;
-        return PatchCapacityPolicy.Check(task.DeviceType, patchLength) is { IsAllowed: true }
+        return PatchCapacityPolicy.Check(task.DeviceType, patchLength, nodeType: task.NodeType) is { IsAllowed: true }
             ? OtaTaskValidationResult.Success()
-            : OtaTaskValidationResult.Failure(PatchCapacityPolicy.Check(task.DeviceType, patchLength).Message);
+            : OtaTaskValidationResult.Failure(PatchCapacityPolicy.Check(task.DeviceType, patchLength, nodeType: task.NodeType).Message);
     }
 }

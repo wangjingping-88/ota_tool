@@ -53,6 +53,7 @@ public sealed record PatchCapacityLimits(
 public static class PatchCapacityPolicy
 {
     public const long NodePatchLimit = 0xD000;
+    public const long RoadLightNodePatchLimit = 0xB000;
     public const long AsyncPatchLimit = 0x2F000;
     public const long SyncPatchLimit = 0xD000;
     public const long GatewayPatchLimit = 0x200000;
@@ -60,10 +61,13 @@ public static class PatchCapacityPolicy
     public static PatchCapacityCheckResult Check(
         DeviceType deviceType,
         long patchLength,
-        PatchCapacityLimits? limits = null)
+        PatchCapacityLimits? limits = null,
+        int? nodeType = null)
     {
         limits ??= new PatchCapacityLimits();
-        var limit = limits.For(deviceType);
+        var limit = deviceType == DeviceType.Node && nodeType == 7
+            ? Math.Min(limits.Node, RoadLightNodePatchLimit)
+            : limits.For(deviceType);
 
         if (patchLength < 0)
         {
@@ -75,7 +79,9 @@ public static class PatchCapacityPolicy
             return new PatchCapacityCheckResult(
                 false,
                 limit,
-                $"Patch 大小 {patchLength / 1024d:F1} KiB，超过当前门限 {limit / 1024d:F1} KiB。请减小版本跨度或采用分段升级。");
+                deviceType == DeviceType.Node && nodeType == 7
+                    ? $"路灯控制器（Node 类型 7）Patch 大小 {patchLength / 1024d:F1} KiB，超过专用门限 {limit / 1024d:F1} KiB。请减小版本跨度或采用分段升级。"
+                    : $"Patch 大小 {patchLength / 1024d:F1} KiB，超过当前门限 {limit / 1024d:F1} KiB。请减小版本跨度或采用分段升级。");
         }
 
         return new PatchCapacityCheckResult(true, limit, "Patch 容量合法。");

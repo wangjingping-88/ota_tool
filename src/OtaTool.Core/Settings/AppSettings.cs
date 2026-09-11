@@ -70,6 +70,8 @@ public sealed class AppSettings
 
     public int NodeType { get; init; } = 5;
 
+    public int NodeRetryCount { get; init; }
+
     public IReadOnlyList<NodeTypeDefinitionSettings> CustomNodeTypes { get; init; } = [];
 
     public string NodeTargetsText { get; init; } = string.Empty;
@@ -151,6 +153,7 @@ public sealed class ModeWorkspaceSettings
     public bool IsSpecifiedTarget { get; set; } = true;
     public string TargetIdList { get; set; } = string.Empty;
     public int NodeType { get; set; } = 5;
+    public int NodeRetryCount { get; set; }
     public IReadOnlyList<NodeTypeDefinitionSettings> CustomNodeTypes { get; set; } = [];
     public string NodeTargetsText { get; set; } = string.Empty;
     public string GatewayId { get; set; } = string.Empty;
@@ -209,6 +212,7 @@ public sealed class ModeWorkspaceSettings
         IsSpecifiedTarget = settings.IsSpecifiedTarget,
         TargetIdList = settings.TargetIdList,
         NodeType = settings.NodeType,
+        NodeRetryCount = settings.NodeRetryCount is 0 or 1 ? settings.NodeRetryCount : 0,
         CustomNodeTypes = settings.CustomNodeTypes,
         NodeTargetsText = settings.NodeTargetsText,
         GatewayId = settings.GatewayId,

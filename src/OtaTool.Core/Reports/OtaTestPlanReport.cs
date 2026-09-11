@@ -40,7 +40,7 @@ public sealed class OtaTestPlanReport
 
     public int SucceededCount => Items.Count(item => item.State == OtaTestPlanItemState.Succeeded);
 
-    public int FailedCount => Items.Count(item => item.State is OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut);
+    public int FailedCount => Items.Count(item => item.State is OtaTestPlanItemState.PartiallySucceeded or OtaTestPlanItemState.Failed or OtaTestPlanItemState.TimedOut);
 
     public int SkippedCount => Items.Count(item => item.State == OtaTestPlanItemState.Skipped);
 }

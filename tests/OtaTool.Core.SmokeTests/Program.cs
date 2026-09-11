@@ -613,8 +613,8 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("OtaTool/{CurrentModeKey}/{suffix}", StringComparison.Ordinal),
         "两种协议模式必须使用独立工作区、运行状态、报告视图和 Credential Manager 凭据键。");
     Assert(viewModel.Contains("autoExport: IsTerminalState(update.State) && !_isCycleUpgradeRunning", StringComparison.Ordinal)
-        && viewModel.Contains("测试完成，报告已导出到", StringComparison.Ordinal)
-        && viewModel.Contains("report.FinalState == OtaTaskState.Succeeded ? \"通过\" : \"失败\"", StringComparison.Ordinal)
+        && viewModel.Contains("OtaTaskState.PartiallySucceeded => (Title: \"测试部分成功\"", StringComparison.Ordinal)
+        && viewModel.Contains("报告已导出到", StringComparison.Ordinal)
         && xaml.Contains("Visibility=\"{Binding DialogResultStampVisibility}\"", StringComparison.Ordinal)
         && xaml.Contains("<RotateTransform Angle=\"-12\" />", StringComparison.Ordinal)
         && !viewModel.Contains("ExportActiveReportAsync", StringComparison.Ordinal),
@@ -987,6 +987,12 @@ static void VerifyNodeTypePresentation()
         && viewModel.Contains("ClearNodeSelection();", StringComparison.Ordinal)
         && viewModel.Contains("node.IsSelected = node.NodeType == nodeType && node.CanSelect;", StringComparison.Ordinal),
         "Node 类型选择应批量标记同类型节点，并提供不选择项用于取消全部选择。");
+    Assert(xaml.Contains("Text=\"失败处理策略\"", StringComparison.Ordinal)
+        && xaml.Contains("ItemsSource=\"{Binding NodeRetryPolicies}\"", StringComparison.Ordinal)
+        && xaml.Contains("SelectedValue=\"{Binding NodeRetryCount, Mode=TwoWay}\"", StringComparison.Ordinal)
+        && viewModel.Contains("new(0, \"整批失败（基线）\")", StringComparison.Ordinal)
+        && viewModel.Contains("new(1, \"失败隔离并重试一次\")", StringComparison.Ordinal),
+        "Node 升级配置应提供默认整批失败和失败隔离重试一次两种策略。");
     Assert(xaml.Contains("Text=\"{Binding SoftwareVersionDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
         && viewModel.Contains("ProtocolVersionFormatter.IsKnown(SoftwareVersion)", StringComparison.Ordinal)
         && viewModel.Contains("协议返回未知版本，不能升级", StringComparison.Ordinal)
@@ -1039,6 +1045,12 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
     Assert(metadata.Md5.Length == 32 && metadata.Sha256.Length == 64, "差分包哈希读取错误。");
     Assert(PatchCapacityPolicy.Check(DeviceType.Node, 0xD000).IsAllowed, "Node 容量上限应允许。");
     Assert(!PatchCapacityPolicy.Check(DeviceType.Node, 0xD001).IsAllowed, "Node 超出容量上限应拒绝。");
+    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 0xB000, nodeType: 7).IsAllowed,
+        "路灯控制器 Node Patch 应允许 44 KiB 边界。");
+    Assert(!PatchCapacityPolicy.Check(DeviceType.Node, 0xB001, nodeType: 7).IsAllowed,
+        "路灯控制器 Node Patch 超过 44 KiB 必须拒绝。");
+    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 0xD000, nodeType: 5).IsAllowed,
+        "非路灯 Node Patch 应继续允许 52 KiB 边界。");
     Assert(PatchCapacityPolicy.Check(DeviceType.Sync, 0xD000).IsAllowed, "Sync 容量上限应为 52 KiB。");
     Assert(!PatchCapacityPolicy.Check(DeviceType.Sync, 0xD001).IsAllowed, "Sync 超出 52 KiB 应拒绝。");
     Assert(PatchCapacityPolicy.Check(DeviceType.Gateway, 0x200000).IsAllowed, "Gateway 容量上限应为 2 MiB。");
@@ -1069,14 +1081,17 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
 
     OtaTask CreateEcoNodeTask(
         IReadOnlyList<OtaExtenderTarget> targets,
-        string patchUrl = "http://127.0.0.1:8080/sample.patch") => new()
+        string patchUrl = "http://127.0.0.1:8080/sample.patch",
+        int nodeRetryCount = 0,
+        int nodeType = 2) => new()
     {
         Mode = OtaMode.EcoLink,
         DeviceType = DeviceType.Node,
         GatewayId = "704027",
         Target = OtaTaskTarget.Specified(targets.SelectMany(target => target.NodeIds).ToArray()),
         ExtenderTargets = targets,
-        NodeType = 2,
+        NodeType = nodeType,
+        NodeRetryCount = nodeRetryCount,
         OldVersion = "1",
         NewVersion = "2",
         PatchPath = patchPath,
@@ -1108,7 +1123,24 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
         new EcoLinkProtocolProfile()).IsValid,
         "Node OTA 应拒绝超过 256 个目标。");
     var nodeRequest = OtaMessageCodec.CreateUpgradeRequest(nodeTask, 2);
-    Assert(nodeRequest.JsonPayload.Contains("\"node_type\":2", StringComparison.Ordinal) && nodeRequest.JsonPayload.Contains("\"nodes\":[1,2,3]", StringComparison.Ordinal), "Node 任务编码错误。");
+    Assert(nodeRequest.JsonPayload.Contains("\"node_type\":2", StringComparison.Ordinal)
+        && nodeRequest.JsonPayload.Contains("\"node_retry_count\":0", StringComparison.Ordinal)
+        && nodeRequest.JsonPayload.Contains("\"nodes\":[1,2,3]", StringComparison.Ordinal),
+        "Node 任务编码必须携带数字型默认重试策略 0。");
+    var retryNodeTask = CreateEcoNodeTask(
+        [new OtaExtenderTarget("10010001", ["1"])],
+        nodeRetryCount: 1);
+    using (var retryRequestJson = JsonDocument.Parse(OtaMessageCodec.CreateUpgradeRequest(retryNodeTask, 4).JsonPayload))
+    {
+        Assert(retryRequestJson.RootElement.GetProperty("ota").GetProperty("node_retry_count").ValueKind == JsonValueKind.Number
+            && retryRequestJson.RootElement.GetProperty("ota").GetProperty("node_retry_count").GetInt32() == 1,
+            "Node 重试策略必须在 ota 内按 JSON 数字 1 下发。");
+    }
+    var invalidRetryTask = CreateEcoNodeTask(
+        [new OtaExtenderTarget("10010001", ["1"])],
+        nodeRetryCount: 2);
+    Assert(!OtaTaskValidator.Validate(invalidRetryTask, new EcoLinkProtocolProfile()).IsValid,
+        "Node 重试策略只能是 0 或 1。");
     const string timestampedPatchUrl = "http://127.0.0.1:8080/street-light-v1-to-v2-1788317157.patch";
     var timestampedRequest = OtaMessageCodec.CreateUpgradeRequest(
         CreateEcoNodeTask([new OtaExtenderTarget("10010001", ["1"])], timestampedPatchUrl),
@@ -1148,6 +1180,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         HttpUsesLocalServer = false, PublicHttpBaseUrl = "https://files.example/ota/", SftpHost = "sftp.example", SftpPort = 2222,
         SftpPrivateKeyPath = "D:\\keys\\ota", LogDirectory = "D:\\logs",
         PatchNameSuffix = "jp01", ForwardPatchName = "socket-v1-to-v2-jp01.patch", ReversePatchName = "socket-v2-to-v1-jp01.patch",
+        NodeRetryCount = 1,
         CycleIntervalMode = "随机间隔", CycleRandomMinimumSeconds = 3, CycleRandomMaximumSeconds = 9,
         GatewayIdHistory = ["704027", "704065"],
         CustomNodeTypes = [new NodeTypeDefinitionSettings(9, "烟感")],
@@ -1175,6 +1208,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
                 GatewayId = "eco-gateway",
                 GatewayIdHistory = ["704027", "704065"],
                 NodeType = 9,
+                NodeRetryCount = 1,
                 TestPlanTemplates = [savedPlan],
                 SelectedTestPlanId = savedPlan.Id,
             },
@@ -1221,7 +1255,9 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
         && actual.ModeWorkspaces["EcoLink"].SelectedPageName == "升级任务"
         && actual.ModeWorkspaces["EcoLink"].SelectedTaskType == "节点升级"
         && actual.ModeWorkspaces["EcoLink"].NodeType == 9
+        && actual.ModeWorkspaces["EcoLink"].NodeRetryCount == 1
         && actual.ModeWorkspaces["EcoLink"].GatewayIdHistory.SequenceEqual(["704027", "704065"])
+        && actual.ModeWorkspaces["EcoLink"].TestPlanTemplates.Single().Items.First().NodeRetryCount == 1
         && actual.ModeWorkspaces["EcoLink"].TestPlanTemplates.Single().Id == savedPlan.Id
         && actual.ModeWorkspaces["EcoLink"].SelectedTestPlanId == savedPlan.Id
         && actual.ModeWorkspaces["Traditional"].GatewayId == "traditional-gateway",
@@ -1233,6 +1269,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
     Assert(migrated.MqttHost == expected.MqttHost
         && migrated.SelectedTaskType == expected.SelectedTaskType
         && migrated.PatchNameSuffix == expected.PatchNameSuffix
+        && migrated.NodeRetryCount == 1
         && migrated.GatewayIdHistory.SequenceEqual(expected.GatewayIdHistory)
         && migrated.CustomNodeTypes.Count == 1
         && migrated.DiscoveredNodeGroups.Count == 1,
@@ -1247,6 +1284,7 @@ static async Task VerifySettingsPersistenceAsync(string workspace)
            legacySettings.DiscoveredNodeGroups.Single().ReportedCount is null &&
            legacySettings.DiscoveredNodeGroups.Single().Nodes.Single().Rssi == -58 &&
            legacySettings.TestPlanTemplates.Count == 0 &&
+           legacySettings.NodeRetryCount == 0 &&
            legacySettings.SelectedTestPlanId is null,
         "旧设置缺少新增状态字段时应使用默认值，无需迁移脚本。");
 }
@@ -1347,6 +1385,23 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
     Assert(OtaMessageCodec.TryParseGatewayStatus(compatibleCacheStatusJson, out var compatibleCacheStatus)
         && compatibleCacheStatus?.UsesCachedPackage == true,
         "Gateway 暂未增加 SKIPPED 状态时，工具应能通过 CACHE_REUSED 原因识别缓存复用。");
+    const string partialSuccessStatusJson = "{\"cmd\":9,\"ota_status\":{\"query_seq\":5,\"task_seq\":1001,\"session_id\":12,\"result\":\"OK\",\"status\":\"PARTIAL_SUCCESS\",\"stage\":\"FINISHED\",\"node_retry_count\":1,\"retry_round\":1,\"target_total\":5,\"target_success\":4,\"target_failed\":1,\"failed_node_list\":[{\"extender_id\":51890,\"node_type\":5,\"node_id\":64385},{\"extender_id\":51890,\"node_type\":6,\"node_id\":64385}]}}";
+    Assert(OtaMessageCodec.TryParseGatewayStatus(partialSuccessStatusJson, out var partialStatus)
+        && partialStatus?.NodeRetryCount == 1
+        && partialStatus.RetryRound == 1
+        && partialStatus.TargetSuccess == 4
+        && partialStatus.TargetFailed == 1
+        && partialStatus.FailedNodes.Count == 2,
+        "部分成功状态必须解析重试回显、统计和按 Extender/类型/Node 三元组保留失败名单。");
+    const string acceptedAckJson = "[{\"cmd\":10,\"ver\":\"v2.0\",\"ota_ack\":{\"task_seq\":1001,\"session_id\":123456789,\"accepted\":1,\"duplicate\":0,\"result\":\"ACCEPTED\",\"status\":\"RUNNING\",\"reason\":\"\"}}]";
+    Assert(OtaMessageCodec.TryParseGatewayOtaRequestAck(acceptedAckJson, out var acceptedAck)
+        && acceptedAck is { TaskSequence: 1001, SessionId: 123456789, Accepted: true, Duplicate: false }
+        && acceptedAck.Result == "ACCEPTED",
+        "cmd=10 业务受理应答应兼容 MQTT 外层数组并解析任务序号、SID 和受理结果。");
+    Assert(!OtaMessageCodec.TryParseGatewayOtaRequestAck(
+            "{\"cmd\":10,\"ota_ack\":{\"task_seq\":1001,\"session_id\":1,\"accepted\":2,\"duplicate\":0,\"result\":\"ACCEPTED\",\"status\":\"RUNNING\",\"reason\":\"\"}}",
+            out _),
+        "非法 accepted 值不得作为有效业务受理应答。 ");
 
     await using var fakeMqtt = new FakeMqttTransport();
     await using var runner = new OtaTaskRunner(fakeMqtt, new TraditionalProtocolProfile(), new InMemoryTaskSequenceStore());
@@ -1397,6 +1452,60 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
         $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{boundStatusSequence},\"task_seq\":1,\"session_id\":7,\"result\":\"OK\",\"status\":\"SUCCESS\",\"stage\":\"FINISHED\"}}}}");
     await WaitUntilAsync(() => !ecoRunner.HasActiveTask, TimeSpan.FromSeconds(1));
     Assert(!ecoRunner.HasActiveTask, "EcoLink 模式未按状态轮询终态结束任务。");
+
+    await using var ackMqtt = new FakeMqttTransport();
+    await using var ackRunner = new OtaTaskRunner(
+        ackMqtt,
+        new EcoLinkProtocolProfile(),
+        new InMemoryTaskSequenceStore(),
+        pollingOptions: new OtaPollingOptions(
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(10),
+            TimeSpan.FromMilliseconds(10),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1)));
+    OtaExecutionUpdate? acceptedUpdate = null;
+    ackRunner.Updated += (_, update) =>
+    {
+        if (update.RequestAck?.Accepted == true) acceptedUpdate = update;
+    };
+    Assert((await ackRunner.StartAsync(ecoTask)).State == OtaTaskState.Running,
+        "cmd=10 受理测试任务未启动。 ");
+    ackMqtt.Inject("ucchip/up/sgw/704027/1",
+        "[{\"cmd\":10,\"ver\":\"v2.0\",\"ota_ack\":{\"task_seq\":1,\"session_id\":77,\"accepted\":1,\"duplicate\":1,\"result\":\"DUPLICATE\",\"status\":\"RUNNING\",\"reason\":\"\"}}]");
+    await WaitUntilAsync(() => acceptedUpdate is not null && ackMqtt.Published.Count >= 2, TimeSpan.FromSeconds(1));
+    Assert(acceptedUpdate?.Message.Contains("命中幂等记录", StringComparison.Ordinal) == true
+        && ackMqtt.Published[1].GetPayloadAsUtf8().Contains("\"session_id\":77", StringComparison.Ordinal),
+        "DUPLICATE 应答应绑定原 SID、提示幂等命中并继续 cmd=8/9 闭环。 ");
+    var ackStatusSequence = int.Parse(ackMqtt.Published[1].Topic.Split('/')[^1]);
+    ackMqtt.Inject("ucchip/up/sgw/704027/1",
+        $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{ackStatusSequence},\"task_seq\":1,\"session_id\":77,\"result\":\"OK\",\"status\":\"SUCCESS\",\"stage\":\"FINISHED\"}}}}");
+    await WaitUntilAsync(() => !ackRunner.HasActiveTask, TimeSpan.FromSeconds(1));
+
+    await using var rejectedMqtt = new FakeMqttTransport();
+    await using var rejectedRunner = new OtaTaskRunner(
+        rejectedMqtt,
+        new EcoLinkProtocolProfile(),
+        new InMemoryTaskSequenceStore(),
+        pollingOptions: new OtaPollingOptions(
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(10),
+            TimeSpan.FromMilliseconds(10),
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(1)));
+    OtaExecutionUpdate? rejectedUpdate = null;
+    rejectedRunner.Updated += (_, update) =>
+    {
+        if (update.State == OtaTaskState.Failed) rejectedUpdate = update;
+    };
+    Assert((await rejectedRunner.StartAsync(ecoTask)).State == OtaTaskState.Running,
+        "cmd=10 拒绝测试任务未启动。 ");
+    rejectedMqtt.Inject("ucchip/up/sgw/704027/1",
+        "{\"cmd\":10,\"ver\":\"v2.0\",\"ota_ack\":{\"task_seq\":1,\"session_id\":0,\"accepted\":0,\"duplicate\":0,\"result\":\"REJECTED\",\"status\":\"UNKNOWN\",\"reason\":\"TASK_SEQ_CONFLICT\"}}");
+    await WaitUntilAsync(() => !rejectedRunner.HasActiveTask && rejectedUpdate is not null, TimeSpan.FromSeconds(1));
+    Assert(rejectedMqtt.Published.Count == 1
+        && rejectedUpdate?.Message.Contains("升级请求未受理：TASK_SEQ_CONFLICT", StringComparison.Ordinal) == true,
+        "TASK_SEQ_CONFLICT 必须立即停止，不能自动换序号或重发。 ");
 
     await using var cancelMqtt = new FakeMqttTransport();
     await using var cancelRunner = new OtaTaskRunner(
@@ -1513,6 +1622,34 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
     Assert(aggregateFailure?.Message.Contains("Extender 1821373 子任务失败", StringComparison.Ordinal) == true,
         "所有 Extender 进入终态后，应汇总失败 Extender 并结束任务。");
 
+    await using var partialSuccessMqtt = new FakeMqttTransport();
+    await using var partialSuccessRunner = new OtaTaskRunner(
+        partialSuccessMqtt,
+        new EcoLinkProtocolProfile(),
+        new InMemoryTaskSequenceStore(),
+        pollingOptions: new OtaPollingOptions(
+            TimeSpan.FromMilliseconds(5),
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromMilliseconds(20),
+            TimeSpan.FromSeconds(1)));
+    OtaExecutionUpdate? partialSuccessUpdate = null;
+    partialSuccessRunner.Updated += (_, update) =>
+    {
+        if (update.State == OtaTaskState.PartiallySucceeded) partialSuccessUpdate = update;
+    };
+    Assert((await partialSuccessRunner.StartAsync(ecoTask)).State == OtaTaskState.Running,
+        "部分成功终态测试任务未启动。");
+    await WaitUntilAsync(() => partialSuccessMqtt.Published.Count >= 2, TimeSpan.FromSeconds(1));
+    var partialSuccessSequence = int.Parse(partialSuccessMqtt.Published[1].Topic.Split('/')[^1]);
+    partialSuccessMqtt.Inject("ucchip/up/sgw/704027/1",
+        $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{partialSuccessSequence},\"task_seq\":1,\"session_id\":12,\"result\":\"OK\",\"status\":\"PARTIAL_SUCCESS\",\"stage\":\"FINISHED\",\"node_retry_count\":1,\"retry_round\":1,\"target_total\":5,\"target_success\":4,\"target_failed\":1,\"failed_node_list\":[{{\"extender_id\":51890,\"node_type\":5,\"node_id\":64385}}]}}}}");
+    await WaitUntilAsync(() => !partialSuccessRunner.HasActiveTask && partialSuccessUpdate is not null, TimeSpan.FromSeconds(1));
+    Assert(partialSuccessUpdate?.GatewayStatus?.FailedNodes.Count == 1
+        && partialSuccessUpdate.Message.Contains("已暂停循环和后续队列任务", StringComparison.Ordinal)
+        && partialSuccessMqtt.Published.Count(message =>
+            message.GetPayloadAsUtf8().Contains("\"active\":0", StringComparison.Ordinal)) == 0,
+        "PARTIAL_SUCCESS 必须作为独立终态停止轮询、展示失败名单，且不能发送取消请求。");
+
     await using var finalFailedMqtt = new FakeMqttTransport();
     await using var finalFailedRunner = new OtaTaskRunner(
         finalFailedMqtt,
@@ -1577,7 +1714,7 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
         {
             silentFailure = update;
         }
-        if (update.Message.Contains("下游任务可能仍在运行", StringComparison.Ordinal))
+        if (update.Message.Contains("当前任务状态未知", StringComparison.Ordinal))
         {
             silentWarning = update;
         }
@@ -1587,7 +1724,7 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
     Assert(silentRunner.HasActiveTask && silentFailure is null,
         "状态查询无响应不应直接判定下游升级失败。");
     Assert(silentWarning is not null,
-        "连续三次状态查询无响应后应提示查询异常并继续轮询。");
+        "启动应答和状态查询均无响应时，应提示任务状态未知并继续查询，不能据此重发。 ");
     await silentRunner.CancelAsync();
 
     await using var missingMqtt = new FakeMqttTransport();
@@ -1603,14 +1740,27 @@ static async Task VerifyProtocolCodecAndRunnerAsync(string workspace)
     Assert((await missingRunner.StartAsync(ecoTask)).State == OtaTaskState.Running, "TASK_NOT_FOUND 测试任务未启动。");
     for (var attempt = 0; attempt < 3; attempt++)
     {
-        await WaitUntilAsync(() => missingMqtt.Published.Count >= attempt + 2, TimeSpan.FromSeconds(1));
-        var queryMessage = missingMqtt.Published[attempt + 1];
+        var queryIndex = attempt * 2 + 1;
+        await WaitUntilAsync(() => missingMqtt.Published.Count > queryIndex, TimeSpan.FromSeconds(1));
+        var queryMessage = missingMqtt.Published[queryIndex];
         var querySequence = int.Parse(queryMessage.Topic.Split('/')[^1]);
         missingMqtt.Inject("ucchip/up/sgw/704027/1",
             $"{{\"cmd\":9,\"ota_status\":{{\"query_seq\":{querySequence},\"task_seq\":1,\"session_id\":0,\"result\":\"TASK_NOT_FOUND\",\"status\":\"UNKNOWN\",\"stage\":\"UNKNOWN\"}}}}");
+        if (attempt < 2)
+        {
+            await WaitUntilAsync(() => missingMqtt.Published.Count > queryIndex + 1, TimeSpan.FromSeconds(1));
+            var retry = missingMqtt.Published[queryIndex + 1];
+            Assert(retry.Topic == missingMqtt.Published[0].Topic
+                && retry.GetPayloadAsUtf8() == missingMqtt.Published[0].GetPayloadAsUtf8(),
+                "启动请求重发必须复用原主题序号并保持全部业务参数逐字节一致。 ");
+        }
     }
     await WaitUntilAsync(() => !missingRunner.HasActiveTask, TimeSpan.FromSeconds(1));
-    Assert(!missingRunner.HasActiveTask, "连续三次 TASK_NOT_FOUND 后应停止轮询。");
+    Assert(!missingRunner.HasActiveTask
+        && missingMqtt.Published.Count(message =>
+            message.GetPayloadAsUtf8().Contains("\"cmd\":5", StringComparison.Ordinal) &&
+            message.GetPayloadAsUtf8().Contains("\"active\":1", StringComparison.Ordinal)) == 3,
+        "连续三次未确认后应区分为任务未建立，并将同一启动请求总尝试次数限制为 3 次。 ");
 
     var timeoutTask = new OtaTask
     {
@@ -2443,6 +2593,7 @@ static OtaTestPlanTemplate CreateSmokeTestPlan(bool continueOnFailure, int inter
             OldVersion = "1",
             NewVersion = "2",
             ForwardPatch = patch,
+            NodeRetryCount = deviceType == DeviceType.Node ? 1 : 0,
             TargetRule = new OtaTestPlanTargetRule
             {
                 ResolutionMode = OtaTargetResolutionMode.FixedIds,

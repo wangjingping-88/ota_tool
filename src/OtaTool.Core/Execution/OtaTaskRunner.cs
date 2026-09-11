@@ -11,7 +11,8 @@ public sealed record OtaExecutionUpdate(
     string Message,
     DateTimeOffset OccurredAt,
     GatewayOtaStatus? GatewayStatus = null,
-    GatewayFinalResult? FinalResult = null);
+    GatewayFinalResult? FinalResult = null,
+    GatewayOtaRequestAck? RequestAck = null);
 
 public interface ITaskSequenceStore
 {
@@ -36,13 +37,22 @@ public sealed record OtaPollingOptions(
     TimeSpan InitialDelay,
     TimeSpan NormalInterval,
     TimeSpan BootVerifyInterval,
-    TimeSpan QueryResponseTimeout)
+    TimeSpan QueryResponseTimeout,
+    TimeSpan StartAcceptanceWait = default,
+    int MaxStartAttempts = 3)
 {
     public static OtaPollingOptions Default { get; } = new(
         TimeSpan.FromSeconds(2),
         TimeSpan.FromSeconds(5),
         TimeSpan.FromSeconds(10),
-        TimeSpan.FromSeconds(8));
+        TimeSpan.FromSeconds(8),
+        TimeSpan.FromSeconds(5),
+        3);
+
+    public TimeSpan EffectiveStartAcceptanceWait =>
+        StartAcceptanceWait > TimeSpan.Zero ? StartAcceptanceWait : InitialDelay;
+
+    public int EffectiveMaxStartAttempts => Math.Max(1, MaxStartAttempts);
 }
 
 public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
@@ -148,19 +158,33 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
             var subscribeTopic = _protocolOptions.UpstreamTopicFilterTemplate.Replace("{gatewayId}", task.GatewayId, StringComparison.Ordinal);
             await _mqtt.SubscribeAsync(subscribeTopic, qualityOfService: 1, cancellationToken);
             var outbound = OtaMessageCodec.CreateUpgradeRequest(task, sequence, _protocolOptions);
-            var active = new ActiveTask(task, sequence, new CancellationTokenSource());
+            var active = new ActiveTask(task, sequence, outbound, new CancellationTokenSource());
             lock (_sync)
             {
                 _activeTask = active;
             }
-            await PublishAsync(new MqttApplicationMessage(outbound.Topic, Encoding.UTF8.GetBytes(outbound.JsonPayload), outbound.QualityOfService), cancellationToken);
-            Emit(active, OtaTaskState.Running, $"已发送 cmd=5 升级请求，任务序号 {sequence}。", null, null);
+            try
+            {
+                await PublishAsync(new MqttApplicationMessage(outbound.Topic, Encoding.UTF8.GetBytes(outbound.JsonPayload), outbound.QualityOfService), cancellationToken);
+            }
+            catch
+            {
+                lock (_sync)
+                {
+                    if (ReferenceEquals(_activeTask, active)) _activeTask = null;
+                }
+                active.Cancellation.Cancel();
+                active.Cancellation.Dispose();
+                throw;
+            }
+            active.MarkStartPublished();
+            Emit(active, OtaTaskState.Running, $"已发送 cmd=5 升级请求，任务序号 {sequence}；正在等待 Gateway 业务受理（1/{_pollingOptions.EffectiveMaxStartAttempts}）。", null, null);
             if (_profile.SupportsGatewayStatusPolling)
             {
                 active.PollingTask = PollAsync(active);
             }
             active.TimeoutTask = MonitorTimeoutAsync(active);
-            return new OtaTaskResult(OtaTaskState.Running, "升级请求已发送。", DateTimeOffset.Now);
+            return new OtaTaskResult(OtaTaskState.Running, "升级请求已发送，正在等待 Gateway 业务受理。", DateTimeOffset.Now);
         }
         catch (Exception exception)
         {
@@ -178,9 +202,16 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         void OnUpdated(object? _, OtaExecutionUpdate update)
         {
             if (update.TaskId != task.Id) return;
-            if (update.State is OtaTaskState.Succeeded or OtaTaskState.Failed or OtaTaskState.Cancelled or OtaTaskState.TimedOut)
+            if (update.State is OtaTaskState.Succeeded or OtaTaskState.PartiallySucceeded or OtaTaskState.Failed or OtaTaskState.Cancelled or OtaTaskState.TimedOut)
             {
-                completion.TrySetResult(new OtaTaskResult(update.State, update.Message, update.OccurredAt));
+                completion.TrySetResult(new OtaTaskResult(
+                    update.State,
+                    update.Message,
+                    update.OccurredAt,
+                    update.GatewayStatus?.TargetSuccess,
+                    update.GatewayStatus?.TargetFailed,
+                    update.GatewayStatus?.RetryRound,
+                    update.GatewayStatus?.FailedNodes));
             }
         }
         Updated += OnUpdated;
@@ -275,48 +306,52 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
     {
         try
         {
-            await Task.Delay(_pollingOptions.InitialDelay, active.Cancellation.Token);
+            if (!await ConfirmStartAsync(active)) return;
             var backoff = _pollingOptions.NormalInterval;
             while (!active.Cancellation.IsCancellationRequested)
             {
                 await active.WaitForPollingResumeAsync(active.Cancellation.Token);
-                var querySequence = await _sequenceStore.NextAsync(active.Cancellation.Token);
-                var query = OtaMessageCodec.CreateStatusQuery(active.Task.GatewayId, querySequence, active.TaskSequence, active.SessionId, _protocolOptions);
-                var response = new TaskCompletionSource<GatewayOtaStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
-                lock (_sync)
-                {
-                    if (!ReferenceEquals(_activeTask, active)) return;
-                    active.TrackStatusQuery(querySequence);
-                    active.PendingStatusResponse = response;
-                    active.PendingQuerySequence = querySequence;
-                }
-                await PublishAsync(new MqttApplicationMessage(query.Topic, Encoding.UTF8.GetBytes(query.JsonPayload), QualityOfService: 1), active.Cancellation.Token);
-                Emit(active, OtaTaskState.Running, $"已发送 cmd=8 状态查询，查询序号 {querySequence}。", null, null);
                 try
                 {
-                    var status = await response.Task.WaitAsync(_pollingOptions.QueryResponseTimeout, active.Cancellation.Token);
-                    backoff = _pollingOptions.NormalInterval;
+                    var status = await QueryStatusAsync(active);
+                    if (!IsCurrent(active)) return;
                     active.ConsecutiveStatusTimeouts = 0;
                     if (status.Result.Equals("TASK_NOT_FOUND", StringComparison.OrdinalIgnoreCase))
                     {
+                        backoff = _pollingOptions.NormalInterval;
                         active.ConsecutiveTaskNotFound++;
                         if (active.ConsecutiveTaskNotFound >= 3)
                         {
-                            Finish(active, OtaTaskState.Failed, "Gateway 连续三次未找到对应 OTA 任务，已停止轮询。", status, null);
+                            Finish(active, OtaTaskState.Failed,
+                                "Gateway 已受理过启动请求，但连续三次查询均未找到该任务；可能发生过网关重启或状态快照丢失。为避免重复升级，工具不会重发启动请求。",
+                                status,
+                                null);
                             return;
                         }
                         Emit(active, OtaTaskState.Running,
-                            $"Gateway 暂未找到任务（{active.ConsecutiveTaskNotFound}/3），将继续轮询。", status, null);
+                            $"已受理任务暂时无法查询（TASK_NOT_FOUND，{active.ConsecutiveTaskNotFound}/3）；不会重发启动请求，将继续核对状态。", status, null);
                         await Task.Delay(_pollingOptions.NormalInterval, active.Cancellation.Token);
                         continue;
                     }
                     active.ConsecutiveTaskNotFound = 0;
+                    if (status.Result.Equals("RESOURCE_UNAVAILABLE", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Emit(active, OtaTaskState.Running,
+                            $"Gateway 暂时无法读取 OTA 状态（RESOURCE_UNAVAILABLE），将在 {backoff.TotalSeconds:0} 秒后重试。",
+                            status,
+                            null);
+                        await Task.Delay(backoff, active.Cancellation.Token);
+                        backoff = TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30));
+                        continue;
+                    }
                     if (!status.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
                     {
                         Finish(active, OtaTaskState.Failed, $"Gateway 拒绝状态查询：{status.Result}。", status, null);
                         return;
                     }
+                    backoff = _pollingOptions.NormalInterval;
                     if (status.Status.Equals("SUCCESS", StringComparison.OrdinalIgnoreCase)
+                        || status.Status.Equals("PARTIAL_SUCCESS", StringComparison.OrdinalIgnoreCase)
                         || status.Status.Equals("FAILED", StringComparison.OrdinalIgnoreCase)
                         || status.Status.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase))
                     {
@@ -349,17 +384,6 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                     await Task.Delay(backoff, active.Cancellation.Token);
                     backoff = TimeSpan.FromSeconds(Math.Min(backoff.TotalSeconds * 2, 30));
                 }
-                finally
-                {
-                    lock (_sync)
-                    {
-                        if (ReferenceEquals(active.PendingStatusResponse, response))
-                        {
-                            active.PendingStatusResponse = null;
-                            active.PendingQuerySequence = 0;
-                        }
-                    }
-                }
             }
         }
         catch (OperationCanceledException) when (active.Cancellation.IsCancellationRequested) { }
@@ -367,6 +391,228 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         {
             Finish(active, OtaTaskState.Failed, $"状态轮询失败：{exception.Message}", null, null);
         }
+    }
+
+    private async Task<bool> ConfirmStartAsync(ActiveTask active)
+    {
+        var queryBackoff = _pollingOptions.NormalInterval;
+        while (!active.Cancellation.IsCancellationRequested)
+        {
+            await active.WaitForPollingResumeAsync(active.Cancellation.Token);
+            GatewayOtaRequestAck? ack = null;
+            if (!active.StartRetryProhibited)
+            {
+                ack = await WaitForAcceptanceAckAsync(active);
+            }
+            if (ack is not null)
+            {
+                if (ack.Accepted &&
+                    (ack.Result.Equals("ACCEPTED", StringComparison.OrdinalIgnoreCase) ||
+                     ack.Result.Equals("DUPLICATE", StringComparison.OrdinalIgnoreCase)))
+                {
+                    active.SessionId = ack.SessionId;
+                    active.AcceptanceConfirmed = true;
+                    active.StartRetryProhibited = true;
+                    var duplicate = ack.Duplicate ? "，命中幂等记录，未重复创建任务" : string.Empty;
+                    var terminalReason = string.IsNullOrWhiteSpace(ack.Reason) ? string.Empty : $"，原因 {ack.Reason}";
+                    Emit(active, OtaTaskState.Running,
+                        $"Gateway 已受理升级请求{duplicate}；SID {ack.SessionId}，当前状态 {ack.Status}{terminalReason}。将通过 cmd=8/9 继续核对任务事实。",
+                        null,
+                        null,
+                        ack);
+                    return true;
+                }
+
+                if (ack.Reason.Equals("REQUEST_ID_RESERVED", StringComparison.OrdinalIgnoreCase))
+                {
+                    active.SessionId = ack.SessionId;
+                    active.StartRetryProhibited = true;
+                    active.ClearAcceptanceAck();
+                    Emit(active, OtaTaskState.Running,
+                        $"启动序号已被恢复任务占用（REQUEST_ID_RESERVED，SID {ack.SessionId}）；工具不会重建任务，正在查询已有任务。",
+                        null,
+                        null,
+                        ack);
+                }
+                else if (ack.Reason.Equals("QUEUE_FAILED", StringComparison.OrdinalIgnoreCase) &&
+                         active.StartAttemptCount < _pollingOptions.EffectiveMaxStartAttempts)
+                {
+                    Emit(active, OtaTaskState.Running,
+                        $"Gateway 未受理启动请求：QUEUE_FAILED。将保持任务序号和全部参数不变后重发（下一次 {active.StartAttemptCount + 1}/{_pollingOptions.EffectiveMaxStartAttempts}）。",
+                        null,
+                        null,
+                        ack);
+                    await Task.Delay(_pollingOptions.NormalInterval, active.Cancellation.Token);
+                    await RepublishStartAsync(active);
+                    continue;
+                }
+                else
+                {
+                    var reason = string.IsNullOrWhiteSpace(ack.Reason) ? ack.Result : ack.Reason;
+                    Finish(active, OtaTaskState.Failed,
+                        $"升级请求未受理：{reason}；任务未建立，未进入设备升级阶段。",
+                        null,
+                        null,
+                        ack);
+                    return false;
+                }
+            }
+
+            GatewayOtaStatus status;
+            try
+            {
+                status = await QueryStatusAsync(active);
+                if (!IsCurrent(active)) return false;
+            }
+            catch (TimeoutException)
+            {
+                active.ConsecutiveStatusTimeouts++;
+                Emit(active, OtaTaskState.Running,
+                    $"尚未收到 cmd=10 受理应答，cmd=8 查询也无响应；当前任务状态未知，将在 {queryBackoff.TotalSeconds:0} 秒后继续查询，不会据此重发启动请求。",
+                    null,
+                    null);
+                await Task.Delay(queryBackoff, active.Cancellation.Token);
+                queryBackoff = TimeSpan.FromSeconds(Math.Min(queryBackoff.TotalSeconds * 2, 30));
+                continue;
+            }
+
+            active.ConsecutiveStatusTimeouts = 0;
+            if (status.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
+            {
+                active.SessionId = status.SessionId;
+                active.AcceptanceConfirmed = true;
+                active.StartRetryProhibited = true;
+                Emit(active, OtaTaskState.Running,
+                    $"未收到 cmd=10，但 cmd=9 已确认任务存在；已绑定 SID {status.SessionId}，继续升级闭环。",
+                    status,
+                    null);
+                return true;
+            }
+
+            if (status.Result.Equals("TASK_NOT_FOUND", StringComparison.OrdinalIgnoreCase))
+            {
+                if (active.StartRetryProhibited)
+                {
+                    Finish(active, OtaTaskState.Failed,
+                        "启动序号受保护且查询未找到已有任务；为避免覆盖恢复任务，工具未重发启动请求，请人工确认网关状态。",
+                        status,
+                        null);
+                    return false;
+                }
+                if (active.StartAttemptCount >= _pollingOptions.EffectiveMaxStartAttempts)
+                {
+                    Finish(active, OtaTaskState.Failed,
+                        $"升级请求未确认 / 任务未建立：累计发送 {active.StartAttemptCount} 次，cmd=10 均未确认，且每次查询均明确返回 TASK_NOT_FOUND。",
+                        status,
+                        null);
+                    return false;
+                }
+                Emit(active, OtaTaskState.Running,
+                    $"Gateway 明确返回 TASK_NOT_FOUND；将保持原任务序号和完整参数不变后重发（下一次 {active.StartAttemptCount + 1}/{_pollingOptions.EffectiveMaxStartAttempts}）。",
+                    status,
+                    null);
+                await RepublishStartAsync(active);
+                queryBackoff = _pollingOptions.NormalInterval;
+                continue;
+            }
+
+            if (status.Result.Equals("RESOURCE_UNAVAILABLE", StringComparison.OrdinalIgnoreCase))
+            {
+                Emit(active, OtaTaskState.Running,
+                    $"Gateway 暂时无法查询启动状态（RESOURCE_UNAVAILABLE），将在 {queryBackoff.TotalSeconds:0} 秒后重试；不会重发启动请求。",
+                    status,
+                    null);
+                await Task.Delay(queryBackoff, active.Cancellation.Token);
+                queryBackoff = TimeSpan.FromSeconds(Math.Min(queryBackoff.TotalSeconds * 2, 30));
+                continue;
+            }
+
+            Finish(active, OtaTaskState.Failed,
+                $"升级请求状态核对失败：{status.Result}；任务是否建立尚未确认。",
+                status,
+                null);
+            return false;
+        }
+        return false;
+    }
+
+    private async Task<GatewayOtaRequestAck?> WaitForAcceptanceAckAsync(ActiveTask active)
+    {
+        Task<GatewayOtaRequestAck> pending;
+        TimeSpan remaining;
+        lock (_sync)
+        {
+            if (!ReferenceEquals(_activeTask, active)) return null;
+            if (active.LastAcceptanceAck is not null) return active.LastAcceptanceAck;
+            pending = active.PendingAcceptanceResponse.Task;
+            var deadline = active.LastStartPublishedAt + _pollingOptions.EffectiveStartAcceptanceWait;
+            remaining = deadline - DateTimeOffset.Now;
+        }
+        if (remaining <= TimeSpan.Zero) return null;
+        try
+        {
+            return await pending.WaitAsync(remaining, active.Cancellation.Token);
+        }
+        catch (TimeoutException)
+        {
+            return null;
+        }
+    }
+
+    private async Task RepublishStartAsync(ActiveTask active)
+    {
+        lock (_sync)
+        {
+            if (!ReferenceEquals(_activeTask, active)) return;
+            active.PrepareStartRetry();
+        }
+        var request = active.StartRequest;
+        await PublishAsync(
+            new MqttApplicationMessage(request.Topic, Encoding.UTF8.GetBytes(request.JsonPayload), request.QualityOfService),
+            active.Cancellation.Token);
+        active.MarkStartPublished();
+        Emit(active, OtaTaskState.Running,
+            $"已按原主题序号 {active.TaskSequence} 和原始参数重发 cmd=5（{active.StartAttemptCount}/{_pollingOptions.EffectiveMaxStartAttempts}）；正在等待 Gateway 业务受理。",
+            null,
+            null);
+    }
+
+    private async Task<GatewayOtaStatus> QueryStatusAsync(ActiveTask active)
+    {
+        var querySequence = await _sequenceStore.NextAsync(active.Cancellation.Token);
+        var query = OtaMessageCodec.CreateStatusQuery(active.Task.GatewayId, querySequence, active.TaskSequence, active.SessionId, _protocolOptions);
+        var response = new TaskCompletionSource<GatewayOtaStatus>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_sync)
+        {
+            if (!ReferenceEquals(_activeTask, active)) throw new OperationCanceledException(active.Cancellation.Token);
+            active.TrackStatusQuery(querySequence);
+            active.PendingStatusResponse = response;
+            active.PendingQuerySequence = querySequence;
+        }
+        try
+        {
+            await PublishAsync(
+                new MqttApplicationMessage(query.Topic, Encoding.UTF8.GetBytes(query.JsonPayload), QualityOfService: 1),
+                active.Cancellation.Token);
+            Emit(active, OtaTaskState.Running, $"已发送 cmd=8 状态查询，查询序号 {querySequence}。", null, null);
+            return await response.Task.WaitAsync(_pollingOptions.QueryResponseTimeout, active.Cancellation.Token);
+        }
+        finally
+        {
+            lock (_sync)
+            {
+                if (ReferenceEquals(active.PendingStatusResponse, response))
+                {
+                    active.PendingStatusResponse = null;
+                    active.PendingQuerySequence = 0;
+                }
+            }
+        }
+    }
+
+    private bool IsCurrent(ActiveTask active)
+    {
+        lock (_sync) return ReferenceEquals(_activeTask, active);
     }
 
     private async Task MonitorTimeoutAsync(ActiveTask active)
@@ -390,6 +636,22 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         lock (_sync) active = _activeTask;
         if (active is null) return;
 
+        if (OtaMessageCodec.TryParseGatewayOtaRequestAck(json, out var ack) && ack is not null)
+        {
+            lock (_sync)
+            {
+                if (!ReferenceEquals(_activeTask, active) ||
+                    ack.TaskSequence != active.TaskSequence ||
+                    !IsMatchingRequestAckTopic(message.Topic, active) ||
+                    (active.SessionId != 0 && ack.SessionId != 0 && ack.SessionId != active.SessionId))
+                {
+                    return;
+                }
+                active.RecordAcceptanceAck(ack);
+            }
+            return;
+        }
+
         if (OtaMessageCodec.TryParseGatewayStatus(json, out var status) && status is not null)
         {
             TaskCompletionSource<GatewayOtaStatus>? pendingResponse;
@@ -398,7 +660,9 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 if (!ReferenceEquals(_activeTask, active)
                     || status.TaskSequence != active.TaskSequence
                     || !active.IsTrackedStatusQuery(status.QuerySequence)
-                    || (active.SessionId != 0 && status.SessionId != active.SessionId))
+                    || (active.SessionId != 0 &&
+                        status.Result.Equals("OK", StringComparison.OrdinalIgnoreCase) &&
+                        status.SessionId != active.SessionId))
                 {
                     return;
                 }
@@ -406,6 +670,8 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 if (status.Result.Equals("OK", StringComparison.OrdinalIgnoreCase))
                 {
                     active.SessionId = status.SessionId;
+                    active.AcceptanceConfirmed = true;
+                    active.StartRetryProhibited = true;
                     active.ConsecutiveStatusTimeouts = 0;
                 }
                 active.LastStage = status.Stage;
@@ -419,6 +685,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
             var terminalState = status.Status.ToUpperInvariant() switch
             {
                 "SUCCESS" => OtaTaskState.Succeeded,
+                "PARTIAL_SUCCESS" => OtaTaskState.PartiallySucceeded,
                 "FAILED" => OtaTaskState.Failed,
                 "CANCELLED" => OtaTaskState.Cancelled,
                 _ => OtaTaskState.Running,
@@ -429,7 +696,19 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 stage.State.Equals("FAILED", StringComparison.OrdinalIgnoreCase));
             var hasFailureFact = failedSubtask is not null || failedStage is not null;
             var hasUnfinishedSubtask = status.Subtasks.Any(subtask => !IsTerminalSubtaskResult(subtask.Result));
-            if (terminalState == OtaTaskState.Failed ||
+            if (terminalState == OtaTaskState.PartiallySucceeded)
+            {
+                var failedNodes = status.FailedNodes.Count == 0
+                    ? "Gateway 未返回最终失败节点名单"
+                    : $"失败节点：{string.Join("；", status.FailedNodes.Select(FormatFailedNode))}";
+                Finish(
+                    active,
+                    terminalState,
+                    $"Node OTA 部分成功：成功 {status.TargetSuccess ?? 0}/{status.TargetTotal ?? 0}，失败 {status.TargetFailed ?? status.FailedNodes.Count}；实际重试轮次 {status.RetryRound ?? 0}；{failedNodes}。已暂停循环和后续队列任务。",
+                    status,
+                    null);
+            }
+            else if (terminalState == OtaTaskState.Failed ||
                 (terminalState != OtaTaskState.Cancelled &&
                  hasFailureFact &&
                  (terminalState == OtaTaskState.Succeeded || !hasUnfinishedSubtask)))
@@ -494,6 +773,18 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
            result.Equals("FAILED", StringComparison.OrdinalIgnoreCase) ||
            result.Equals("CANCELLED", StringComparison.OrdinalIgnoreCase);
 
+    private bool IsMatchingRequestAckTopic(string topic, ActiveTask active)
+    {
+        var filter = _protocolOptions.UpstreamTopicFilterTemplate
+            .Replace("{gatewayId}", active.Task.GatewayId, StringComparison.Ordinal);
+        var prefix = filter.EndsWith('#') ? filter[..^1] : filter.TrimEnd('/') + "/";
+        var expectedTopic = prefix + active.TaskSequence.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        return topic.Equals(expectedTopic, StringComparison.Ordinal);
+    }
+
+    private static string FormatFailedNode(OtaFailedNode node)
+        => $"Extender {node.ExtenderId} (0x{node.ExtenderId:X}) / 类型 {node.NodeType} / Node {node.NodeId} (0x{node.NodeId:X4})";
+
     private static bool IsMatchingFinalResult(ActiveTask active, GatewayFinalResult final)
     {
         if (final.Sequence != 0 && final.Sequence != active.TaskSequence) return false;
@@ -517,14 +808,26 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         return null;
     }
 
-    private void Emit(ActiveTask active, OtaTaskState state, string message, GatewayOtaStatus? status, GatewayFinalResult? final)
-        => Updated?.Invoke(this, new OtaExecutionUpdate(active.Task.Id, state, message, DateTimeOffset.Now, status, final));
+    private void Emit(
+        ActiveTask active,
+        OtaTaskState state,
+        string message,
+        GatewayOtaStatus? status,
+        GatewayFinalResult? final,
+        GatewayOtaRequestAck? ack = null)
+        => Updated?.Invoke(this, new OtaExecutionUpdate(active.Task.Id, state, message, DateTimeOffset.Now, status, final, ack));
 
-    private void Finish(ActiveTask active, OtaTaskState state, string message, GatewayOtaStatus? status, GatewayFinalResult? final)
+    private void Finish(
+        ActiveTask active,
+        OtaTaskState state,
+        string message,
+        GatewayOtaStatus? status,
+        GatewayFinalResult? final,
+        GatewayOtaRequestAck? ack = null)
     {
         if (Complete(active))
         {
-            Emit(active, state, message, status, final);
+            Emit(active, state, message, status, final, ack);
         }
     }
 
@@ -594,12 +897,24 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         return true;
     }
 
-    private sealed class ActiveTask(OtaTask task, int taskSequence, CancellationTokenSource cancellation)
+    private sealed class ActiveTask(
+        OtaTask task,
+        int taskSequence,
+        OutboundOtaMessage startRequest,
+        CancellationTokenSource cancellation)
     {
         public OtaTask Task { get; } = task;
         public int TaskSequence { get; } = taskSequence;
+        public OutboundOtaMessage StartRequest { get; } = startRequest;
         public CancellationTokenSource Cancellation { get; } = cancellation;
         public uint SessionId { get; set; }
+        public bool AcceptanceConfirmed { get; set; }
+        public bool StartRetryProhibited { get; set; }
+        public int StartAttemptCount { get; private set; } = 1;
+        public DateTimeOffset LastStartPublishedAt { get; private set; } = DateTimeOffset.Now;
+        public GatewayOtaRequestAck? LastAcceptanceAck { get; private set; }
+        public TaskCompletionSource<GatewayOtaRequestAck> PendingAcceptanceResponse { get; private set; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         public string LastStage { get; set; } = string.Empty;
         public TaskCompletionSource<GatewayOtaStatus>? PendingStatusResponse { get; set; }
         public int PendingQuerySequence { get; set; }
@@ -612,6 +927,26 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         private int LastAcceptedStatusQuery { get; set; }
         private TaskCompletionSource<bool>? ResumeSignal { get; set; }
         public bool PollingPaused { get; private set; }
+
+        public void MarkStartPublished() => LastStartPublishedAt = DateTimeOffset.Now;
+
+        public void RecordAcceptanceAck(GatewayOtaRequestAck ack)
+        {
+            LastAcceptanceAck = ack;
+            PendingAcceptanceResponse.TrySetResult(ack);
+        }
+
+        public void ClearAcceptanceAck()
+        {
+            LastAcceptanceAck = null;
+            PendingAcceptanceResponse = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        public void PrepareStartRetry()
+        {
+            StartAttemptCount++;
+            ClearAcceptanceAck();
+        }
 
         public void TrackStatusQuery(int querySequence)
         {
