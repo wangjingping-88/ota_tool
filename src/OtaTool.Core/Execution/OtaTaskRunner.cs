@@ -241,12 +241,30 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
     private async Task CancelCoreAsync(bool notifyGateway, CancellationToken cancellationToken)
     {
         ActiveTask? active;
+        lock (_sync) active = _activeTask;
+        if (notifyGateway && active?.Task.Mode == OtaMode.IPM)
+        {
+            // 取消请求不代表设备已停止，提交后的任务仍可能成功。保持同一任务的状态核对。
+            active.StartRetryProhibited = true;
+            if (!_mqtt.IsConnected)
+            {
+                Emit(active, OtaTaskState.Running, "取消请求尚未发送：MQTT 未连接；仍保留活动任务，等待重连核对最终状态。", null, null);
+                return;
+            }
+            var sequence = await _sequenceStore.NextAsync(cancellationToken);
+            var cancel = OtaMessageCodec.CreateCancelRequest(active.Task, sequence, _protocolOptions);
+            await PublishAsync(new MqttApplicationMessage(cancel.Topic, Encoding.UTF8.GetBytes(cancel.JsonPayload), cancel.QualityOfService), cancellationToken);
+            active.ResumePolling();
+            Emit(active, OtaTaskState.Running, "已请求取消；Flash 写入或已提交升级可能继续，正在核对设备最终状态。", null, null);
+            return;
+        }
         lock (_sync)
         {
             active = _activeTask;
             _activeTask = null;
         }
         if (active is null) return;
+
         active.Cancellation.Cancel();
         Emit(
             active,
@@ -400,7 +418,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         {
             await active.WaitForPollingResumeAsync(active.Cancellation.Token);
             GatewayOtaRequestAck? ack = null;
-            if (!active.StartRetryProhibited)
+            if (_profile.SupportsStartAck && !active.StartRetryProhibited)
             {
                 ack = await WaitForAcceptanceAckAsync(active);
             }
@@ -468,7 +486,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
             {
                 active.ConsecutiveStatusTimeouts++;
                 Emit(active, OtaTaskState.Running,
-                    $"尚未收到 cmd=10 受理应答，cmd=8 查询也无响应；当前任务状态未知，将在 {queryBackoff.TotalSeconds:0} 秒后继续查询，不会据此重发启动请求。",
+                    $"启动尚未确认，cmd=8 查询无响应；当前任务状态未知，将在 {queryBackoff.TotalSeconds:0} 秒后继续查询，不会据此重发启动请求。",
                     null,
                     null);
                 await Task.Delay(queryBackoff, active.Cancellation.Token);
@@ -483,7 +501,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 active.AcceptanceConfirmed = true;
                 active.StartRetryProhibited = true;
                 Emit(active, OtaTaskState.Running,
-                    $"未收到 cmd=10，但 cmd=9 已确认任务存在；已绑定 SID {status.SessionId}，继续升级闭环。",
+                    $"cmd=9 已确认任务存在；已绑定 SID {status.SessionId}，继续升级闭环。",
                     status,
                     null);
                 return true;
@@ -502,7 +520,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 if (active.StartAttemptCount >= _pollingOptions.EffectiveMaxStartAttempts)
                 {
                     Finish(active, OtaTaskState.Failed,
-                        $"升级请求未确认 / 任务未建立：累计发送 {active.StartAttemptCount} 次，cmd=10 均未确认，且每次查询均明确返回 TASK_NOT_FOUND。",
+                        $"升级请求未确认 / 任务未建立：累计发送 {active.StartAttemptCount} 次，每次查询均明确返回 TASK_NOT_FOUND。",
                         status,
                         null);
                     return false;
@@ -635,6 +653,10 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         ActiveTask? active;
         lock (_sync) active = _activeTask;
         if (active is null) return;
+
+        var upstreamPrefix = _protocolOptions.UpstreamTopicFilterTemplate
+            .Replace("{gatewayId}", active.Task.GatewayId, StringComparison.Ordinal).TrimEnd('#');
+        if (!message.Topic.StartsWith(upstreamPrefix, StringComparison.Ordinal)) return;
 
         if (OtaMessageCodec.TryParseGatewayOtaRequestAck(json, out var ack) && ack is not null)
         {

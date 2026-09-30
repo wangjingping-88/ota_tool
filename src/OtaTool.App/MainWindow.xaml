@@ -143,7 +143,8 @@
                         <StackPanel VerticalAlignment="Center"><TextBlock FontSize="20" FontWeight="SemiBold" Text="{Binding CurrentPageTitle}" /><TextBlock Margin="0,3,0,0" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="{Binding CurrentPageSubtitle}" /></StackPanel>
                         <Border Grid.Column="1" Background="#F0F3F8" CornerRadius="6" Padding="3" VerticalAlignment="Center" Margin="0,0,18,0"><StackPanel Orientation="Horizontal">
                             <RadioButton GroupName="Mode" IsChecked="{Binding IsTraditional, Mode=TwoWay}" Style="{StaticResource ModeRadio}" Content="传统模式" />
-                            <RadioButton GroupName="Mode" IsChecked="{Binding IsEcoLink, Mode=TwoWay}" Style="{StaticResource ModeRadio}" Content="EcoLink 模式" />
+                            <RadioButton GroupName="Mode" IsChecked="{Binding IsEcoLink, Mode=TwoWay}" Style="{StaticResource ModeRadio}" Content="{Binding OtherProtocolModeLabel}" />
+                            <RadioButton GroupName="Mode" IsChecked="{Binding IsIpm, Mode=TwoWay}" Style="{StaticResource ModeRadio}" Content="IPM 模式" />
                         </StackPanel></Border>
                     </Grid>
                 </Grid>
@@ -410,6 +411,14 @@
                             <Border x:Name="UpgradeTaskConfigurationPanel" Style="{StaticResource FunctionalPanel}">
                             <StackPanel>
                             <Grid><StackPanel><TextBlock Style="{StaticResource FunctionalPanelTitle}" Text="升级任务配置" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,4,0,0" Text="配置升级类型、版本和 Patch 后加入下方队列；所有任务均按顺序执行并自动闭环。" TextWrapping="Wrap" /></StackPanel></Grid>
+                            <StackPanel Margin="0,14,0,0" Visibility="{Binding IpmVisibility}">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="MCU 升级验证模式" />
+                                <WrapPanel Margin="0,8,0,0">
+                                    <RadioButton GroupName="IpmMcuUpgradeMode" Content="无 uboot 验证模式" IsChecked="{Binding IsNoUbootValidation, Mode=TwoWay}" Margin="0,0,18,0" />
+                                    <RadioButton GroupName="IpmMcuUpgradeMode" Content="正式模式" IsChecked="{Binding IsFormalIpmMcu, Mode=TwoWay}" />
+                                </WrapPanel>
+                                <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" Margin="0,5,0,0" Text="无 uboot 模式仅验证 MCU 镜像下载，允许手填测试版本；正式模式要求可验证的固件版本和完整升级结果。" TextWrapping="Wrap" />
+                            </StackPanel>
                             <Grid Margin="0,20,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="1.25*" />
@@ -417,14 +426,22 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel Margin="0,0,10,0"><TextBlock Style="{StaticResource FieldLabel}" Text="升级类型" /><ComboBox ItemsSource="{Binding TaskTypes}" SelectedItem="{Binding SelectedTaskType}" Margin="0,6,0,0" /></StackPanel>
-                                <StackPanel Grid.Column="1" Margin="0,0,10,0"><TextBlock Style="{StaticResource FieldLabel}" Text="旧版本" /><Border Margin="0,6,0,0" Style="{StaticResource ReadOnlyValue}" ToolTip="由所选 Patch 自动识别"><TextBlock VerticalAlignment="Center" Text="{Binding OldVersionDisplay, Mode=OneWay}" /></Border></StackPanel>
-                                <StackPanel Grid.Column="2"><TextBlock Style="{StaticResource FieldLabel}" Text="新版本" /><Border Margin="0,6,0,0" Style="{StaticResource ReadOnlyValue}" ToolTip="由所选 Patch 自动识别"><TextBlock VerticalAlignment="Center" Text="{Binding NewVersionDisplay, Mode=OneWay}" /></Border></StackPanel>
+                                <StackPanel Grid.Column="1" Margin="0,0,10,0">
+                                    <TextBlock Style="{StaticResource FieldLabel}" Text="旧版本" />
+                                    <Border Margin="0,6,0,0" Style="{StaticResource ReadOnlyValue}" ToolTip="由所选 Patch 自动识别" Visibility="{Binding AutomaticVersionVisibility}"><TextBlock VerticalAlignment="Center" Text="{Binding OldVersionDisplay, Mode=OneWay}" /></Border>
+                                    <TextBox Margin="0,6,0,0" Text="{Binding OldVersion, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding ManualMcuVersionVisibility}" ToolTip="临时下载联调：填写实际运行的 MCU 整数版本（1～254），不会执行固件搬运。" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Style="{StaticResource FieldLabel}" Text="新版本" />
+                                    <Border Margin="0,6,0,0" Style="{StaticResource ReadOnlyValue}" ToolTip="由所选 Patch 自动识别" Visibility="{Binding AutomaticVersionVisibility}"><TextBlock VerticalAlignment="Center" Text="{Binding NewVersionDisplay, Mode=OneWay}" /></Border>
+                                    <TextBox Margin="0,6,0,0" Text="{Binding NewVersion, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding ManualMcuVersionVisibility}" ToolTip="临时下载联调：填写不同于旧版本的整数（1～254）；此值是测试参数，不表示镜像内嵌版本。" />
+                                </StackPanel>
                             </Grid>
                             <StackPanel Margin="0,14,0,0" Visibility="{Binding TargetScopeVisibility}"><TextBlock Style="{StaticResource FieldLabel}" Text="目标范围" /><StackPanel Orientation="Horizontal" Margin="0,10,0,0"><RadioButton GroupName="Target" IsChecked="{Binding IsSpecifiedTarget, Mode=TwoWay}" Content="指定 ID" Margin="0,0,18,0" /><RadioButton GroupName="Target" IsChecked="{Binding IsBroadcastTarget, Mode=TwoWay}" Content="广播" /></StackPanel></StackPanel>
-                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,16,0,0" Text="正向升级 Patch" />
+                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,16,0,0" Text="正向升级包" />
                             <ComboBox Margin="0,6,0,0" ItemsSource="{Binding UpgradePatchChoices}" DisplayMemberPath="DisplayName" SelectedItem="{Binding SelectedUpgradePatch, Mode=TwoWay}" />
                             <TextBlock FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Margin="0,5,0,0" Text="{Binding SelectedUpgradePatchSummary}" TextWrapping="Wrap" />
-                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,14,0,0" Text="反向升级 Patch" />
+                            <TextBlock Style="{StaticResource FieldLabel}" Margin="0,14,0,0" Text="反向升级包" />
                             <ComboBox Margin="0,6,0,0" ItemsSource="{Binding ReverseUpgradePatchChoices}" DisplayMemberPath="DisplayName" SelectedItem="{Binding SelectedReverseUpgradePatch, Mode=TwoWay}" />
                             <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" Margin="0,5,0,0" Text="{Binding ReversePatchStatus}" TextWrapping="Wrap" />
                             <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" Margin="0,8,0,0" Text="{Binding GatewayIdTaskHint}" TextWrapping="Wrap" />
@@ -451,11 +468,11 @@
                                                                 <CheckBox VerticalAlignment="Center" IsChecked="{Binding IsSelected, Mode=TwoWay}">
                                                                     <StackPanel Orientation="Horizontal">
                                                                         <TextBlock Width="28" FontFamily="Cascadia Mono" FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="{Binding SequenceDisplay, Mode=OneWay}" VerticalAlignment="Center" />
-                                                                        <TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="EXTENDER" VerticalAlignment="Center" />
+                                                                        <TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="{Binding DataContext.TerminalLabel, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}" VerticalAlignment="Center" />
                                                                         <TextBlock Margin="7,0,0,0" FontFamily="Cascadia Mono" FontSize="13" FontWeight="SemiBold" Text="{Binding ExtenderIdDisplay}" VerticalAlignment="Center" />
                                                                     </StackPanel>
                                                                 </CheckBox>
-                                                                <Border Grid.Column="1" Padding="8,3" Background="{StaticResource GreenSoftBrush}" CornerRadius="10">
+                                                                <Border Grid.Column="1" Padding="8,3" Background="{StaticResource GreenSoftBrush}" CornerRadius="10" Visibility="{Binding DataContext.NonIpmVisibility, RelativeSource={RelativeSource AncestorType=Window}}">
                                                                     <TextBlock FontSize="10" Foreground="{StaticResource GreenBrush}" Text="{Binding NodeCountDisplay}" />
                                                                 </Border>
                                                             </Grid>
@@ -464,9 +481,9 @@
                                                                     <StackPanel><TextBlock FontSize="9" Foreground="{StaticResource MutedInkBrush}" Text="同步版本" /><TextBlock Margin="0,2,0,0" FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource BlueBrush}" Text="{Binding SyncVersionDisplay}" /></StackPanel>
                                                                 </Border>
                                                                 <Border Margin="0,0,6,6" Padding="8,5" Background="#F4F7FB" CornerRadius="4">
-                                                                    <StackPanel><TextBlock FontSize="9" Foreground="{StaticResource MutedInkBrush}" Text="异步版本" /><TextBlock Margin="0,2,0,0" FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource BlueBrush}" Text="{Binding AsyncVersionDisplay}" /></StackPanel>
+                                                                    <StackPanel><TextBlock FontSize="9" Foreground="{StaticResource MutedInkBrush}" Text="{Binding DataContext.AsyncVersionLabel, RelativeSource={RelativeSource AncestorType=Window}}" /><TextBlock Margin="0,2,0,0" FontFamily="Cascadia Mono" FontSize="11" Foreground="{StaticResource BlueBrush}" Text="{Binding AsyncVersionDisplay}" /></StackPanel>
                                                                 </Border>
-                                                                <Border Margin="0,0,6,6" Padding="8,5" Background="#F4F7FB" CornerRadius="4">
+                                                                <Border Margin="0,0,6,6" Padding="8,5" Background="#F4F7FB" CornerRadius="4" Visibility="{Binding DataContext.NonIpmVisibility, RelativeSource={RelativeSource AncestorType=Window}}">
                                                                     <StackPanel><TextBlock FontSize="9" Foreground="{StaticResource MutedInkBrush}" Text="Async 地址" /><TextBlock Margin="0,2,0,0" FontFamily="Cascadia Mono" FontSize="11" Text="{Binding AsyncAddressDisplay}" /></StackPanel>
                                                                 </Border>
                                                                 <Border Margin="0,0,6,6" Padding="8,5" Background="#F4F7FB" CornerRadius="4">
@@ -505,7 +522,7 @@
                                             <Grid Margin="0,7,0,0">
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="1.5*" /><ColumnDefinition Width="8" /><ColumnDefinition Width="0.7*" /><ColumnDefinition Width="8" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                                                 <StackPanel><TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="名称" /><TextBox Margin="0,3,0,0" ToolTip="例如：烟感" Text="{Binding NewNodeTypeName, UpdateSourceTrigger=PropertyChanged}" /></StackPanel>
-                                                <StackPanel Grid.Column="2"><TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="编号" /><TextBox Margin="0,3,0,0" ToolTip="范围 2～63" Text="{Binding NewNodeTypeValue, UpdateSourceTrigger=PropertyChanged}" /></StackPanel>
+                                                <StackPanel Grid.Column="2"><TextBlock FontSize="10" Foreground="{StaticResource MutedInkBrush}" Text="编号" /><TextBox Margin="0,3,0,0" ToolTip="范围 10～63" Text="{Binding NewNodeTypeValue, UpdateSourceTrigger=PropertyChanged}" /></StackPanel>
                                                 <Button Grid.Column="4" VerticalAlignment="Bottom" Style="{StaticResource QuietButton}" Content="添加/更新" Command="{Binding AddNodeTypeCommand}" />
                                             </Grid>
                                         </Expander>
@@ -518,7 +535,7 @@
                                             <Expander Margin="0,3" IsExpanded="True">
                                                 <Expander.Header>
                                                     <StackPanel Orientation="Horizontal">
-                                                        <TextBlock FontWeight="SemiBold"><Run Text="Extender " /><Run Text="{Binding ExtenderIdDisplay, Mode=OneWay}" /></TextBlock>
+                                                        <TextBlock FontWeight="SemiBold"><Run Text="{Binding DataContext.TerminalLabel, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}" /><Run Text="{Binding ExtenderIdDisplay, Mode=OneWay}" /></TextBlock>
                                                         <Border Margin="10,-1,0,0" Padding="7,2" Background="{StaticResource BlueSoftBrush}" CornerRadius="8">
                                                             <TextBlock FontSize="10" Foreground="{StaticResource BlueBrush}" Text="{Binding NodeCountSummary, Mode=OneWay}" />
                                                         </Border>
@@ -695,7 +712,7 @@
                                             <TextBlock FontSize="11" FontWeight="SemiBold" Foreground="{Binding UpgradeRunModeForeground}" Text="{Binding UpgradeRunModeText}" />
                                         </Border>
                                     </Grid>
-                                    <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,6,0,0" Text="EcoLink 升级请求发出后自动轮询；传统模式不轮询，只等待最终结果上报。" TextWrapping="Wrap" />
+                                    <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,6,0,0" Text="当前支持状态查询的模式在请求发出后自动轮询；传统模式等待最终结果上报。" TextWrapping="Wrap" />
                                     <TextBlock Margin="0,10,0,0" FontSize="12" FontWeight="SemiBold" Foreground="{Binding UpgradeRunModeForeground}" Text="{Binding UpgradeRunProgressText}" TextWrapping="Wrap" />
                                     <Grid Margin="0,10,0,0">
                                         <Grid.ColumnDefinitions>
@@ -791,14 +808,14 @@
                                             </ItemsControl>
                                         </StackPanel>
                                     </Expander>
-                                    <Expander Margin="0,10,0,0" Header="Extender 子任务" IsExpanded="True" Visibility="{Binding EcoLinkStatusDetailsVisibility}">
+                                    <Expander Margin="0,10,0,0" Header="{Binding SubtasksTitle}" IsExpanded="True" Visibility="{Binding EcoLinkStatusDetailsVisibility}">
                                         <ItemsControl ItemsSource="{Binding GatewaySubtasks}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
                                                     <Border Padding="0,6" BorderBrush="{StaticResource LineBrush}" BorderThickness="0,0,0,1">
                                                         <StackPanel>
                                                             <TextBlock FontWeight="SemiBold" Foreground="{Binding StateColor}" TextWrapping="Wrap">
-                                                                <Run Text="Extender " /><Run Text="{Binding ExtenderId, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding DisplayResult, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding DisplayStage, Mode=OneWay}" />
+                                                                <Run Text="{Binding DataContext.TerminalLabel, RelativeSource={RelativeSource AncestorType=Window}, Mode=OneWay}" /><Run Text="{Binding ExtenderId, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding DisplayResult, Mode=OneWay}" /><Run Text=" · " /><Run Text="{Binding DisplayStage, Mode=OneWay}" />
                                                             </TextBlock>
                                                             <TextBlock FontSize="11" Foreground="{StaticResource MutedInkBrush}" TextWrapping="Wrap">
                                                                 <Run Text="{Binding CountSummary, Mode=OneWay}" /><Run Text=" / " /><Run Text="{Binding DisplayElapsed, Mode=OneWay}" /><Run Text="  " /><Run Text="{Binding DisplayReason, Mode=OneWay}" />
@@ -830,7 +847,7 @@
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <StackPanel>
-                                <TextBlock FontSize="20" FontWeight="SemiBold" Text="EcoLink 日志分析" />
+                                <TextBlock FontSize="20" FontWeight="SemiBold" Text="{Binding LogAnalysisTitle}" />
                                 <TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,6,0,22" Text="选择目录后先确认本次分析清单；分析器只读取清单中的日志。" TextWrapping="Wrap" />
                                 <TextBlock Style="{StaticResource FieldLabel}" Text="导入日志目录" />
                                 <Grid Margin="0,6,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="10" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions><TextBox IsReadOnly="True" Text="{Binding LogDirectory, Mode=OneWay}" ToolTip="通过右侧浏览按钮重新选择目录" /><Button Grid.Column="2" Style="{StaticResource PrimaryButton}" Content="浏览…" Command="{Binding BrowseLogDirectoryCommand}" /></Grid>
@@ -1092,7 +1109,7 @@
                 <!-- 系统设置 -->
                 <ScrollViewer VerticalScrollBarVisibility="Auto" Visibility="{Binding SettingsPageVisibility}">
                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="16" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
-                        <Border Style="{StaticResource Card}"><StackPanel><TextBlock FontSize="20" FontWeight="SemiBold" Text="持久化与凭据" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,6,0,18" Text="普通设置保存到 JSON；MQTT/SFTP 密码与私钥口令只保存到 Windows Credential Manager。" TextWrapping="Wrap" /><TextBlock Style="{StaticResource FieldLabel}" Text="SFTP 私钥口令" /><TextBox Margin="0,6,0,0" Text="{Binding SftpPrivateKeyPassphrase, UpdateSourceTrigger=PropertyChanged}" /><TextBlock Margin="0,16,0,0" FontSize="16" FontWeight="SemiBold" Text="升级前检查" /><Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><StackPanel><TextBlock Style="{StaticResource FieldLabel}" Text="Node Patch 门限（字节，路灯上限 44 KiB）" /><TextBox Margin="0,4,0,0" Text="{Binding NodePatchLimit, UpdateSourceTrigger=PropertyChanged}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Sync Patch 门限（字节）" /><TextBox Margin="0,4,0,0" Text="{Binding SyncPatchLimit, UpdateSourceTrigger=PropertyChanged}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="发现结果有效期（分钟）" /><TextBox Margin="0,4,0,0" Text="{Binding DiscoveryFreshnessMinutes, UpdateSourceTrigger=PropertyChanged}" /></StackPanel><StackPanel Grid.Column="2"><TextBlock Style="{StaticResource FieldLabel}" Text="Async Patch 门限（字节）" /><TextBox Margin="0,4,0,0" Text="{Binding AsyncPatchLimit, UpdateSourceTrigger=PropertyChanged}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Gateway Patch 门限（字节）" /><TextBox Margin="0,4,0,0" Text="{Binding GatewayPatchLimit, UpdateSourceTrigger=PropertyChanged}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Node 最低 RSSI（dBm）" /><TextBox Margin="0,4,0,0" Text="{Binding MinimumNodeRssi, UpdateSourceTrigger=PropertyChanged}" /></StackPanel></Grid><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,18,0,0" Text="{Binding SettingsStatus}" TextWrapping="Wrap" /><Button Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,20,0,0" Content="保存全部设置" Command="{Binding SaveSettingsCommand}" /></StackPanel></Border>
+                        <Border Style="{StaticResource Card}"><StackPanel><TextBlock FontSize="20" FontWeight="SemiBold" Text="持久化与凭据" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,6,0,18" Text="普通设置保存到 JSON；MQTT/SFTP 密码与私钥口令只保存到 Windows Credential Manager。" TextWrapping="Wrap" /><TextBlock Style="{StaticResource FieldLabel}" Text="SFTP 私钥口令" /><TextBox Margin="0,6,0,0" Text="{Binding SftpPrivateKeyPassphrase, UpdateSourceTrigger=PropertyChanged}" /><TextBlock Margin="0,16,0,0" FontSize="16" FontWeight="SemiBold" Text="升级前检查" /><Grid Margin="0,8,0,0"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><StackPanel><TextBlock Style="{StaticResource FieldLabel}" Text="Node Patch 门限（字节，路灯上限 112 KiB）" Visibility="{Binding EcoLinkSettingsVisibility}" /><TextBox Margin="0,4,0,0" Text="{Binding NodePatchLimit, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding EcoLinkSettingsVisibility}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Sync Patch 门限（字节）" Visibility="{Binding ModernOtaVisibility}" /><TextBox Margin="0,4,0,0" Text="{Binding SyncPatchLimit, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding ModernOtaVisibility}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="发现结果有效期（分钟）" /><TextBox Margin="0,4,0,0" Text="{Binding DiscoveryFreshnessMinutes, UpdateSourceTrigger=PropertyChanged}" /></StackPanel><StackPanel Grid.Column="2"><TextBlock Style="{StaticResource FieldLabel}" Text="Async Patch 门限（字节）" Visibility="{Binding EcoLinkSettingsVisibility}" /><TextBox Margin="0,4,0,0" Text="{Binding AsyncPatchLimit, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding EcoLinkSettingsVisibility}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Gateway Patch 门限（字节）" Visibility="{Binding ModernOtaVisibility}" /><TextBox Margin="0,4,0,0" Text="{Binding GatewayPatchLimit, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding ModernOtaVisibility}" /><TextBlock Margin="0,8,0,0" Style="{StaticResource FieldLabel}" Text="Node 最低 RSSI（dBm）" Visibility="{Binding EcoLinkSettingsVisibility}" /><TextBox Margin="0,4,0,0" Text="{Binding MinimumNodeRssi, UpdateSourceTrigger=PropertyChanged}" Visibility="{Binding EcoLinkSettingsVisibility}" /></StackPanel></Grid><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,18,0,0" Text="{Binding SettingsStatus}" TextWrapping="Wrap" /><Button Style="{StaticResource PrimaryButton}" HorizontalAlignment="Left" Margin="0,20,0,0" Content="保存全部设置" Command="{Binding SaveSettingsCommand}" /></StackPanel></Border>
                         <StackPanel Grid.Column="2">
                             <Border Style="{StaticResource Card}">
                                 <StackPanel>
@@ -1116,7 +1133,7 @@
                                     </StackPanel>
                                 </StackPanel>
                             </Border>
-                            <Border Margin="0,16,0,0" Style="{StaticResource Card}"><StackPanel><TextBlock FontSize="20" FontWeight="SemiBold" Text="运行约束" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,12,0,0" Text="• 同一工具实例同一时刻只允许一个父 OTA 任务。" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,9,0,0" Text="• 传统模式只支持 Gateway、Sync；不支持日志分析与 cmd=8/9。" TextWrapping="Wrap" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,9,0,0" Text="• EcoLink 模式要求观察到目标 Gateway 上行消息后才允许启动。" TextWrapping="Wrap" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,9,0,0" Text="• 未认证差分引擎禁止生成 Patch，仅允许导入已生成文件。" TextWrapping="Wrap" /></StackPanel></Border>
+                            <Border Margin="0,16,0,0" Style="{StaticResource Card}"><StackPanel><TextBlock FontSize="20" FontWeight="SemiBold" Text="运行约束" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,12,0,0" Text="• 同一工具实例同一时刻只允许一个父 OTA 任务。" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,9,0,0" Text="• 传统模式只支持 Gateway、Sync；不支持日志分析与 cmd=8/9。" TextWrapping="Wrap" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,9,0,0" Text="• 状态查询模式要求订阅目标网关的上行主题后启动。" TextWrapping="Wrap" /><TextBlock FontSize="12" Foreground="{StaticResource MutedInkBrush}" Margin="0,9,0,0" Text="• 未认证差分引擎禁止生成 Patch，仅允许导入已生成文件。" TextWrapping="Wrap" /></StackPanel></Border>
                         </StackPanel>
                     </Grid>
                 </ScrollViewer>

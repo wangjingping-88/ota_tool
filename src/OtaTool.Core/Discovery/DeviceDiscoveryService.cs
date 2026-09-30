@@ -309,14 +309,14 @@ public sealed class DeviceDiscoveryService
                      response.PageCount != firstPage.PageCount ||
                      response.TotalCount != firstPage.TotalCount))
                 {
-                    completion.TrySetException(new InvalidDataException("0x0F 多页响应的地址、总页数或设备总数不一致。"));
+                    completion.TrySetException(new InvalidDataException("0x19 多页响应的地址、总页数或设备总数不一致。"));
                     return;
                 }
                 if (pages.TryGetValue(response.PageIndex, out var existingPage))
                 {
                     if (!existingPage.Nodes.SequenceEqual(response.Nodes))
                     {
-                        completion.TrySetException(new InvalidDataException($"0x0F 第 {response.PageIndex} 页重复响应内容不一致。"));
+                        completion.TrySetException(new InvalidDataException($"0x19 第 {response.PageIndex} 页重复响应内容不一致。"));
                     }
                     return;
                 }
@@ -330,12 +330,12 @@ public sealed class DeviceDiscoveryService
                 if (orderedNodes.Length != response.TotalCount)
                 {
                     completion.TrySetException(new InvalidDataException(
-                        $"0x0F 分页汇总数量错误：声明 {response.TotalCount} 项，实际收到 {orderedNodes.Length} 项。"));
+                        $"0x19 分页汇总数量错误：声明 {response.TotalCount} 项，实际收到 {orderedNodes.Length} 项。"));
                     return;
                 }
                 if (orderedNodes.Select(node => (node.NodeType, node.NodeId)).Distinct().Count() != orderedNodes.Length)
                 {
-                    completion.TrySetException(new InvalidDataException("0x0F 多页响应包含设备类型和 Node ID 均相同的重复项。"));
+                    completion.TrySetException(new InvalidDataException("0x19 多页响应包含设备类型和 Node ID 均相同的重复项。"));
                     return;
                 }
                 completion.TrySetResult(new GatewayNodeList(
@@ -363,7 +363,7 @@ public sealed class DeviceDiscoveryService
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                throw new TimeoutException($"等待 Extender {extenderId} 的 0x0F Node 列表响应超时。");
+                throw new TimeoutException($"等待 Extender {extenderId} 的 0x19 Node 列表响应超时。");
             }
         }
         finally
@@ -425,7 +425,7 @@ public sealed class DeviceDiscoveryService
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
-                    $"等待 Extender {extenderId} 的 0x18 状态响应超时。");
+                    $"等待 Extender {extenderId} 的 0x28 状态响应超时。");
             }
         }
         finally

@@ -10,6 +10,8 @@ public interface IOtaProtocolProfile
 
     bool SupportsGatewayStatusPolling { get; }
 
+    bool SupportsStartAck => Mode == OtaMode.EcoLink;
+
     bool SupportsBroadcastTime { get; }
 
     bool SupportsLogAnalysis { get; }
@@ -24,6 +26,8 @@ public abstract class OtaProtocolProfile : IOtaProtocolProfile
     public abstract IReadOnlySet<DeviceType> SupportedDeviceTypes { get; }
 
     public abstract bool SupportsGatewayStatusPolling { get; }
+
+    public virtual bool SupportsStartAck => Mode == OtaMode.EcoLink;
 
     public abstract bool SupportsBroadcastTime { get; }
 
@@ -95,6 +99,8 @@ public static class OtaTaskValidator
 {
     public static OtaTaskValidationResult Validate(OtaTask task, IOtaProtocolProfile profile)
     {
+        if (OtaProtocolProfiles.ValidateIpmContract(task) is { } contractError)
+            return OtaTaskValidationResult.Failure(contractError);
         if (task.Mode != profile.Mode)
         {
             return OtaTaskValidationResult.Failure("任务模式与协议适配器不一致。");
@@ -150,9 +156,9 @@ public static class OtaTaskValidator
             {
                 return OtaTaskValidationResult.Failure("传统模式不支持节点升级。");
             }
-            if (task.NodeType is not (>= 2 and <= 63))
+            if (task.NodeType is not (>= 4 and <= 63))
             {
-                return OtaTaskValidationResult.Failure("Node OTA 必须填写 2～63 的 node_type。");
+                return OtaTaskValidationResult.Failure("Node OTA 必须填写 4～63 的 node_type。");
             }
             if (task.NodeRetryCount is not (0 or 1))
             {
@@ -207,9 +213,27 @@ public static class OtaTaskValidator
             return OtaTaskValidationResult.Failure(patchUrlError);
         }
 
+        if (task.Mode == OtaMode.IPM)
+        {
+            try
+            {
+                if (task.DeviceType == DeviceType.Mcu && !Enum.IsDefined(task.IpmMcuUpgradeMode))
+                    return OtaTaskValidationResult.Failure("未知的 IPM MCU 验证模式。");
+                var package = IpmPackageMetadata.Validate(task.PatchPath, task.DeviceType, task.PackageKind, newVersion);
+                if (task.DeviceType == DeviceType.Mcu &&
+                    package.IsDownloadTest != (task.IpmMcuUpgradeMode == IpmMcuUpgradeMode.NoUbootValidation))
+                    return OtaTaskValidationResult.Failure("MCU 升级包与当前 IPM 验证模式不匹配，请切换模式或重新导入固件。");
+                if (task.PackageMetadata is null || task.PackageMetadata.IsDownloadTest != package.IsDownloadTest ||
+                    !task.PackageMetadata.Sha256.Equals(package.Sha256, StringComparison.OrdinalIgnoreCase))
+                    return OtaTaskValidationResult.Failure("任务包记录与当前导入文件不一致。");
+                if (!package.Md5.Equals(task.PatchMd5, StringComparison.OrdinalIgnoreCase) ||
+                    !package.Sha256.Equals(task.PatchSha256, StringComparison.OrdinalIgnoreCase))
+                    return OtaTaskValidationResult.Failure("任务哈希与 IPM 包清单不一致。");
+            }
+            catch (Exception exception) { return OtaTaskValidationResult.Failure(exception.Message); }
+        }
         var patchLength = new FileInfo(task.PatchPath).Length;
-        return PatchCapacityPolicy.Check(task.DeviceType, patchLength, nodeType: task.NodeType) is { IsAllowed: true }
-            ? OtaTaskValidationResult.Success()
-            : OtaTaskValidationResult.Failure(PatchCapacityPolicy.Check(task.DeviceType, patchLength, nodeType: task.NodeType).Message);
+        var capacity = PatchCapacityPolicy.Check(task.DeviceType, patchLength, task.CapacityLimits, task.NodeType);
+        return capacity.IsAllowed ? OtaTaskValidationResult.Success() : OtaTaskValidationResult.Failure(capacity.Message);
     }
 }

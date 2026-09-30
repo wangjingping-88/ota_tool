@@ -15,6 +15,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OtaTool.Updater", "src\OtaT
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OtaTool.Update.Tests", "tests\OtaTool.Update.Tests\OtaTool.Update.Tests.csproj", "{45C56F17-5B28-4719-98B8-671324F2116A}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{350AF537-D37C-45FA-A7B8-123A86936B8F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "OtaTool.App.SmokeTests", "tests\OtaTool.App.SmokeTests\OtaTool.App.SmokeTests.csproj", "{2E48C244-9E99-443F-B952-4296E325F2A0}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -48,5 +52,12 @@ Global
 		{45C56F17-5B28-4719-98B8-671324F2116A}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{45C56F17-5B28-4719-98B8-671324F2116A}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{45C56F17-5B28-4719-98B8-671324F2116A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2E48C244-9E99-443F-B952-4296E325F2A0}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2E48C244-9E99-443F-B952-4296E325F2A0}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2E48C244-9E99-443F-B952-4296E325F2A0}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2E48C244-9E99-443F-B952-4296E325F2A0}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{2E48C244-9E99-443F-B952-4296E325F2A0} = {350AF537-D37C-45FA-A7B8-123A86936B8F}
 	EndGlobalSection
 EndGlobal

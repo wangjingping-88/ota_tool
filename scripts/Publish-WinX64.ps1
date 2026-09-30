@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'publish\win-x64'),
-    [string]$Version = '0.2.7',
+    [string]$Version = '0.2.8',
     [string]$SourceRevisionId = ''
 )
 

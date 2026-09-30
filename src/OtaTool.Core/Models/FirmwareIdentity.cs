@@ -7,14 +7,15 @@ namespace OtaTool.Core.Models;
 public enum FirmwareDeviceType : byte
 {
     Server = 0,
-    ExtenderA = 1,
-    ExtenderS = 2,
-    RoomLight = 3,
-    Switch = 4,
-    Socket = 5,
-    Dtu = 6,
-    StreetLight = 7,
-    Gateway = 8,
+    Gateway = 1,
+    ExtenderA = 2,
+    ExtenderS = 3,
+    RoomLight = 4,
+    Switch = 5,
+    Socket = 6,
+    Slc = 7,
+    Dtu = 8,
+    LowPowerDtu = 9,
 }
 
 public static class FirmwarePatchNaming
@@ -30,15 +31,14 @@ public static class FirmwarePatchNaming
         FirmwareDeviceType.Switch => "switch",
         FirmwareDeviceType.Socket => "socket",
         FirmwareDeviceType.Dtu => "dtu",
-        FirmwareDeviceType.StreetLight => "street-light",
+        FirmwareDeviceType.Slc => "street-light",
+        FirmwareDeviceType.LowPowerDtu => "low-power-dtu",
         FirmwareDeviceType.Gateway => "gateway",
         _ => throw new InvalidOperationException($"设备类型 {(byte)deviceType} 不支持制作 Patch。"),
     };
 
     public static bool IsCompatiblePrefix(FirmwareDeviceType deviceType, string patchType)
-        => string.Equals(patchType, GetPrefix(deviceType), StringComparison.Ordinal) ||
-           deviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight &&
-           string.Equals(patchType, "node", StringComparison.Ordinal);
+        => string.Equals(patchType, GetPrefix(deviceType), StringComparison.Ordinal);
 
     public static string CreateName(
         string patchPrefix,
@@ -98,7 +98,7 @@ public sealed record FirmwareIdentity(
 {
     public byte DeviceTypeCode => (byte)DeviceType;
 
-    public bool IsNode => DeviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight;
+    public bool IsNode => DeviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.LowPowerDtu;
 
     public string PatchPrefix => FirmwarePatchNaming.GetPrefix(DeviceType);
 
@@ -120,7 +120,8 @@ public sealed record FirmwareIdentity(
         FirmwareDeviceType.Switch => "开关",
         FirmwareDeviceType.Socket => "电源插座",
         FirmwareDeviceType.Dtu => "DTU",
-        FirmwareDeviceType.StreetLight => "路灯控制器",
+        FirmwareDeviceType.Slc => "路灯控制器",
+        FirmwareDeviceType.LowPowerDtu => "低功耗 DTU",
         FirmwareDeviceType.Gateway => "网关",
         _ => $"未知类型（{DeviceTypeCode}）",
     };

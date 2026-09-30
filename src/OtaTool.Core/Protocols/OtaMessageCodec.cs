@@ -135,14 +135,13 @@ public static class OtaMessageCodec
     public const int StatusResponseCommand = 9;
     public const int UpgradeRequestAckCommand = 10;
     public const int UserDataCommand = 100;
-    public const byte AsyncNodeListQueryCommand = 0x0E;
-    public const byte AsyncNodeListResponseCommand = 0x0F;
-    public const byte AsyncStatusQueryCommand = 0x17;
-    public const byte AsyncStatusResponseCommand = 0x18;
+    // Gateway cmd=3 鉴权列表的同步端编号；不同于 WIoTa 应用帧中的 ExtenderS=3。
+    public const byte GatewayAuthSyncDeviceType = 2;
+    public const byte AsyncNodeListQueryCommand = 0x18;
+    public const byte AsyncNodeListResponseCommand = 0x19;
+    public const byte AsyncStatusQueryCommand = 0x27;
+    public const byte AsyncStatusResponseCommand = 0x28;
     public const int MaxNodeListItemCount = 50;
-
-    private const string AsyncNodeListQueryHex = "C00104";
-    private const string AsyncStatusQueryHex = "E00204";
 
     public static OutboundOtaMessage CreateUpgradeRequest(OtaTask task, int sequence, OtaProtocolOptions? options = null)
     {
@@ -171,11 +170,12 @@ public static class OtaMessageCodec
             throw new InvalidOperationException("OTA 版本号必须是 1～254 且新旧版本不能相同。");
         }
 
+        if (OtaProtocolProfiles.ValidateIpmContract(task) is { } error) throw new InvalidOperationException(error);
         var ota = new JsonObject
         {
             ["active"] = 1,
-            ["type"] = options.OtaType,
-            ["range"] = options.OtaRange,
+            ["type"] = task.Mode == OtaMode.IPM ? (task.PackageKind == PackageKind.FullImage ? 0 : 1) : options.OtaType,
+            ["range"] = task.Mode == OtaMode.IPM && task.DeviceType != DeviceType.Gateway ? (task.Target.Scope == TargetScope.Broadcast ? 0 : 1) : options.OtaRange,
             ["new_ver"] = newVersion,
             ["old_ver"] = oldVersion,
             ["dev_type"] = ToProtocolDeviceType(task.DeviceType),
@@ -191,9 +191,9 @@ public static class OtaMessageCodec
 
         if (task.DeviceType == DeviceType.Node)
         {
-            if (task.NodeType is not (>= 2 and <= 63))
+            if (task.NodeType is not (>= 4 and <= 63))
             {
-                throw new InvalidOperationException("Node OTA 必须填写 2～63 的 node_type。");
+                throw new InvalidOperationException("Node OTA 必须填写 4～63 的 node_type。");
             }
             ota["node_type"] = task.NodeType.Value;
             if (task.NodeRetryCount is not (0 or 1))
@@ -368,7 +368,7 @@ public static class OtaMessageCodec
             gatewayId,
             querySequence,
             extenderId,
-            AsyncNodeListQueryHex,
+            CreateApplicationQueryHex(AsyncNodeListQueryCommand),
             options);
     }
 
@@ -382,7 +382,7 @@ public static class OtaMessageCodec
             gatewayId,
             querySequence,
             extenderId,
-            AsyncStatusQueryHex,
+            CreateApplicationQueryHex(AsyncStatusQueryCommand),
             options);
     }
 
@@ -541,24 +541,24 @@ public static class OtaMessageCodec
 
         if (data.Length == 0)
         {
-            protocolError = "0x0F 设备列表缺少数量信息。";
+            protocolError = "0x19 设备列表缺少数量信息。";
             return false;
         }
         var count = data[0];
         if (count > MaxNodeListItemCount)
         {
-            protocolError = $"0x0F 设备列表包含 {count} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
+            protocolError = $"0x19 设备列表包含 {count} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
             return false;
         }
 
         if (data.Length == 1 + count * 5)
         {
-            protocolError = "0x0F 使用旧版非分页格式，当前工具仅支持带4字节分页头的新版格式，请升级 Extender 固件。";
+            protocolError = "0x19 设备列表缺少 2.0 协议的4字节分页头。";
             return false;
         }
         if (data.Length < 4)
         {
-            protocolError = "0x0F 设备列表缺少4字节分页头。";
+            protocolError = "0x19 设备列表缺少4字节分页头。";
             return false;
         }
         var pageIndex = data[1];
@@ -567,18 +567,18 @@ public static class OtaMessageCodec
         const int nodeDataOffset = 4;
         if (pageCount is 0 or > 6 || pageIndex >= pageCount)
         {
-            protocolError = $"0x0F 分页信息非法：页号 {pageIndex}，总页数 {pageCount}。";
+            protocolError = $"0x19 分页信息非法：页号 {pageIndex}，总页数 {pageCount}。";
             return false;
         }
         if ((totalCount == 0 && (count != 0 || pageIndex != 0 || pageCount != 1)) ||
             (totalCount > 0 && (count == 0 || totalCount < count || totalCount > pageCount * MaxNodeListItemCount)))
         {
-            protocolError = $"0x0F 数量信息非法：本页 {count}，总数 {totalCount}，总页数 {pageCount}。";
+            protocolError = $"0x19 数量信息非法：本页 {count}，总数 {totalCount}，总页数 {pageCount}。";
             return false;
         }
         if (data.Length != nodeDataOffset + count * 5)
         {
-            protocolError = $"0x0F 数据结构长度错误：分页头声明 {count} 项，实际数据 {data.Length} 字节。";
+            protocolError = $"0x19 数据结构长度错误：分页头声明 {count} 项，实际数据 {data.Length} 字节。";
             return false;
         }
 
@@ -591,19 +591,19 @@ public static class OtaMessageCodec
             var nodeId = (ushort)(data[offset + 1] | data[offset + 2] << 8);
             var rssiAbsolute = data[offset + 3];
             var softwareVersion = data[offset + 4];
-            if (nodeType is < 2 or > 63 || rssiAbsolute > 200)
+            if (nodeType is < 4 or > 63 || rssiAbsolute > 200)
             {
-                protocolError = "0x0F 包含非法 Node 类型或 RSSI。";
+                protocolError = "0x19 包含非法 Node 类型或 RSSI。";
                 return false;
             }
             if (nodeId == 0)
             {
-                protocolError = "0x0F 包含零 Node ID。";
+                protocolError = "0x19 包含零 Node ID。";
                 return false;
             }
             if (!nodeKeys.Add((nodeType, nodeId)))
             {
-                protocolError = $"0x0F 包含重复 Node：类型 {nodeType}，Node ID {nodeId}。";
+                protocolError = $"0x19 包含重复 Node：类型 {nodeType}，Node ID {nodeId}。";
                 return false;
             }
             nodes.Add(new GatewayNodeInfo(
@@ -651,7 +651,7 @@ public static class OtaMessageCodec
         }
         if (data.Length != 6)
         {
-            protocolError = $"0x18 状态数据长度错误：预期 6 字节，实际 {data.Length} 字节。";
+            protocolError = $"0x28 状态数据长度错误：预期 6 字节，实际 {data.Length} 字节。";
             return false;
         }
 
@@ -661,10 +661,9 @@ public static class OtaMessageCodec
         var totalCount = data[5];
         if (syncRssiAbsolute > 200 ||
             syncSnr is < -30 or > 30 ||
-            onlineCount > totalCount ||
-            totalCount > MaxNodeListItemCount)
+            onlineCount > totalCount)
         {
-            protocolError = "0x18 包含非法 RSSI、SNR 或 Node 数量。";
+            protocolError = "0x28 包含非法 RSSI、SNR 或 Node 数量。";
             return false;
         }
 
@@ -703,7 +702,10 @@ public static class OtaMessageCodec
                 return false;
             }
             var bytes = Convert.FromHexString(userData.GetString() ?? string.Empty);
-            if (bytes.Length != 3 || !TryParseApplicationHeader(bytes, out _, out applicationCommand, out _, out _))
+            if (bytes.Length != 3 ||
+                !TryParseApplicationHeader(bytes, out var property, out applicationCommand, out var sourceType, out var destinationType) ||
+                property != 0 || sourceType != (byte)FirmwareDeviceType.Server ||
+                destinationType != (byte)FirmwareDeviceType.ExtenderA)
             {
                 return false;
             }
@@ -825,7 +827,7 @@ public static class OtaMessageCodec
         DeviceType.Gateway => "gateway",
         // Gateway 固件 OTA 管理器定义的协议字符串分别为 iote / ex_mcu。
         DeviceType.Sync => "iote",
-        DeviceType.Async => "ex_mcu",
+        DeviceType.Async or DeviceType.Mcu => "ex_mcu",
         DeviceType.Node => "node",
         _ => throw new ArgumentOutOfRangeException(nameof(deviceType)),
     };
@@ -918,7 +920,7 @@ public static class OtaMessageCodec
             var nodeType = GetOptionalInt(node, "node_type");
             var nodeId = GetOptionalInt(node, "node_id");
             if (extenderId is not > 0 ||
-                nodeType is not (>= 2 and <= 63) ||
+                nodeType is not (>= 4 and <= 63) ||
                 nodeId is not (>= 1 and <= ushort.MaxValue))
             {
                 continue;
@@ -1013,6 +1015,17 @@ public static class OtaMessageCodec
             BuildDownstreamTopic(gatewayId, querySequence, options),
             root.ToJsonString(),
             querySequence);
+    }
+
+    private static string CreateApplicationQueryHex(byte command)
+    {
+        var header = (uint)command << 6 |
+                     (uint)FirmwareDeviceType.ExtenderA << 18;
+        return Convert.ToHexString([
+            (byte)header,
+            (byte)(header >> 8),
+            (byte)(header >> 16),
+        ]);
     }
 
     private static bool TryParseUserDataFrame(
@@ -1158,31 +1171,77 @@ public static class OtaMessageCodec
 
         if (frame.Length < 6 ||
             !TryParseApplicationHeader(frame, out var property, out var applicationCommand, out var sourceType, out var destinationType) ||
-            property != 0x09 ||
+            (property & 0x20) != 0 ||
+            (property & 0x09) != 0x09 ||
             applicationCommand != expectedCommand ||
-            sourceType != 1 ||
-            destinationType != 0)
+            sourceType != (byte)FirmwareDeviceType.ExtenderA ||
+            destinationType != (byte)FirmwareDeviceType.Server)
         {
             protocolError = "cmd=100 应用帧 Header、Cmd 或地址类型不符合预期。";
             return false;
         }
-        asyncAddress = (ushort)(frame[3] | frame[4] << 8);
-        var dataLength = frame[5];
-        if (asyncAddress == 0 || frame.Length != 6 + dataLength)
+
+        var offset = 3;
+        if ((property & 0x10) != 0)
+        {
+            if (offset >= frame.Length || frame[offset++] == 0)
+            {
+                protocolError = "cmd=100 应用帧包序号无效。";
+                return false;
+            }
+        }
+        if (offset + 2 > frame.Length)
+        {
+            protocolError = "cmd=100 应用帧缺少源地址。";
+            return false;
+        }
+        asyncAddress = (ushort)(frame[offset] | frame[offset + 1] << 8);
+        offset += 2;
+        if (asyncAddress == 0)
+        {
+            protocolError = "cmd=100 应用帧源地址不能为零。";
+            return false;
+        }
+        if ((property & 0x04) != 0)
+        {
+            if (offset >= frame.Length || frame[offset] == 0 ||
+                offset + 1 + frame[offset] * 2 > frame.Length)
+            {
+                protocolError = "cmd=100 应用帧目的地址列表长度无效。";
+                return false;
+            }
+            offset += 1 + frame[offset] * 2;
+        }
+        if ((property & 0x02) != 0)
+        {
+            if (offset >= frame.Length || frame[offset] is < 1 or > 44)
+            {
+                protocolError = "cmd=100 应用帧唤醒周期必须为 1～44 秒。";
+                return false;
+            }
+            offset++;
+        }
+        if (offset >= frame.Length)
+        {
+            protocolError = "cmd=100 应用帧缺少 DataLen。";
+            return false;
+        }
+        var dataLength = frame[offset++];
+        if (frame.Length != offset + dataLength)
         {
             if (expectedCommand == AsyncNodeListResponseCommand &&
-                frame.Length >= 7 &&
-                frame[6] > MaxNodeListItemCount)
+                frame.Length > offset &&
+                frame[offset] > MaxNodeListItemCount)
             {
-                protocolError = $"0x0F 设备列表包含 {frame[6]} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
+                protocolError = $"0x19 设备列表包含 {frame[offset]} 项，超过协议容量上限 {MaxNodeListItemCount} 项。";
             }
             else
             {
-                protocolError = $"cmd=100 应用帧 DataLen={dataLength}，实际数据长度为 {Math.Max(0, frame.Length - 6)}。";
+                protocolError = $"cmd=100 应用帧 DataLen={dataLength}，实际数据长度为 {frame.Length - offset}。";
             }
             return false;
         }
-        data = frame[6..];
+        data = frame[offset..];
         return true;
     }
 
@@ -1202,8 +1261,8 @@ public static class OtaMessageCodec
             return false;
         }
         var header = frame[0] | frame[1] << 8 | frame[2] << 16;
-        property = (byte)(header & 0x1F);
-        command = (byte)((header >> 5) & 0x7F);
+        property = (byte)(header & 0x3F);
+        command = (byte)((header >> 6) & 0x3F);
         sourceType = (byte)((header >> 12) & 0x3F);
         destinationType = (byte)((header >> 18) & 0x3F);
         return true;

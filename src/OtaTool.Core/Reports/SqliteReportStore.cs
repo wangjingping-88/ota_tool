@@ -90,15 +90,19 @@ public sealed class SqliteReportStore : ITaskSequenceStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlyList<OtaReport>> LoadRecentAsync(int limit = 100, CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<OtaReport>> LoadRecentAsync(int limit = 100, CancellationToken cancellationToken = default,
+        OtaMode? mode = null)
     {
         if (limit is <= 0 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
         await InitializeAsync(cancellationToken);
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT json FROM ota_reports ORDER BY created_at DESC LIMIT $limit;";
+        command.CommandText = mode.HasValue
+            ? "SELECT json FROM ota_reports WHERE mode = $mode ORDER BY created_at DESC LIMIT $limit;"
+            : "SELECT json FROM ota_reports ORDER BY created_at DESC LIMIT $limit;";
         command.Parameters.AddWithValue("$limit", limit);
+        if (mode.HasValue) command.Parameters.AddWithValue("$mode", mode.Value.ToString());
         var reports = new List<OtaReport>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -144,15 +148,19 @@ public sealed class SqliteReportStore : ITaskSequenceStore
 
     public async Task<IReadOnlyList<OtaTestPlanReport>> LoadRecentPlansAsync(
         int limit = 100,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        OtaMode? mode = null)
     {
         if (limit is <= 0 or > 1000) throw new ArgumentOutOfRangeException(nameof(limit));
         await InitializeAsync(cancellationToken);
         await using var connection = new SqliteConnection(_connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT json FROM ota_test_plan_reports ORDER BY created_at DESC LIMIT $limit;";
+        command.CommandText = mode.HasValue
+            ? "SELECT json FROM ota_test_plan_reports WHERE mode = $mode ORDER BY created_at DESC LIMIT $limit;"
+            : "SELECT json FROM ota_test_plan_reports ORDER BY created_at DESC LIMIT $limit;";
         command.Parameters.AddWithValue("$limit", limit);
+        if (mode.HasValue) command.Parameters.AddWithValue("$mode", mode.Value.ToString());
         var reports = new List<OtaTestPlanReport>();
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

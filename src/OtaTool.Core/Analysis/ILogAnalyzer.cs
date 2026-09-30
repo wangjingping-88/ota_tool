@@ -27,7 +27,7 @@ public sealed class ExternalEcoLinkLogAnalyzer : ILogAnalyzer
     public async Task<LogAnalysisResult> AnalyzeAsync(LogAnalysisRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Mode != OtaMode.EcoLink)
+        if (request.Mode == OtaMode.Traditional)
         {
             return new LogAnalysisResult(false, "传统模式不支持日志解析。", null);
         }

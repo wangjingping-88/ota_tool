@@ -15,4 +15,5 @@ jobs:
       - run: dotnet restore OtaTool.sln
       - run: dotnet build OtaTool.sln -c Release --no-restore
       - run: dotnet run --project tests/OtaTool.Core.SmokeTests/OtaTool.Core.SmokeTests.csproj -c Release --no-build
+      - run: dotnet run --project tests/OtaTool.App.SmokeTests/OtaTool.App.SmokeTests.csproj -c Release --no-build
       - run: dotnet run --project tests/OtaTool.Update.Tests/OtaTool.Update.Tests.csproj -c Release --no-build

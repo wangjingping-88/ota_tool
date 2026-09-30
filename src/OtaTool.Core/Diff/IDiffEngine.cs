@@ -69,7 +69,7 @@ public sealed record PackageManifest(
         FirmwareDeviceType.ExtenderA => DeviceType.Async,
         FirmwareDeviceType.ExtenderS => DeviceType.Sync,
         FirmwareDeviceType.Gateway => DeviceType.Gateway,
-        >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.StreetLight => DeviceType.Node,
+        >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.LowPowerDtu => DeviceType.Node,
         _ => throw new InvalidDataException($"Patch 设备类型 {DeviceTypeCode} 不支持 OTA。"),
     };
 }
@@ -91,7 +91,7 @@ public static class PackageManifestFactory
             throw new InvalidOperationException("Patch 请求版本与 A/B 镜像身份不一致。");
         }
         return new PackageManifest(
-            1,
+            2,
             oldIdentity.PatchPrefix,
             oldIdentity.DeviceTypeCode,
             oldVersion,
@@ -151,7 +151,7 @@ public static class PackageManifestImporter
         var manifestPath = fullPatchPath + ".json";
         var manifest = await TryLoadAsync(manifestPath, cancellationToken)
             ?? throw new InvalidDataException($"Patch 缺少强制侧车元数据：{Path.GetFileName(manifestPath)}");
-        if (manifest.SchemaVersion != 1 ||
+        if (manifest.SchemaVersion != 2 ||
             string.IsNullOrWhiteSpace(manifest.PatchType) ||
             !Enum.IsDefined(typeof(FirmwareDeviceType), manifest.DeviceTypeCode) ||
             manifest.OldVersion is < 1 or > 254 ||

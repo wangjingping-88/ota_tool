@@ -68,7 +68,7 @@ public sealed class AppSettings
 
     public string TargetIdList { get; init; } = string.Empty;
 
-    public int NodeType { get; init; } = 5;
+    public int NodeType { get; init; } = 6;
 
     public int NodeRetryCount { get; init; }
 
@@ -90,7 +90,7 @@ public sealed class AppSettings
 
     public int CycleRandomMaximumSeconds { get; init; }
 
-    public long NodePatchLimit { get; init; } = 0xD000;
+    public long NodePatchLimit { get; init; } = PatchCapacityPolicy.NodePatchLimit;
 
     public long AsyncPatchLimit { get; init; } = 0x2F000;
 
@@ -122,6 +122,7 @@ public sealed class AppSettings
 /// </summary>
 public sealed class ModeWorkspaceSettings
 {
+    public IpmMcuUpgradeMode IpmMcuUpgradeMode { get; set; } = IpmMcuUpgradeMode.NoUbootValidation;
     public string SelectedPageName { get; set; } = "MQTT 配置";
     public string MqttHost { get; set; } = "117.172.29.2";
     public int MqttPort { get; set; } = 36106;
@@ -152,7 +153,7 @@ public sealed class ModeWorkspaceSettings
     public string ReversePatchName { get; set; } = "b-to-a";
     public bool IsSpecifiedTarget { get; set; } = true;
     public string TargetIdList { get; set; } = string.Empty;
-    public int NodeType { get; set; } = 5;
+    public int NodeType { get; set; } = 6;
     public int NodeRetryCount { get; set; }
     public IReadOnlyList<NodeTypeDefinitionSettings> CustomNodeTypes { get; set; } = [];
     public string NodeTargetsText { get; set; } = string.Empty;
@@ -163,7 +164,7 @@ public sealed class ModeWorkspaceSettings
     public int CycleFixedIntervalSeconds { get; set; }
     public int CycleRandomMinimumSeconds { get; set; }
     public int CycleRandomMaximumSeconds { get; set; }
-    public long NodePatchLimit { get; set; } = 0xD000;
+    public long NodePatchLimit { get; set; } = PatchCapacityPolicy.NodePatchLimit;
     public long AsyncPatchLimit { get; set; } = 0x2F000;
     public long SyncPatchLimit { get; set; } = PatchCapacityPolicy.SyncPatchLimit;
     public long GatewayPatchLimit { get; set; } = PatchCapacityPolicy.GatewayPatchLimit;

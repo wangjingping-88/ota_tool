@@ -43,6 +43,8 @@ public enum OtaTestPlanState
 
 public sealed record OtaTestPlanTargetRule
 {
+    public TargetScope Scope { get; init; } = TargetScope.SpecifiedIds;
+
     public OtaTargetResolutionMode ResolutionMode { get; init; } = OtaTargetResolutionMode.FixedIds;
 
     /// <summary>Sync/Async 的固定目标，或动态匹配时允许使用的 Extender 范围。</summary>
@@ -70,6 +72,9 @@ public sealed record OtaTestPlanPatchReference
 
     /// <summary>Gateway 完整镜像内嵌的目标版本；旧模板缺少该字段时在预检阶段重新读取镜像。</summary>
     public byte? FullImageTargetVersion { get; init; }
+    public PackageKind PackageKind { get; init; }
+    public DeviceType? PackageTarget { get; init; }
+    public bool IsMcuDownloadTest { get; init; }
 }
 
 public sealed record OtaTestPlanItemTemplate
@@ -81,6 +86,8 @@ public sealed record OtaTestPlanItemTemplate
     public int Order { get; init; }
 
     public OtaMode Mode { get; init; }
+
+    public IpmMcuUpgradeMode IpmMcuUpgradeMode { get; init; } = IpmMcuUpgradeMode.NoUbootValidation;
 
     public string GatewayId { get; init; } = string.Empty;
 

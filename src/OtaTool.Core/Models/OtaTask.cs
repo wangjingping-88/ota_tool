@@ -4,6 +4,13 @@ public enum OtaMode
 {
     Traditional,
     EcoLink,
+    IPM,
+}
+
+public enum IpmMcuUpgradeMode
+{
+    NoUbootValidation,
+    Formal,
 }
 
 public enum DeviceType
@@ -12,7 +19,10 @@ public enum DeviceType
     Sync,
     Async,
     Node,
+    Mcu,
 }
+
+public enum PackageKind { Patch, FullImage }
 
 public enum TargetScope
 {
@@ -55,12 +65,23 @@ public sealed class OtaTask
 
     public DeviceType DeviceType { get; init; }
 
+    public PackageKind PackageKind { get; init; }
+
+    public IpmPackageMetadata? PackageMetadata { get; init; }
+
+    public IpmMcuUpgradeMode IpmMcuUpgradeMode { get; init; } = IpmMcuUpgradeMode.NoUbootValidation;
+
+    public PatchCapacityLimits? CapacityLimits { get; init; }
+
     public OtaTaskTarget Target { get; init; } = OtaTaskTarget.Broadcast();
+
+    /// <summary>广播任务预检时的同步端快照，仅用于复查，不编码为 MQTT targets。</summary>
+    public IReadOnlyList<string> BroadcastTargetSnapshot { get; init; } = [];
 
     /// <summary>仅 EcoLink Node 任务使用；每项必须包含一个 Extender 及其 Node 列表。</summary>
     public IReadOnlyList<OtaExtenderTarget> ExtenderTargets { get; init; } = [];
 
-    /// <summary>仅 EcoLink Node 任务使用，范围 2～63。</summary>
+    /// <summary>仅 EcoLink Node 任务使用，范围 4～63。</summary>
     public int? NodeType { get; init; }
 
     /// <summary>Node OTA 失败处理策略：0=整批失败，1=失败隔离并由固件自动重试一次。</summary>

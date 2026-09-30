@@ -22,7 +22,7 @@ public static class OtaTestPlanVersionProjection
     public static byte GetProjectedEndVersion(OtaTestPlanItemTemplate item)
     {
         ArgumentNullException.ThrowIfNull(item);
-        var value = item.ExecutionKind == OtaTestPlanExecutionKind.Cycle
+        var value = item.ExecutionKind == OtaTestPlanExecutionKind.Cycle || item.ForwardPatch.IsMcuDownloadTest
             ? item.OldVersion
             : item.NewVersion;
         if (!byte.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var version))
@@ -45,11 +45,12 @@ public static class OtaTestPlanVersionProjection
         }
 
         var rule = item.TargetRule;
-        if (item.DeviceType is DeviceType.Sync or DeviceType.Async)
+        if (item.DeviceType is DeviceType.Sync or DeviceType.Async or DeviceType.Mcu)
         {
             return string.Join('|',
                 prefix,
                 rule.ResolutionMode,
+                rule.Scope,
                 NormalizeIdentifiers(rule.DeviceIds));
         }
 

@@ -34,6 +34,10 @@ jobs:
           if ($tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') {
             throw "非法正式版本标签：$tag"
           }
+          [xml]$props = Get-Content -LiteralPath './Directory.Build.props'
+          if ($props.Project.PropertyGroup.VersionPrefix -ne $tag.Substring(1)) {
+            throw "版本标签 $tag 与 Directory.Build.props 中的版本不一致。"
+          }
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$($tag.Substring(1))" >> $env:GITHUB_OUTPUT
 
@@ -44,6 +48,7 @@ jobs:
           dotnet restore OtaTool.sln
           dotnet build OtaTool.sln -c Release --no-restore
           dotnet run --project tests/OtaTool.Core.SmokeTests/OtaTool.Core.SmokeTests.csproj -c Release --no-build
+          dotnet run --project tests/OtaTool.App.SmokeTests/OtaTool.App.SmokeTests.csproj -c Release --no-build
           dotnet run --project tests/OtaTool.Update.Tests/OtaTool.Update.Tests.csproj -c Release --no-build
 
       - name: 发布便携目录

@@ -22,6 +22,7 @@ var workspace = Path.Combine(Path.GetTempPath(), "ota-tool-smoke", Guid.NewGuid(
 try
 {
     Directory.CreateDirectory(workspace);
+    await IpmTests.RunAsync(workspace);
     VerifyDefaultExternalMqttSettings();
     VerifyStaticResourceReferences();
     VerifyReadOnlyRunBindings();
@@ -226,14 +227,14 @@ static void VerifyPatchCenterWorkflow()
         && viewModel.Contains("OnPropertyChanged(nameof(CanGeneratePatch));", StringComparison.Ordinal),
         "Patch generation must stay disabled until valid A/B firmware is imported and must expose operation feedback.");
     Assert(
-        viewModel.Contains("Gateway 完整镜像|*.bin", StringComparison.Ordinal)
-        && viewModel.Contains("完整 .bin 镜像仅支持网关升级", StringComparison.Ordinal),
+        viewModel.Contains("完整 APP 镜像|*.bin", StringComparison.Ordinal)
+        && viewModel.Contains("完整 .bin 镜像仅支持网关或 IPM MCU 升级", StringComparison.Ordinal),
         "Existing upgrade-file import must accept Gateway full images in both protocol modes.");
     Assert(
         viewModel.Contains("缺少有效 JSON 清单的历史 Patch 仍显示在详情列表中", StringComparison.Ordinal)
         && viewModel.Contains("item.IsFullImage", StringComparison.Ordinal)
-        && viewModel.Contains("selectedDeviceType == DeviceType.Gateway", StringComparison.Ordinal)
-        && viewModel.Contains("!IsEcoLink || item.ManifestVerified", StringComparison.Ordinal)
+        && viewModel.Contains("selectedDeviceType == item.OtaDeviceType", StringComparison.Ordinal)
+        && viewModel.Contains("!SupportsModernOta || item.ManifestVerified", StringComparison.Ordinal)
         && viewModel.Contains("item.OtaDeviceType == selectedDeviceType", StringComparison.Ordinal),
         "EcoLink choices must accept Gateway full images while differential patches remain verified and match the selected device type.");
     var nativeGate = viewModel.IndexOf("engine.VerifyAsync(oldImagePath, patchPath, newImagePath)", StringComparison.Ordinal);
@@ -332,7 +333,7 @@ static void VerifyStatusPanelLayout()
         "主窗口应立即显示，并在每次启动时固定进入 MQTT 配置页面。");
     Assert(xaml.Contains("Header=\"阶段时间线\" IsExpanded=\"True\"", StringComparison.Ordinal),
         "阶段时间线应默认展开。");
-    Assert(xaml.Contains("Header=\"Extender 子任务\" IsExpanded=\"True\"", StringComparison.Ordinal),
+    Assert(xaml.Contains("Header=\"{Binding SubtasksTitle}\" IsExpanded=\"True\"", StringComparison.Ordinal),
         "Extender 子任务应默认展开。");
     Assert(!xaml.Contains("<ItemsControl Margin=\"0,10,0,0\" ItemsSource=\"{Binding GatewayStages}\"", StringComparison.Ordinal),
         "重复的阶段概览轴应移除。");
@@ -342,8 +343,8 @@ static void VerifyStatusPanelLayout()
     Assert(xaml.Contains("Text=\"升级状态机\"", StringComparison.Ordinal)
         && !xaml.Contains("Text=\"升级状态确认\"", StringComparison.Ordinal),
         "右侧状态区域应统一命名为升级状态机。");
-    Assert(xaml.Contains("Text=\"正向升级 Patch\"", StringComparison.Ordinal)
-        && xaml.Contains("Text=\"反向升级 Patch\"", StringComparison.Ordinal)
+    Assert(xaml.Contains("Text=\"正向升级包\"", StringComparison.Ordinal)
+        && xaml.Contains("Text=\"反向升级包\"", StringComparison.Ordinal)
         && xaml.Contains("Text=\"将当前配置添加到升级任务队列\"", StringComparison.Ordinal)
         && xaml.Contains("Content=\"添加正向任务\"", StringComparison.Ordinal)
         && xaml.Contains("Command=\"{Binding AddForwardPlanItemCommand}\"", StringComparison.Ordinal)
@@ -534,11 +535,11 @@ static void VerifyStatusPanelLayout()
         && !taskLayout.Contains("Text=\"{Binding StatusDisplay}\" TextTrimming=\"CharacterEllipsis\"", StringComparison.Ordinal)
         && !taskLayout.Contains("Text=\"在线 Extender\"", StringComparison.Ordinal),
         "Gateway、Extender 与 Node 应使用宽度稳定的手动刷新入口；Extender 遥测信息应分字段完整显示。Gateway 查询时隐藏 Extender 选择控件。");
-    Assert(viewModel.Contains("public bool CanRefreshDiscovery => IsEcoLink && IsMqttConnected && !IsDiscoveringDevices && !IsUpgradeInProgress;", StringComparison.Ordinal)
+    Assert(viewModel.Contains("public bool CanRefreshDiscovery => SupportsModernOta && IsMqttConnected && !IsDiscoveringDevices && !IsUpgradeInProgress;", StringComparison.Ordinal)
         && viewModel.Contains("OnPropertyChanged(nameof(CanRefreshDiscovery));", StringComparison.Ordinal)
         && viewModel.Contains("升级过程中不能刷新 Extender。", StringComparison.Ordinal)
         && viewModel.Contains("升级过程中不能刷新 Node。", StringComparison.Ordinal)
-        && viewModel.Contains("if (!IsEcoLink || IsDiscoveringDevices)", StringComparison.Ordinal)
+        && viewModel.Contains("if (!SupportsModernOta || IsDiscoveringDevices)", StringComparison.Ordinal)
         && !viewModel.Contains("SelectedTaskType != NodeTaskType || IsDiscoveringDevices", StringComparison.Ordinal),
         "设备刷新应只依赖 EcoLink、MQTT 连接和无活动升级；Node 查询不得依赖 Patch 或升级类型。");
     Assert(taskLayout.Contains("Margin=\"0,8,0,0\" Text=\"{Binding GatewayIdTaskHint}\"", StringComparison.Ordinal)
@@ -595,7 +596,7 @@ static void VerifyStatusPanelLayout()
     var taskNavigation = viewModel.IndexOf("AddNavigation(\"03\", \"升级任务\")", StringComparison.Ordinal);
     var reportNavigation = viewModel.IndexOf("AddNavigation(\"04\", \"历史报告\")", StringComparison.Ordinal);
     var logNavigation = viewModel.IndexOf("AddNavigation(\"05\", \"日志分析\")", StringComparison.Ordinal);
-    var settingsNavigation = viewModel.IndexOf("AddNavigation(IsEcoLink ? \"06\" : \"05\", \"系统设置\")", StringComparison.Ordinal);
+    var settingsNavigation = viewModel.IndexOf("AddNavigation(SupportsModernOta ? \"06\" : \"05\", \"系统设置\")", StringComparison.Ordinal);
     Assert(mqttNavigation >= 0
         && mqttNavigation < patchNavigation
         && patchNavigation < taskNavigation
@@ -631,7 +632,7 @@ static void VerifyStatusPanelLayout()
     Assert(viewModel.Contains("\"TRANSFER\" => \"数据传输\"", StringComparison.Ordinal)
         && viewModel.Contains("\"REPAIR\" => \"Node 下游升级\"", StringComparison.Ordinal)
         && viewModel.Contains("\"REPAIR\" when deviceType == DeviceType.Async => \"异步拓展器升级\"", StringComparison.Ordinal)
-        && viewModel.Contains("\"REPAIR\" when deviceType == DeviceType.Sync => \"同步拓展器升级\"", StringComparison.Ordinal)
+        && viewModel.Contains("\"REPAIR\" when deviceType == DeviceType.Sync => \"同步端升级\"", StringComparison.Ordinal)
         && viewModel.Contains("\"REQUEST_ACCEPTED\" => \"MQTT to 网关\"", StringComparison.Ordinal)
         && viewModel.Contains("\"PATCH_DOWNLOAD\" => \"HTTP to 网关\"", StringComparison.Ordinal)
         && viewModel.Contains("\"REPAIR\" when deviceType == DeviceType.Async => \"Sync to Async\"", StringComparison.Ordinal)
@@ -739,7 +740,7 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("_selectedImportedLogFiles.ToArray()", StringComparison.Ordinal)
         && viewModel.Contains("Directory.EnumerateFiles(LogDirectory, \"*.log\", SearchOption.TopDirectoryOnly)", StringComparison.Ordinal)
         && viewModel.Contains("File.Copy(item.FilePath, Path.Combine(analysisInputDirectory, item.FileName));", StringComparison.Ordinal)
-        && viewModel.Contains("new LogAnalysisRequest(OtaMode.EcoLink, LogAnalyzerExecutablePath, analysisInputDirectory, outputDirectory)", StringComparison.Ordinal),
+        && viewModel.Contains("new LogAnalysisRequest(ActiveMode, LogAnalyzerExecutablePath, analysisInputDirectory, outputDirectory)", StringComparison.Ordinal),
         "日志目录导入后应显示带序号的清单，支持 Ctrl/Shift 多选和批量移出；分析器必须仅处理清单快照，并支持按全部 SID 解析循环日志。");
     Assert(viewModel.Contains("_lastLogBrowseDirectory = GetExistingBrowseDirectory(configuredLogDirectory)", StringComparison.Ordinal)
         && viewModel.Contains("? _lastLogBrowseDirectory", StringComparison.Ordinal)
@@ -776,14 +777,14 @@ static void VerifyStatusPanelLayout()
         && viewModel.Contains("public byte? OldVersion { get; }", StringComparison.Ordinal)
         && viewModel.Contains("public byte? NewVersion { get; }", StringComparison.Ordinal),
         "正向和反向 Patch 的默认选择必须按照 Manifest 版本方向匹配，不能依赖文件名或集合顺序。");
-    Assert(viewModel.Contains("var expectedType = (byte)FirmwareDeviceType.ExtenderS;", StringComparison.Ordinal)
+    Assert(viewModel.Contains("var expectedType = OtaMessageCodec.GatewayAuthSyncDeviceType;", StringComparison.Ordinal)
         && !viewModel.Contains("deviceType == DeviceType.Sync ? (byte)2 : (byte)1", StringComparison.Ordinal)
         && viewModel.Contains("DiscoverExtenderStatusesAsync", StringComparison.Ordinal)
-        && viewModel.Contains("所有 0x18 状态查询均超时", StringComparison.Ordinal)
+        && viewModel.Contains("所有 0x28 信息查询均超时", StringComparison.Ordinal)
         && viewModel.Contains("个状态查询失败，已保留", StringComparison.Ordinal)
         && viewModel.Contains("item.GetSoftwareVersion(deviceType) != manifest.OldVersion", StringComparison.Ordinal)
         && viewModel.Contains("task.DeviceType is DeviceType.Sync or DeviceType.Async", StringComparison.Ordinal),
-        "同步和异步升级必须共用 ExtenderS 承载板，但分别查询、校验并更新各自 MCU 的软件版本。");
+        "同步和异步升级必须使用 Gateway 鉴权类型 2 的承载板，并分别校验各自 MCU 的版本。");
     Assert(viewModel.Contains("SelectedTaskType == GatewayTaskType", StringComparison.Ordinal)
         && viewModel.Contains("QueryGatewayBasicInfoAsync(gatewayId.ToString())", StringComparison.Ordinal)
         && viewModel.Contains("ValidateGatewayVersionBeforeUpgrade(task)", StringComparison.Ordinal)
@@ -1002,7 +1003,7 @@ static void VerifyNodeTypePresentation()
         && viewModel.Contains("NodeTargetCoveragePolicy.Check", StringComparison.Ordinal)
         && viewModel.Contains(".Where(group => selectedExtenderIds.Contains(group.ExtenderId))", StringComparison.Ordinal),
         "Node 升级必须要求每个已勾选 Extender 都包含可升级目标，并清除未勾选 Extender 的残留目标。");
-    var restoredNodeGroups = viewModel.IndexOf("foreach (var group in workspace.DiscoveredNodeGroups ?? [])", StringComparison.Ordinal);
+    var restoredNodeGroups = viewModel.IndexOf("foreach (var group in IsIpm ? [] : workspace.DiscoveredNodeGroups ?? [])", StringComparison.Ordinal);
     var restoredNodeTypeOptions = viewModel.IndexOf("RefreshNodeTypeOptions();", restoredNodeGroups, StringComparison.Ordinal);
     var restoredNodeEligibility = viewModel.IndexOf("RefreshNodeEligibility();", restoredNodeGroups, StringComparison.Ordinal);
     var restoredNodeSelection = viewModel.IndexOf("SelectNodesByType(_selectedNodeTypeValue);", restoredNodeEligibility, StringComparison.Ordinal);
@@ -1029,9 +1030,9 @@ static void VerifyGeneratedMetadataPresentation()
     Assert(mainWindow.Contains("ToolTip=\"由所选 Patch 自动识别\"", StringComparison.Ordinal)
         && mainWindow.Contains("Text=\"{Binding OldVersionDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
         && mainWindow.Contains("Text=\"{Binding NewVersionDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
-        && !mainWindow.Contains("Text=\"{Binding OldVersion, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal)
-        && !mainWindow.Contains("Text=\"{Binding NewVersion, UpdateSourceTrigger=PropertyChanged}\"", StringComparison.Ordinal),
-        "升级任务的新旧版本应由所选 Patch 自动识别并以只读文本展示。");
+        && mainWindow.Contains("Visibility=\"{Binding AutomaticVersionVisibility}\"", StringComparison.Ordinal)
+        && mainWindow.Contains("Visibility=\"{Binding ManualMcuVersionVisibility}\"", StringComparison.Ordinal),
+        "普通升级版本应只读展示，临时 MCU 下载联调在原版本位置受控录入。");
 }
 
 static async Task VerifyPatchAndTaskRulesAsync(string workspace)
@@ -1043,14 +1044,14 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
     var metadata = await PatchMetadata.FromFileAsync(patchPath);
     Assert(metadata.Length == bytes.Length, "差分包长度读取错误。");
     Assert(metadata.Md5.Length == 32 && metadata.Sha256.Length == 64, "差分包哈希读取错误。");
-    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 0xD000).IsAllowed, "Node 容量上限应允许。");
-    Assert(!PatchCapacityPolicy.Check(DeviceType.Node, 0xD001).IsAllowed, "Node 超出容量上限应拒绝。");
-    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 0xB000, nodeType: 7).IsAllowed,
-        "路灯控制器 Node Patch 应允许 44 KiB 边界。");
-    Assert(!PatchCapacityPolicy.Check(DeviceType.Node, 0xB001, nodeType: 7).IsAllowed,
-        "路灯控制器 Node Patch 超过 44 KiB 必须拒绝。");
-    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 0xD000, nodeType: 5).IsAllowed,
-        "非路灯 Node Patch 应继续允许 52 KiB 边界。");
+    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 124 * 1024).IsAllowed, "Node 容量上限应允许。");
+    Assert(!PatchCapacityPolicy.Check(DeviceType.Node, 124 * 1024 + 1).IsAllowed, "Node 超出容量上限应拒绝。");
+    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 112 * 1024, nodeType: 7).IsAllowed,
+        "路灯控制器 Node Patch 应允许 112 KiB 边界。");
+    Assert(!PatchCapacityPolicy.Check(DeviceType.Node, 112 * 1024 + 1, nodeType: 7).IsAllowed,
+        "路灯控制器 Node Patch 超过 112 KiB 必须拒绝。");
+    Assert(PatchCapacityPolicy.Check(DeviceType.Node, 124 * 1024, nodeType: 6).IsAllowed,
+        "非路灯 Node Patch 应允许 124 KiB 边界。");
     Assert(PatchCapacityPolicy.Check(DeviceType.Sync, 0xD000).IsAllowed, "Sync 容量上限应为 52 KiB。");
     Assert(!PatchCapacityPolicy.Check(DeviceType.Sync, 0xD001).IsAllowed, "Sync 超出 52 KiB 应拒绝。");
     Assert(PatchCapacityPolicy.Check(DeviceType.Gateway, 0x200000).IsAllowed, "Gateway 容量上限应为 2 MiB。");
@@ -1083,7 +1084,8 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
         IReadOnlyList<OtaExtenderTarget> targets,
         string patchUrl = "http://127.0.0.1:8080/sample.patch",
         int nodeRetryCount = 0,
-        int nodeType = 2) => new()
+        int nodeType = 4,
+        PatchCapacityLimits? capacityLimits = null) => new()
     {
         Mode = OtaMode.EcoLink,
         DeviceType = DeviceType.Node,
@@ -1097,10 +1099,20 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
         PatchPath = patchPath,
         PatchUrl = patchUrl,
         PatchMd5 = metadata.Md5,
+        CapacityLimits = capacityLimits,
     };
 
     var nodeTask = CreateEcoNodeTask([new OtaExtenderTarget("10010001", ["1", "2", "3"])]);
     Assert(OtaTaskValidator.Validate(nodeTask, new EcoLinkProtocolProfile()).IsValid, "EcoLink Node 任务应合法。");
+    Assert(!OtaTaskValidator.Validate(CreateEcoNodeTask(
+        [new OtaExtenderTarget("10010001", ["1"])], nodeType: 2), new EcoLinkProtocolProfile()).IsValid &&
+           !OtaTaskValidator.Validate(CreateEcoNodeTask(
+        [new OtaExtenderTarget("10010001", ["1"])], nodeType: 3), new EcoLinkProtocolProfile()).IsValid,
+        "2.0 协议的 Extender 类型 2/3 不能作为 Node 类型。");
+    Assert(!OtaTaskValidator.Validate(CreateEcoNodeTask(
+        [new OtaExtenderTarget("10010001", ["1"])],
+        capacityLimits: new PatchCapacityLimits(Node: 32)), new EcoLinkProtocolProfile()).IsValid,
+        "任务执行校验必须使用当前工作区配置的 Node 门限。");
     var repeatedAcrossExtenders = CreateEcoNodeTask([
         new OtaExtenderTarget("10010001", ["1"]),
         new OtaExtenderTarget("10010002", ["1"]),
@@ -1123,7 +1135,7 @@ static async Task VerifyPatchAndTaskRulesAsync(string workspace)
         new EcoLinkProtocolProfile()).IsValid,
         "Node OTA 应拒绝超过 256 个目标。");
     var nodeRequest = OtaMessageCodec.CreateUpgradeRequest(nodeTask, 2);
-    Assert(nodeRequest.JsonPayload.Contains("\"node_type\":2", StringComparison.Ordinal)
+    Assert(nodeRequest.JsonPayload.Contains("\"node_type\":4", StringComparison.Ordinal)
         && nodeRequest.JsonPayload.Contains("\"node_retry_count\":0", StringComparison.Ordinal)
         && nodeRequest.JsonPayload.Contains("\"nodes\":[1,2,3]", StringComparison.Ordinal),
         "Node 任务编码必须携带数字型默认重试策略 0。");
@@ -1795,6 +1807,12 @@ static async Task VerifyDeviceDiscoveryAsync()
             out var legacyExtenders) && legacyExtenders.Count == 1 &&
             legacyExtenders[0].DeviceType == 0 && legacyExtenders[0].SoftwareVersion == 0,
         "缺少智能化字段的鉴权列表应继续用于发现，类型和版本按未知处理。");
+    Assert(OtaMessageCodec.TryParseGatewayAuthListPage(
+            "{\"cmd\":3,\"ver\":\"v2.0\",\"auth_num\":3,\"51890\":{\"device_type\":2,\"software_version\":1},\"981\":{\"device_type\":0,\"software_version\":1},\"51901\":{\"device_type\":2,\"software_version\":1}}",
+            out var mixedExtenders) && mixedExtenders.Count == 3 &&
+            mixedExtenders.Where(item => item.DeviceType == OtaMessageCodec.GatewayAuthSyncDeviceType)
+                .Select(item => item.ExtenderId).SequenceEqual(new uint[] { 51890, 51901 }),
+        "Gateway 鉴权类型 2 应识别出两个同步端；WIoTa 应用帧的 ExtenderS=3 不能用于筛选鉴权列表。");
     Assert(OtaMessageCodec.TryParseGatewayBasicInfo(
             "{\"cmd\":3,\"src\":704027,\"base\":{\"dev_id\":704027,\"ota_software_version\":2,\"sw_ver\":\"v1.3.1\"}}",
             out var gatewayInfo) && gatewayInfo is not null &&
@@ -1818,22 +1836,25 @@ static async Task VerifyDeviceDiscoveryAsync()
            nodeQuery.JsonPayload.Contains("\"cmd\":100", StringComparison.Ordinal) &&
            nodeQuery.JsonPayload.Contains("\"dst\":101", StringComparison.Ordinal) &&
            nodeQuery.JsonPayload.Contains("\"fmt\":\"hex\"", StringComparison.Ordinal) &&
-           nodeQuery.JsonPayload.Contains("\"uc\":\"C00104\"", StringComparison.Ordinal),
-        "cmd=100/0x0E Node 列表请求编码错误。");
+           nodeQuery.JsonPayload.Contains("\"uc\":\"000608\"", StringComparison.Ordinal),
+        "cmd=100/0x18 Node 列表请求编码错误。");
+    Assert(!OtaMessageCodec.TryParseUserDataQuery(
+               "{\"cmd\":100,\"dst\":101,\"fmt\":\"hex\",\"uc\":\"C00104\"}", out _, out _),
+        "旧版 0x0E 应用查询帧不得被识别为 2.0 请求。");
     var statusQuery = OtaMessageCodec.CreateAsyncStatusQuery("704027", 8, 101);
     Assert(OtaMessageCodec.TryParseUserDataQuery(statusQuery.JsonPayload, out queryExtenderId, out queryCommand) &&
            queryExtenderId == 101 && queryCommand == OtaMessageCodec.AsyncStatusQueryCommand &&
-           statusQuery.JsonPayload.Contains("\"uc\":\"E00204\"", StringComparison.Ordinal),
-        "cmd=100/0x17 状态请求编码错误。");
+           statusQuery.JsonPayload.Contains("\"uc\":\"C00908\"", StringComparison.Ordinal),
+        "cmd=100/0x27 信息请求编码错误。");
 
-    const string documentedNodeFrameHex = "E9110034120E0200010203011041170402200001";
+    const string documentedNodeFrameHex = "49260034120E0200010204011041170502200001";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(
             CreateUserDataResponse(101, documentedNodeFrameHex, "hex"),
             out var documentedNodes) && documentedNodes is not null &&
            documentedNodes.AsyncAddress == 0x1234 && documentedNodes.PageIndex == 0 &&
            documentedNodes.PageCount == 1 && documentedNodes.TotalCount == 2 && documentedNodes.Nodes.Count == 2 &&
-           documentedNodes.Nodes[0] == new GatewayNodeInfo(0x1001, 3, 23, -65) &&
-           documentedNodes.Nodes[1] == new GatewayNodeInfo(0x2002, 4, 1, 0),
+           documentedNodes.Nodes[0] == new GatewayNodeInfo(0x1001, 4, 23, -65) &&
+           documentedNodes.Nodes[1] == new GatewayNodeInfo(0x2002, 5, 1, 0),
         "文档 Hex Node 示例解析、大小端或 RSSI 转换错误。");
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(
             CreateUserDataResponse(
@@ -1842,19 +1863,35 @@ static async Task VerifyDeviceDiscoveryAsync()
                 "base64"),
             out var base64Nodes) && base64Nodes?.Nodes.Count == 2,
         "文档 Base64 Node 响应解析错误。");
-    const string documentedStatusFrameHex = "0913003412060146FB010203";
+    var packetNumberNodeFrameHex = "5926007F" + documentedNodeFrameHex[6..];
+    var fullOptionalNodeFrameHex = "5F26007F341201341205" + documentedNodeFrameHex[10..];
+    Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(
+               CreateUserDataResponse(101, packetNumberNodeFrameHex, "hex"), out var packetNodes) &&
+           packetNodes?.Nodes.Count == 2 &&
+           OtaMessageCodec.TryParseAsyncNodeListResponse(
+               CreateUserDataResponse(101, fullOptionalNodeFrameHex, "hex"), out var optionalNodes) &&
+           optionalNodes?.Nodes.Count == 2,
+        "2.0 应用帧可选包序号、目的地址和唤醒周期必须按属性位顺序解析。");
+    Assert(!OtaMessageCodec.TryParseAsyncNodeListResponse(
+               CreateUserDataResponse(101, "5F26007F341201341200" + documentedNodeFrameHex[10..], "hex"), out _) &&
+           !OtaMessageCodec.TryParseAsyncNodeListResponse(
+               CreateUserDataResponse(101, "7926007F" + documentedNodeFrameHex[6..], "hex"), out _) &&
+           !OtaMessageCodec.TryParseAsyncNodeListResponse(
+               CreateUserDataResponse(101, "59260000" + documentedNodeFrameHex[6..], "hex"), out _),
+        "非法唤醒周期、保留属性位和零包序号必须拒绝。");
+    const string documentedStatusFrameHex = "092A003412060146FB010203";
     Assert(OtaMessageCodec.TryParseAsyncStatusResponse(
             CreateUserDataResponse(101, documentedStatusFrameHex, "hex"),
             out var documentedStatus) && documentedStatus is not null &&
            documentedStatus.SyncSoftwareVersion == 1 && documentedStatus.SyncRssi == -70 &&
            documentedStatus.SyncSnr == -5 && documentedStatus.AsyncSoftwareVersion == 1 &&
            documentedStatus.OnlineCount == 2 && documentedStatus.TotalCount == 3,
-        "文档 0x18 状态示例解析错误。");
+        "2.0 协议 0x28 信息响应示例解析错误。");
     Assert(!OtaMessageCodec.TryParseAsyncStatusResponse(
             CreateUserDataResponse(101, "2912003412060146FB010203", "hex"),
             out _),
-        "旧 0x11 状态响应不得被误当成 0x18 响应。");
-    const string actualArrayStatusResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":1821373,\"fmt\":\"hex\",\"data\":\"091300BDCA06000000010508\"}]";
+        "旧版状态响应不得被误当成 0x28 响应。");
+    const string actualArrayStatusResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":1821373,\"fmt\":\"hex\",\"data\":\"092A00BDCA06000000010508\"}]";
     Assert(OtaMessageCodec.TryParseAsyncStatusResponse(actualArrayStatusResponse, out var arrayStatus) &&
            arrayStatus is not null &&
            arrayStatus.ExtenderId == 1821373 &&
@@ -1862,8 +1899,12 @@ static async Task VerifyDeviceDiscoveryAsync()
            arrayStatus.AsyncSoftwareVersion == 1 &&
            arrayStatus.OnlineCount == 5 &&
            arrayStatus.TotalCount == 8,
-        "Gateway 数组包装的真实 0x18 上行响应解析错误。");
-    const string actualArrayNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":1821373,\"fmt\":\"hex\",\"data\":\"E91100BDCA2C0800010805B0D23A010581FB000005F2FA3A01058EFC3B0105B9FC3B01074B8C000007F687000005D5034701\"}]";
+        "Gateway 数组包装的 0x28 上行响应解析错误。");
+    Assert(OtaMessageCodec.TryParseAsyncStatusResponse(
+               CreateUserDataResponse(101, BuildStatusFrame(1, 70, -5, 2, 200, 255), "hex"), out var largeStatus) &&
+           largeStatus?.OnlineCount == 200 && largeStatus.TotalCount == 255,
+        "2.0 Extender 信息响应的总设备数允许超过单页 50 项，最大为 255 项。");
+    const string actualArrayNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":1821373,\"fmt\":\"hex\",\"data\":\"492600BDCA2C0800010805B0D23A010581FB000005F2FA3A01058EFC3B0105B9FC3B01074B8C000007F687000005D5034701\"}]";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(actualArrayNodeResponse, out var arrayNodes) &&
            arrayNodes is not null &&
            arrayNodes.ExtenderId == 1821373 &&
@@ -1871,30 +1912,29 @@ static async Task VerifyDeviceDiscoveryAsync()
            arrayNodes.Nodes.Count == 8 &&
            arrayNodes.Nodes[0] == new GatewayNodeInfo(0xD2B0, 5, 1, -58) &&
            arrayNodes.Nodes[^1] == new GatewayNodeInfo(0x03D5, 5, 1, -71),
-        "Gateway 数组包装的真实 0x0F 上行响应解析错误。");
-    const string currentPagedNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51890,\"fmt\":\"hex\",\"data\":\"E91100B2CA360A00010A05E8EE000005B3E200000587B30000074B8C00000555E5000005B9FC3A0105F2FA3A0105B0D23A01058EFC3A0106D5033A01\"}]";
+        "Gateway 数组包装的 0x19 上行响应解析错误。");
+    const string currentPagedNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51890,\"fmt\":\"hex\",\"data\":\"492600B2CA360A00010A05E8EE000005B3E200000587B30000074B8C00000555E5000005B9FC3A0105F2FA3A0105B0D23A01058EFC3A0106D5033A01\"}]";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(currentPagedNodeResponse, out var currentPagedNodes) &&
            currentPagedNodes is not null && currentPagedNodes.ExtenderId == 51890 &&
            currentPagedNodes.AsyncAddress == 0xCAB2 && currentPagedNodes.PageIndex == 0 &&
            currentPagedNodes.PageCount == 1 && currentPagedNodes.TotalCount == 10 &&
            currentPagedNodes.Nodes.Count == 10 && currentPagedNodes.Nodes.Count(node => node.IsOnline) == 5,
-        "实机 54 字节分页 0x0F 响应应解析为10个节点，其中5个在线。");
-    const string duplicateIdAcrossTypesResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51890,\"fmt\":\"hex\",\"data\":\"E91100B2CA3B0B00010B05E8EE000005B3E200000587B30000074B8C00000555E5000005B9FC3A0205F2FA3A0205B0D23A02058EFC3A0206D503390105D5030001\"}]";
+        "实机数据按 2.0 帧头重编码后，54 字节分页 0x19 响应应解析为10个节点，其中5个在线。");
+    const string duplicateIdAcrossTypesResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51890,\"fmt\":\"hex\",\"data\":\"492600B2CA3B0B00010B05E8EE000005B3E200000587B30000074B8C00000555E5000005B9FC3A0205F2FA3A0205B0D23A02058EFC3A0206D503390105D5030001\"}]";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(duplicateIdAcrossTypesResponse, out var duplicateIdAcrossTypes) &&
            duplicateIdAcrossTypes is not null && duplicateIdAcrossTypes.Nodes.Count == 11 &&
            duplicateIdAcrossTypes.Nodes.Count(node => node.NodeId == 981) == 2 &&
            duplicateIdAcrossTypes.Nodes.Where(node => node.NodeId == 981).Select(node => node.NodeType).Order().SequenceEqual([(byte)5, (byte)6]),
         "2 字节 Node ID 仅在同一设备类型内唯一；相同 ID、不同设备类型必须允许解析。");
-    const string legacyNonPagedNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51912,\"fmt\":\"hex\",\"data\":\"E91100C8CA10030587B33B01053B123A0105A4ED3B01\"}]";
+    const string legacyNonPagedNodeResponse = "[{\"cmd\":100,\"ver\":\"v2.0\",\"src\":51912,\"fmt\":\"hex\",\"data\":\"492600C8CA10030587B33B01053B123A0105A4ED3B01\"}]";
     Assert(!OtaMessageCodec.TryParseAsyncNodeListResponse(
                legacyNonPagedNodeResponse,
                out _,
                out var legacySource,
                out var legacyFormatError) &&
            legacySource == 51912 &&
-           legacyFormatError?.Contains("旧版非分页格式", StringComparison.Ordinal) == true &&
-           legacyFormatError.Contains("仅支持带4字节分页头的新版格式", StringComparison.Ordinal),
-        "旧版非分页 0x0F 响应不得静默兼容，必须提示升级 Extender 固件。");
+           legacyFormatError?.Contains("缺少 2.0 协议的4字节分页头", StringComparison.Ordinal) == true,
+        "非分页 0x19 响应不得静默兼容。 ");
     var ackAndNodeArray = $"[{{\"cmd\":100,\"src\":704027,\"uc\":{{\"res\":\"suc\"}}}},{CreateUserDataResponse(101, documentedNodeFrameHex, "hex")}]";
     Assert(OtaMessageCodec.TryParseAsyncNodeListResponse(ackAndNodeArray, out var mixedArrayNodes) &&
            mixedArrayNodes?.Nodes.Count == 2,
@@ -1935,17 +1975,23 @@ static async Task VerifyDeviceDiscoveryAsync()
                CreateUserDataResponse(101, "%%%", "base64"), out _),
         "不支持的 fmt、奇数长度 Hex 和非法 Base64 必须拒绝。");
     Assert(!OtaMessageCodec.TryParseAsyncNodeListResponse(
-               CreateUserDataResponse(101, "E8110034120E0200010203011041170402200001", "hex"), out _) &&
+               CreateUserDataResponse(101, "48260034120E0200010204011041170502200001", "hex"), out _) &&
+           !OtaMessageCodec.TryParseAsyncNodeListResponse(
+               CreateUserDataResponse(101, "E9110034120E0200010203011041170402200001", "hex"), out _) &&
+           !OtaMessageCodec.TryParseAsyncNodeListResponse(
+               CreateUserDataResponse(101, "492604" + documentedNodeFrameHex[6..], "hex"), out _) &&
            !OtaMessageCodec.TryParseAsyncNodeListResponse(
                CreateUserDataResponse(101, documentedStatusFrameHex, "hex"), out _) &&
            !OtaMessageCodec.TryParseAsyncNodeListResponse(
                CreateUserDataResponse(101, documentedNodeFrameHex + "00", "hex"), out _),
-        "错误 Header/Cmd、DataLen 不符和尾随字节必须拒绝。");
+        "旧帧、错误 Header/设备类型、DataLen 不符和尾随字节必须拒绝。");
     var duplicateNodes = BuildNodeListFrame([((byte)5, (ushort)1, (byte)50, (byte)1), ((byte)5, (ushort)1, (byte)51, (byte)1)]);
     var zeroNode = BuildNodeListFrame([((byte)5, (ushort)0, (byte)50, (byte)1)]);
+    var extenderAsNode = BuildNodeListFrame([((byte)FirmwareDeviceType.ExtenderS, (ushort)1, (byte)50, (byte)1)]);
     Assert(!OtaMessageCodec.TryParseAsyncNodeListResponse(CreateUserDataResponse(101, duplicateNodes, "hex"), out _) &&
-           !OtaMessageCodec.TryParseAsyncNodeListResponse(CreateUserDataResponse(101, zeroNode, "hex"), out _),
-        "同类型重复或零 Node ID 必须拒绝。");
+           !OtaMessageCodec.TryParseAsyncNodeListResponse(CreateUserDataResponse(101, zeroNode, "hex"), out _) &&
+           !OtaMessageCodec.TryParseAsyncNodeListResponse(CreateUserDataResponse(101, extenderAsNode, "hex"), out _),
+        "同类型重复、零 Node ID 或将 Extender 类型作为 Node 必须拒绝。");
     var fiftyNodes = BuildNodeListFrame(Enumerable.Range(1, 50)
         .Select(value => ((byte)5, (ushort)value, value == 1 ? (byte)200 : (byte)50, (byte)1)));
     var fiftyOneNodes = BuildUserDataFrame(
@@ -2093,7 +2139,7 @@ static async Task VerifyDeviceDiscoveryAsync()
     Assert(statuses.Count == 2 &&
            statuses.Single(item => item.ExtenderId == 101).Status?.AsyncSoftwareVersion == 2 &&
            !statuses.Single(item => item.ExtenderId == 202).IsSuccess,
-        "0x18 状态查询应按顶层 src 关联响应，并隔离单板超时。");
+        "0x28 信息查询应按顶层 src 关联响应，并隔离单板超时。");
     var results = await discovery.DiscoverNodesAsync("704027", [101U, 202U, 303U, 404U]);
     Assert(results.Count == 4 && results[0].IsSuccess && results[0].ReportedCount == 2 &&
            results[0].Nodes.Count == 2 && results[0].Nodes[0].NodeId == 20 && results[0].Nodes[0].IsOnline &&
@@ -2113,7 +2159,7 @@ static async Task VerifyDeviceDiscoveryAsync()
     await Task.WhenAll(sameExtenderNodeTask, sameExtenderStatusTask);
     Assert(maxActiveForSameExtender == 1 &&
            sameExtenderNodeTask.Result.Single().Nodes.Single().SoftwareVersion == 0,
-        "同一 Extender 的 0x0E/0x17 必须严格串行，未知版本项仍应保留供 UI 禁用显示。");
+        "同一 Extender 的 0x18/0x27 必须严格串行，未知版本项仍应保留供 UI 禁用显示。");
     Assert(mqtt.Published
             .Select(message => JsonDocument.Parse(message.GetPayloadAsUtf8()).RootElement)
             .Where(root => root.TryGetProperty("cmd", out _))
@@ -2190,7 +2236,7 @@ static string BuildStatusFrame(
 
 static string BuildUserDataFrame(byte command, IReadOnlyList<byte> data)
 {
-    var header = 0x09 | command << 5 | 1 << 12;
+    var header = 0x09 | command << 6 | (byte)FirmwareDeviceType.ExtenderA << 12;
     var frame = new byte[6 + data.Count];
     frame[0] = (byte)(header & 0xFF);
     frame[1] = (byte)((header >> 8) & 0xFF);
@@ -2303,6 +2349,16 @@ static async Task VerifyReportsAsync(string workspace)
     var store = new SqliteReportStore(databasePath);
     await store.SaveAsync(report);
     Assert((await store.LoadRecentAsync()).Single().Id == report.Id, "SQLite 报告存储失败。");
+    var otherModeReport = new OtaReport
+    {
+        Task = new OtaTask { Mode = OtaMode.IPM, DeviceType = DeviceType.Mcu },
+        StartedAt = report.StartedAt.AddMinutes(1),
+    };
+    await store.SaveAsync(otherModeReport);
+    Assert((await store.LoadRecentAsync(1, mode: OtaMode.Traditional)).Single().Id == report.Id &&
+        (await store.LoadRecentAsync(1, mode: OtaMode.IPM)).Single().Id == otherModeReport.Id,
+        "单任务报告必须在排序截断前按模式查询。");
+    await store.DeleteAsync(otherModeReport.Id);
     await using (var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False"))
     {
         await connection.OpenAsync();
@@ -2363,6 +2419,16 @@ static async Task VerifyReportsAsync(string workspace)
     var planHtmlPath = await OtaTestPlanReportExporter.ExportHtmlAsync(planReport, Path.Combine(workspace, "plan-report.html"));
     await store.SavePlanAsync(planReport);
     var loadedPlan = (await store.LoadRecentPlansAsync()).Single();
+    var otherModePlan = new OtaTestPlanReport
+    {
+        Plan = new OtaTestPlanTemplate { Mode = OtaMode.IPM },
+        StartedAt = planReport.StartedAt.AddMinutes(1),
+    };
+    await store.SavePlanAsync(otherModePlan);
+    Assert((await store.LoadRecentPlansAsync(1, mode: plan.Mode)).Single().Id == planReport.Id &&
+        (await store.LoadRecentPlansAsync(1, mode: OtaMode.IPM)).Single().Id == otherModePlan.Id,
+        "测试计划报告必须在排序截断前按模式查询。");
+    await store.DeletePlanAsync(otherModePlan.Id);
     Assert(File.Exists(planJsonPath) && File.Exists(planHtmlPath) && loadedPlan.Id == planReport.Id &&
            loadedPlan.Items[0].ResolvedTargets.SequenceEqual(["1821373/53936"]) &&
            loadedPlan.Items[0].ChildReportIds.Count == 1,
@@ -2636,6 +2702,25 @@ static async Task VerifyDiffManifestGateAsync(string workspace)
     var output = await PackageManifestExporter.ExportAsync(manifest, patchPath + ".json");
     var oldIdentity = await FirmwareIdentityReader.ReadAsync(oldPath);
     var newIdentity = await FirmwareIdentityReader.ReadAsync(newPath);
+    Assert((byte)FirmwareDeviceType.Server == 0 && (byte)FirmwareDeviceType.Gateway == 1 &&
+        (byte)FirmwareDeviceType.ExtenderA == 2 && (byte)FirmwareDeviceType.ExtenderS == 3 &&
+        (byte)FirmwareDeviceType.RoomLight == 4 && (byte)FirmwareDeviceType.Switch == 5 &&
+        (byte)FirmwareDeviceType.Socket == 6 && (byte)FirmwareDeviceType.Slc == 7 &&
+        (byte)FirmwareDeviceType.Dtu == 8 && (byte)FirmwareDeviceType.LowPowerDtu == 9,
+        "v2.0 固件设备类型值与协议定义不一致。");
+    foreach (var (code, expectedType) in new[]
+    {
+        (1, DeviceType.Gateway), (2, DeviceType.Async), (3, DeviceType.Sync),
+        (4, DeviceType.Node), (5, DeviceType.Node), (6, DeviceType.Node),
+        (7, DeviceType.Node), (8, DeviceType.Node), (9, DeviceType.Node),
+    })
+    {
+        var typedImagePath = Path.Combine(workspace, $"device-type-{code}.bin");
+        await File.WriteAllBytesAsync(typedImagePath, CreateFirmwareImage((FirmwareDeviceType)code, 2, 0x22));
+        var typedIdentity = await FirmwareIdentityReader.ReadAsync(typedImagePath);
+        Assert(typedIdentity.DeviceTypeCode == code && typedIdentity.OtaDeviceType == expectedType,
+            $"设备类型 {code} 的镜像解析或 OTA 路由错误。");
+    }
     Assert(oldIdentity.DeviceType == FirmwareDeviceType.Socket && oldIdentity.Version == 1
         && oldIdentity.SuggestedPatchNameTo(newIdentity) == "socket-v1-to-v2.patch"
         && FirmwarePatchNaming.CreateName(oldIdentity.PatchPrefix, 1, 2, "jp01")
@@ -2644,7 +2729,7 @@ static async Task VerifyDiffManifestGateAsync(string workspace)
         && FirmwarePatchNaming.IsValidUserSuffix("A123456789012345")
         && !FirmwarePatchNaming.IsValidUserSuffix("A1234567890123456")
         && !FirmwarePatchNaming.IsValidUserSuffix("中文")
-        && manifest.PatchType == "socket",
+        && manifest.PatchType == "socket" && manifest.SchemaVersion == 2,
         "固件身份识别或 Patch 自动命名错误。");
     var expectedNodePrefixes = new Dictionary<FirmwareDeviceType, string>
     {
@@ -2652,15 +2737,26 @@ static async Task VerifyDiffManifestGateAsync(string workspace)
         [FirmwareDeviceType.Switch] = "switch",
         [FirmwareDeviceType.Socket] = "socket",
         [FirmwareDeviceType.Dtu] = "dtu",
-        [FirmwareDeviceType.StreetLight] = "street-light",
+        [FirmwareDeviceType.Slc] = "street-light",
+        [FirmwareDeviceType.LowPowerDtu] = "low-power-dtu",
     };
     Assert(expectedNodePrefixes.All(item => FirmwarePatchNaming.GetPrefix(item.Key) == item.Value),
         "不同 Node 类型必须使用互不覆盖的 Patch 文件名前缀。");
     var legacyManifest = manifest with { PatchType = "node", PatchVerified = true };
     await PackageManifestExporter.ExportAsync(legacyManifest, patchPath + ".json");
-    var importedLegacyManifest = await PackageManifestImporter.LoadAndValidateAsync(patchPath);
-    Assert(importedLegacyManifest.PatchType == "node" && importedLegacyManifest.DeviceTypeCode == (byte)FirmwareDeviceType.Socket,
-        "历史 node 前缀的 Patch 元数据应保持可导入兼容。");
+    try
+    {
+        await PackageManifestImporter.LoadAndValidateAsync(patchPath);
+        throw new InvalidOperationException("旧 node 前缀在类型重排后不能再安全映射到 v2 设备。");
+    }
+    catch (InvalidDataException) { }
+    await PackageManifestExporter.ExportAsync(manifest with { SchemaVersion = 1, PatchVerified = true }, patchPath + ".json");
+    try
+    {
+        await PackageManifestImporter.LoadAndValidateAsync(patchPath);
+        throw new InvalidOperationException("旧类型编号的 v1 清单不能按 v2 类型表导入。");
+    }
+    catch (InvalidDataException) { }
     Assert(File.Exists(output) && !manifest.PatchVerified, "Manifest 导出或 PatchTest 门禁错误。");
 }
 
