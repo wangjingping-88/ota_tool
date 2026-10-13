@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using OtaTool.Core.Models;
 using OtaTool.Core.Mqtt;
@@ -178,7 +179,10 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                 throw;
             }
             active.MarkStartPublished();
-            Emit(active, OtaTaskState.Running, $"已发送 cmd=5 升级请求，任务序号 {sequence}；正在等待 Gateway 业务受理（1/{_pollingOptions.EffectiveMaxStartAttempts}）。", null, null);
+            var timeoutNote = active.TracksMcuProgress
+                ? $" MCU 按进度等待闭环，连续 {task.Timeout.TotalMinutes:0.##} 分钟无有效进度时超时，总时限 24 小时。"
+                : string.Empty;
+            Emit(active, OtaTaskState.Running, $"已发送 cmd=5 升级请求，任务序号 {sequence}；正在等待 Gateway 业务受理（1/{_pollingOptions.EffectiveMaxStartAttempts}）。{timeoutNote}", null, null);
             if (_profile.SupportsGatewayStatusPolling)
             {
                 active.PollingTask = PollAsync(active);
@@ -219,6 +223,9 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         {
             var start = await StartAsync(task, cancellationToken);
             if (start.State != OtaTaskState.Running) return start;
+            // MCU 的 Timeout 是无进度等待窗口；由监视器统一决定超时，避免队列另设总时限。
+            if (task.Mode == OtaMode.IPM && task.DeviceType == DeviceType.Mcu)
+                return await completion.Task.WaitAsync(cancellationToken);
             return await completion.Task.WaitAsync(task.Timeout, cancellationToken);
         }
         catch (TimeoutException)
@@ -637,12 +644,34 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
     {
         try
         {
-            await Task.Delay(active.Task.Timeout, active.Cancellation.Token);
+            if (active.TracksMcuProgress)
+            {
+                while (true)
+                {
+                    TimeSpan remaining;
+                    lock (_sync)
+                    {
+                        if (!ReferenceEquals(_activeTask, active)) return;
+                        remaining = active.RemainingMcuTimeout;
+                    }
+                    if (remaining <= TimeSpan.Zero) break;
+                    await Task.Delay(remaining, active.Cancellation.Token);
+                }
+            }
+            else
+            {
+                await Task.Delay(active.Task.Timeout, active.Cancellation.Token);
+            }
             lock (_sync)
             {
                 if (!ReferenceEquals(_activeTask, active)) return;
             }
-            Finish(active, OtaTaskState.TimedOut, "等待 Gateway 最终升级结果超时。", null, null);
+            var message = active.TracksMcuProgress
+                ? active.McuHardTimeoutExpired
+                    ? "MCU 升级达到 24 小时总时限，停止等待最终结果；请核对设备实际状态。"
+                    : $"MCU 升级连续 {active.Task.Timeout.TotalMinutes:0.##} 分钟未观察到有效进度，等待最终结果超时；请核对设备实际状态。"
+                : "等待 Gateway 最终升级结果超时。";
+            Finish(active, OtaTaskState.TimedOut, message, null, null);
         }
         catch (OperationCanceledException) when (active.Cancellation.IsCancellationRequested) { }
     }
@@ -695,6 +724,7 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
                     active.AcceptanceConfirmed = true;
                     active.StartRetryProhibited = true;
                     active.ConsecutiveStatusTimeouts = 0;
+                    active.RecordMcuProgress(status);
                 }
                 active.LastStage = status.Stage;
                 pendingResponse = active.PendingStatusResponse;
@@ -925,6 +955,17 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         OutboundOtaMessage startRequest,
         CancellationTokenSource cancellation)
     {
+        private static readonly TimeSpan McuHardTimeout = TimeSpan.FromHours(24);
+        private static readonly string[] McuProgressStages =
+        [
+            "REQUEST_ACCEPTED", "PATCH_DOWNLOAD", "PATCH_VERIFY", "PREPARE", "TRANSFER",
+            "REPAIR", "VERIFY", "PROGRAM", "COMMIT", "BOOT_VERIFY", "FINISHED",
+        ];
+        private readonly Stopwatch _elapsed = Stopwatch.StartNew();
+        private TimeSpan _lastMcuProgress;
+        private long _highestTransferredBytes;
+        private int _highestMcuStage = -1;
+
         public OtaTask Task { get; } = task;
         public int TaskSequence { get; } = taskSequence;
         public OutboundOtaMessage StartRequest { get; } = startRequest;
@@ -949,6 +990,44 @@ public sealed class OtaTaskRunner : IAsyncDisposable, IOtaTaskLauncher
         private int LastAcceptedStatusQuery { get; set; }
         private TaskCompletionSource<bool>? ResumeSignal { get; set; }
         public bool PollingPaused { get; private set; }
+
+        public bool TracksMcuProgress => Task.Mode == OtaMode.IPM && Task.DeviceType == DeviceType.Mcu;
+
+        public bool McuHardTimeoutExpired => _elapsed.Elapsed >= McuHardTimeout;
+
+        // 调用方持有 _sync；使用单调时钟，避免电脑校时影响等待窗口。
+        public TimeSpan RemainingMcuTimeout
+        {
+            get
+            {
+                var elapsed = _elapsed.Elapsed;
+                var idleRemaining = Task.Timeout - (elapsed - _lastMcuProgress);
+                var hardRemaining = McuHardTimeout - elapsed;
+                return idleRemaining < hardRemaining ? idleRemaining : hardRemaining;
+            }
+        }
+
+        // 仅在主题、查询序号、任务序号和 SID 校验通过后，在 _sync 内调用。
+        public void RecordMcuProgress(GatewayOtaStatus status)
+        {
+            if (!TracksMcuProgress || !status.Status.Equals("RUNNING", StringComparison.OrdinalIgnoreCase)) return;
+
+            var madeProgress = false;
+            var length = Task.PackageMetadata?.Length ?? 0;
+            if (status.TransferredBytes is { } bytes && bytes > _highestTransferredBytes && bytes <= length &&
+                (status.FileSize is null || status.FileSize == length))
+            {
+                _highestTransferredBytes = bytes;
+                madeProgress = true;
+            }
+            var stage = Array.FindIndex(McuProgressStages, value => value.Equals(status.Stage, StringComparison.OrdinalIgnoreCase));
+            if (stage > _highestMcuStage)
+            {
+                _highestMcuStage = stage;
+                madeProgress = true;
+            }
+            if (madeProgress) _lastMcuProgress = _elapsed.Elapsed;
+        }
 
         public void MarkStartPublished() => LastStartPublishedAt = DateTimeOffset.Now;
 

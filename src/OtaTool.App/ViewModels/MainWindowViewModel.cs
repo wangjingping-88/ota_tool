@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -27,6 +28,7 @@ namespace OtaTool.App.ViewModels;
 public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 {
     public event EventHandler? CloseApplicationRequested;
+    public event EventHandler? GatewayHeartbeatReceived;
 
     private readonly HttpRangeServer _httpRangeServer = new();
     private readonly EmbeddedMqttBroker _embeddedBroker = new();
@@ -48,35 +50,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private const string IpmModeKey = "IPM";
     private const string IpmSyncTaskType = "倾角定位-同步升级";
     private const string McuTaskType = "倾角定位-MCU升级";
-    private IpmMcuUpgradeMode _ipmMcuUpgradeMode = IpmMcuUpgradeMode.NoUbootValidation;
-    public IpmMcuUpgradeMode SelectedIpmMcuUpgradeMode
-    {
-        get => _ipmMcuUpgradeMode;
-        set
-        {
-            if (IsUpgradeInProgress && !_restoringModeWorkspace)
-            {
-                OnPropertyChanged(nameof(IsNoUbootValidation));
-                OnPropertyChanged(nameof(IsFormalIpmMcu));
-                return;
-            }
-            if (!SetProperty(ref _ipmMcuUpgradeMode, value)) return;
-            OnPropertyChanged(nameof(IsNoUbootValidation));
-            OnPropertyChanged(nameof(IsFormalIpmMcu));
-            NotifyVersionEntryMode();
-            if (!_restoringModeWorkspace)
-            {
-                RefreshUpgradePatchChoices();
-                ScheduleSettingsAutoSave();
-            }
-        }
-    }
-    public bool IsNoUbootValidation { get => SelectedIpmMcuUpgradeMode == IpmMcuUpgradeMode.NoUbootValidation; set { if (value) SelectedIpmMcuUpgradeMode = IpmMcuUpgradeMode.NoUbootValidation; } }
-    public bool IsFormalIpmMcu { get => SelectedIpmMcuUpgradeMode == IpmMcuUpgradeMode.Formal; set { if (value) SelectedIpmMcuUpgradeMode = IpmMcuUpgradeMode.Formal; } }
-    public bool CanEditMcuVersions => IsNoUbootValidation && IsIpm && SelectedTaskType == McuTaskType &&
-        (SelectedUpgradePatch is null || SelectedUpgradePatch.NewVersion is null || SelectedUpgradePatch.IsMcuDownloadTest);
-    public Visibility ManualMcuVersionVisibility => CanEditMcuVersions ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility AutomaticVersionVisibility => CanEditMcuVersions ? Visibility.Collapsed : Visibility.Visible;
     private string _ipmSelectedTaskType = GatewayTaskType;
     private readonly UpgradeModeUiState _ipmUpgradeUiState = UpgradeModeUiState.CreateEcoLink();
     private UpgradeModeUiState CurrentUpgradeUiState => IsIpm ? _ipmUpgradeUiState : IsEcoLink ? _ecoLinkUpgradeUiState : _traditionalUpgradeUiState;
@@ -226,6 +199,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private string _subscribedGatewayTopic = string.Empty;
     private string _gatewaySubscriptionStatus = "填写 Gateway ID 后订阅固定上行主题。";
     private string _mqttMessageFilter = string.Empty;
+    private long _gatewayHeartbeatCount;
     private OtaTaskRunner? _runner;
     private OtaReport? _activeReport;
     private string _sftpHost = "117.172.29.2";
@@ -671,7 +645,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         set
         {
             if (!SetProperty(ref _selectedUpgradePatch, value)) return;
-            NotifyVersionEntryMode();
             OnPropertyChanged(nameof(SelectedUpgradePatchSummary));
             OnPropertyChanged(nameof(SelectedHttpPatchUrl));
             OnPropertyChanged(nameof(ReverseUpgradePatchChoices));
@@ -711,8 +684,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 ApplyGatewayImagePairVersions();
                 _selectedPatchManifest = null;
                 _patchManifestVerified = patch.NewVersion.HasValue;
-                TaskStatusMessage = patch.IsMcuDownloadTest ? "MCU 下载联调：使用手填版本，仅验证传输，不确认固件升级成功。"
-                    : patch.NewVersion.HasValue ? BuildGatewayImagePairStatus() : "MCU 完整包已导入；请在旧版本、新版本栏填写下载联调参数。";
+                TaskStatusMessage = BuildGatewayImagePairStatus();
             }
             catch (Exception exception)
             {
@@ -726,7 +698,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             try
             {
-                var identity = await FirmwareIdentityReader.ReadAsync(Path.GetFullPath(patch.FilePath));
+                var identity = await FirmwareIdentityReader.ReadAsync(Path.GetFullPath(patch.FilePath), mode: ActiveMode);
                 if (!ReferenceEquals(_selectedUpgradePatch, patch)) return;
                 if (identity.DeviceType != FirmwareDeviceType.Gateway || !identity.Version.HasValue)
                 {
@@ -764,7 +736,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         try
         {
-            var manifest = await PackageManifestImporter.LoadAndValidateAsync(Path.GetFullPath(patch.FilePath));
+            var manifest = await PackageManifestImporter.LoadAndValidateAsync(Path.GetFullPath(patch.FilePath), expectedMode: ActiveMode);
             if (!ReferenceEquals(_selectedUpgradePatch, patch))
             {
                 return;
@@ -808,7 +780,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
         if (forwardImage.OtaDeviceType == DeviceType.Mcu)
         {
-            if (forwardImage.IsMcuDownloadTest) return;
             OldVersion = string.Empty;
             return;
         }
@@ -1230,13 +1201,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     public string NewVersionDisplay => ProtocolVersionFormatter.FormatRaw(NewVersion);
 
-    private void NotifyVersionEntryMode()
-    {
-        OnPropertyChanged(nameof(CanEditMcuVersions));
-        OnPropertyChanged(nameof(ManualMcuVersionVisibility));
-        OnPropertyChanged(nameof(AutomaticVersionVisibility));
-    }
-
     public string TargetIdList
     {
         get => _targetIdList;
@@ -1530,6 +1494,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         : "传统协议 · Gateway / Sync 定向或广播升级";
 
     public string ModeBadge => IsIpm ? "IPM 模式" : IsEcoLink ? "EcoLink 模式" : "传统模式";
+    public string FirmwareImportDescription => IsIpm
+        ? "WIoTa 导入两个版本后制作正反向 Patch；网关和 MCU 导入完整 BIN 后自动加入升级文件列表。"
+        : "导入 A/B 固件后生成 Patch 正向和 Patch 反向；导入的 Patch 与制作结果分别保存和显示。";
 
     public Visibility EcoLinkVisibility => SupportsModernOta ? Visibility.Visible : Visibility.Collapsed;
 
@@ -1603,11 +1570,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         IsPatchConfiguredForDirection(SelectedUpgradePatch, reverse: false) &&
         IsSelectedTargetAtDirectionStartVersion(reverse: false);
 
-    public bool CanStartReverseUpgrade => CanStartUpgrade && !CanEditMcuVersions &&
+    public bool CanStartReverseUpgrade => CanStartUpgrade &&
         IsPatchConfiguredForDirection(SelectedReverseUpgradePatch, reverse: true) &&
         IsSelectedTargetAtDirectionStartVersion(reverse: true);
 
-    public bool CanStartCycleUpgrade => CanStartUpgrade && !CanEditMcuVersions &&
+    public bool CanStartCycleUpgrade => CanStartUpgrade &&
         IsPatchConfiguredForDirection(SelectedUpgradePatch, reverse: false) &&
         IsPatchConfiguredForDirection(SelectedReverseUpgradePatch, reverse: true) &&
         IsSelectedTargetAtDirectionStartVersion(reverse: false);
@@ -1821,6 +1788,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     public long SyncPatchLimit { get => _syncPatchLimit; set => SetProperty(ref _syncPatchLimit, Math.Max(1, value)); }
 
     public long GatewayPatchLimit { get => _gatewayPatchLimit; set => SetProperty(ref _gatewayPatchLimit, Math.Max(1, value)); }
+
+    public long McuImageLimit => PatchCapacityPolicy.McuImageLimit;
 
     public int DiscoveryFreshnessMinutes { get => _discoveryFreshnessMinutes; set => SetProperty(ref _discoveryFreshnessMinutes, Math.Clamp(value, 1, 1440)); }
 
@@ -2239,6 +2208,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
     }
 
+    public long GatewayHeartbeatCount
+    {
+        get => _gatewayHeartbeatCount;
+        private set => SetProperty(ref _gatewayHeartbeatCount, value);
+    }
+
     public IEnumerable<MqttMessageListItem> VisibleMqttMessages => string.IsNullOrWhiteSpace(MqttMessageFilter)
         ? MqttMessages
         : MqttMessages.Where(item => item.Topic.Contains(MqttMessageFilter, StringComparison.OrdinalIgnoreCase)
@@ -2414,6 +2389,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         state.SettingsStatus = SettingsStatus;
         state.MqttMessages = MqttMessages.ToArray();
         state.MqttMessageFilter = MqttMessageFilter;
+        state.GatewayHeartbeatCount = GatewayHeartbeatCount;
         state.GatewaySubscriptionStatus = GatewaySubscriptionStatus;
         state.SubscribedGatewayTopic = _subscribedGatewayTopic;
         state.ObservedGatewayIds = _observedGatewayIds.ToArray();
@@ -2479,6 +2455,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             MqttMessages.Add(message);
         }
         MqttMessageFilter = state.MqttMessageFilter;
+        GatewayHeartbeatCount = state.GatewayHeartbeatCount;
         GatewaySubscriptionStatus = state.GatewaySubscriptionStatus;
         _subscribedGatewayTopic = state.SubscribedGatewayTopic;
         _observedGatewayIds.Clear();
@@ -2591,7 +2568,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         TargetIdList = TargetIdList,
         NodeType = NodeType,
         NodeRetryCount = NodeRetryCount,
-        IpmMcuUpgradeMode = SelectedIpmMcuUpgradeMode,
         CustomNodeTypes = NodeTypeCatalog.CustomOptions
             .Select(item => new NodeTypeDefinitionSettings(item.Value, item.Name))
             .ToArray(),
@@ -2678,8 +2654,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 : string.Empty;
             LoadImportedLogFiles();
             SelectedTaskType = TaskTypes.Contains(workspace.SelectedTaskType) ? workspace.SelectedTaskType : TaskTypes[0];
-            SelectedIpmMcuUpgradeMode = Enum.IsDefined(workspace.IpmMcuUpgradeMode)
-                ? workspace.IpmMcuUpgradeMode : IpmMcuUpgradeMode.NoUbootValidation;
             OldVersion = workspace.OldVersion;
             NewVersion = workspace.NewVersion;
             PatchNameSuffix = workspace.PatchNameSuffix ?? string.Empty;
@@ -2873,7 +2847,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void NotifyUpgradeActionAvailability()
     {
-        NotifyVersionEntryMode();
         OnPropertyChanged(nameof(CanStartUpgrade));
         OnPropertyChanged(nameof(CanStartForwardUpgrade));
         OnPropertyChanged(nameof(CanStartReverseUpgrade));
@@ -2950,27 +2923,27 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             throw new InvalidOperationException("仅支持 .patch 差分包或 .bin 完整镜像。");
         }
 
-        var isMcu = IsIpm && isFullImage && SelectedTaskType == McuTaskType;
-        if (isMcu)
-        {
-            IpmPackageMetadata.ValidatePendingMcuImage(filePath);
-        }
         FirmwareIdentity? fullImageIdentity = null;
-        if (isFullImage && !isMcu)
+        if (isFullImage)
         {
-            fullImageIdentity = await FirmwareIdentityReader.ReadAsync(filePath);
-            if (fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway)
+            fullImageIdentity = await FirmwareIdentityReader.ReadAsync(filePath, mode: ActiveMode);
+            if (fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway &&
+                !(IsIpm && fullImageIdentity.DeviceType == FirmwareDeviceType.Mcu))
             {
-                throw new InvalidOperationException($"完整镜像升级只支持 Gateway，当前文件识别为{fullImageIdentity.DisplayName}（类型 {fullImageIdentity.DeviceTypeCode}）。");
+                throw new InvalidOperationException(IsIpm
+                    ? "WIoTa 同步端需要差分包，请通过 A/B 固件入口导入两个版本后制作 Patch。"
+                    : $"完整镜像升级只支持 Gateway，当前文件识别为{fullImageIdentity.DisplayName}（类型 {fullImageIdentity.DeviceTypeCode}）。");
             }
             if (!fullImageIdentity.Version.HasValue)
             {
                 throw new InvalidOperationException("Gateway 完整镜像没有有效的软件版本，无法安全生成升级任务。");
             }
         }
+        var isMcu = fullImageIdentity?.DeviceType == FirmwareDeviceType.Mcu;
+        var mcuImage = isMcu ? McuAppImageReader.Read(filePath) : null;
 
         var metadata = await PatchMetadata.FromFileAsync(filePath);
-        var manifestVerified = isFullImage && !isMcu;
+        var manifestVerified = isFullImage;
         DeviceType? patchDeviceType = isMcu ? DeviceType.Mcu : isFullImage ? DeviceType.Gateway : null;
         var manifestNote = isFullImage
             ? " · 完整固件镜像"
@@ -2988,8 +2961,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (IsIpm && patchDeviceType is not (DeviceType.Gateway or DeviceType.Sync or DeviceType.Mcu))
             throw new InvalidDataException("IPM 仅支持网关、同步端与 MCU 包。");
         _importedPatchPath = await CopyPatchToOutputDirectoryAsync(metadata);
-        if (isMcu)
-            await IpmPackageMetadata.CreatePendingMcuImageAsync(_importedPatchPath);
+        if (mcuImage is not null)
+            await IpmPackageMetadata.CreateAsync(_importedPatchPath, DeviceType.Mcu, PackageKind.FullImage,
+                mcuImage.Version, mcuImage.LinkAddress);
         else if (IsIpm)
             await IpmPackageMetadata.CreateAsync(_importedPatchPath, patchDeviceType!.Value,
                 isFullImage ? PackageKind.FullImage : PackageKind.Patch,
@@ -2999,15 +2973,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         _importedPatchSha256 = publishedMetadata.Sha256;
         _importedPatchLength = publishedMetadata.Length;
         PatchStatus = isFullImage
-            ? $"已导入完整镜像 · {publishedMetadata.Length:N0} B · SHA256 {publishedMetadata.Sha256[..12]}…"
+            ? mcuImage is not null
+                ? $"MCU {ProtocolVersionFormatter.FormatWithPrefix(mcuImage.Version)} · {mcuImage.DeviceId} · 硬件版本 {mcuImage.HardwareRevision} · 完整固件 {publishedMetadata.Length:N0} B · OTA 保留设备 UBoot"
+                : $"已导入完整镜像 · {publishedMetadata.Length:N0} B · SHA256 {publishedMetadata.Sha256[..12]}…"
             : $"已校验 · {publishedMetadata.Length:N0} B · SHA256 {publishedMetadata.Sha256[..12]}…{manifestNote}";
         TaskStatusMessage = isMcu
-            ? "MCU 完整包已导入，版本未知；自动识别暂未启用。"
+            ? $"MCU {ProtocolVersionFormatter.FormatWithPrefix(mcuImage!.Version)} · {mcuImage.DeviceId} 完整固件已校验，OTA 原样下发整包，仅安装 APP。"
             : isFullImage
             ? "完整镜像已保存到当前项目输出目录，可用于升级。"
             : "Patch 及其 JSON 清单已保存到输出目录；启动本地 HTTP Range 服务后即可下载。";
         OnPropertyChanged(nameof(ImportedPatchFileName));
         OnPropertyChanged(nameof(ImportedPatchMetadataDetail));
+        if (IsIpm && isFullImage)
+            SelectedTaskType = isMcu ? McuTaskType : GatewayTaskType;
         RegisterPatch(
             isFullImage ? "导入完整镜像" : "导入 Patch",
             _importedPatchPath,
@@ -3018,7 +2996,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             isFullImage: isFullImage,
             otaDeviceType: patchDeviceType,
             oldVersion: manifestVerified && !isFullImage ? _selectedPatchManifest?.OldVersion : null,
-            newVersion: isFullImage ? fullImageIdentity?.Version : _selectedPatchManifest?.NewVersion);
+            newVersion: isFullImage ? mcuImage?.Version ?? fullImageIdentity?.Version : _selectedPatchManifest?.NewVersion);
         RefreshUpgradePatchChoices();
     }
 
@@ -3178,21 +3156,25 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var dialog = new OpenFileDialog
         {
             Title = isOldImage ? "导入 A 版本固件" : "导入 B 版本固件",
-            Filter = "固件文件|*.bin;*.hex;*.img;*.fw|所有文件|*.*",
+            Filter = IsIpm ? "完整 BIN 固件|*.bin|所有文件|*.*" : "固件文件|*.bin;*.hex;*.img;*.fw|所有文件|*.*",
             CheckFileExists = true,
         };
         if (dialog.ShowDialog() != true) return;
 
-        FirmwareIdentity identity;
         try
         {
-            identity = await FirmwareIdentityReader.ReadAsync(dialog.FileName);
+            await ImportFirmwareImageAsync(dialog.FileName, isOldImage);
         }
         catch (Exception exception)
         {
             TaskStatusMessage = $"固件导入失败：{exception.Message}";
             return;
         }
+    }
+
+    private async Task ImportFirmwareImageAsync(string filePath, bool isOldImage)
+    {
+        var identity = await FirmwareIdentityReader.ReadAsync(filePath, mode: ActiveMode);
 
         var otherHash = isOldImage ? _newImageSha256 : _oldImageSha256;
         if (!string.IsNullOrWhiteSpace(otherHash) &&
@@ -3208,9 +3190,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             return;
         }
 
+        var useFullImage = IsIpm && identity.OtaDeviceType is DeviceType.Gateway or DeviceType.Mcu;
+        if (useFullImage)
+            await ImportPatchAsync(filePath);
+
         if (isOldImage)
         {
-            _oldImagePath = dialog.FileName;
+            _oldImagePath = filePath;
             _oldImageSha256 = identity.Sha256;
             _oldFirmwareIdentity = identity;
             OnPropertyChanged(nameof(OldImageFileName));
@@ -3218,7 +3204,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         else
         {
-            _newImagePath = dialog.FileName;
+            _newImagePath = filePath;
             _newImageSha256 = identity.Sha256;
             _newFirmwareIdentity = identity;
             OnPropertyChanged(nameof(NewImageFileName));
@@ -3226,7 +3212,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         ApplyFirmwareIdentityDefaults();
         OnPropertyChanged(nameof(CanGeneratePatch));
-        if (CanGeneratePatch)
+        if (useFullImage && (_oldFirmwareIdentity is null || _newFirmwareIdentity is null || _areFirmwareImagesCompatible))
+        {
+            PatchStatus = "完整固件已保存到升级文件列表，可选择正向和反向版本进行升级。";
+        }
+        else if (CanGeneratePatch)
         {
             PatchStatus = "A/B 固件已就绪，可以制作 Patch。";
         }
@@ -3236,19 +3226,23 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 ? "A 版本固件已导入，请继续导入 B 版本固件。"
                 : "B 版本固件已导入，请继续导入 A 版本固件。";
         }
-        TaskStatusMessage = isOldImage ? "A 版本固件已导入。" : "B 版本固件已导入。";
+        if (_oldFirmwareIdentity is null || _newFirmwareIdentity is null)
+            TaskStatusMessage = isOldImage ? "A 版本固件已导入。" : "B 版本固件已导入。";
     }
 
     private static string FormatFirmwareIdentity(FirmwareIdentity? identity)
         => identity is null
             ? "尚未识别固件身份"
-            : $"{identity.DisplayName}（类型 {identity.DeviceTypeCode}） · {identity.VersionText}" +
+            : identity.DeviceId is not null
+                ? $"{identity.DisplayName} · {identity.DeviceId} · {identity.VersionText}"
+                : $"{identity.DisplayName}（类型 {identity.ImageDeviceTypeCode ?? identity.DeviceTypeCode}） · {identity.VersionText}" +
               (identity.IsLegacyEcoMarker ? " · 旧 ECO 标识，版本需手动填写" : string.Empty);
 
     private void UpdateGeneratedPatchNames()
     {
         if (_oldFirmwareIdentity?.Version is not { } oldVersion ||
             _newFirmwareIdentity?.Version is not { } newVersion ||
+            (IsIpm && _oldFirmwareIdentity.OtaDeviceType != DeviceType.Sync) ||
             !IsPatchNameSuffixValid)
         {
             return;
@@ -3277,8 +3271,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         try
         {
             _oldFirmwareIdentity.EnsureCompatibleWith(_newFirmwareIdentity);
-            if (IsIpm && _oldFirmwareIdentity.OtaDeviceType != DeviceType.Sync)
-                throw new InvalidOperationException("IPM 仅支持制作同步端差分包；网关和 MCU 请导入完整镜像。");
             _areFirmwareImagesCompatible = true;
             SelectedTaskType = _oldFirmwareIdentity.OtaDeviceType switch
             {
@@ -3303,7 +3295,13 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
             if (_oldFirmwareIdentity.Version.HasValue && _newFirmwareIdentity.Version.HasValue)
             {
-                UpdateGeneratedPatchNames();
+                if (!IsIpm || _oldFirmwareIdentity.OtaDeviceType == DeviceType.Sync)
+                    UpdateGeneratedPatchNames();
+                else
+                {
+                    SelectedUpgradePatch = UpgradePatchChoices.FirstOrDefault(item => item.Sha256 == _newFirmwareIdentity.Sha256);
+                    SelectedReverseUpgradePatch = ReverseUpgradePatchChoices.FirstOrDefault(item => item.Sha256 == _oldFirmwareIdentity.Sha256);
+                }
             }
             TaskStatusMessage = $"已识别 A/B 镜像：{FormatFirmwareIdentity(_oldFirmwareIdentity)} → {FormatFirmwareIdentity(_newFirmwareIdentity)}。";
         }
@@ -3324,9 +3322,11 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
         try
         {
-            _oldFirmwareIdentity ??= await FirmwareIdentityReader.ReadAsync(_oldImagePath);
-            _newFirmwareIdentity ??= await FirmwareIdentityReader.ReadAsync(_newImagePath);
+            _oldFirmwareIdentity ??= await FirmwareIdentityReader.ReadAsync(_oldImagePath, mode: ActiveMode);
+            _newFirmwareIdentity ??= await FirmwareIdentityReader.ReadAsync(_newImagePath, mode: ActiveMode);
             _oldFirmwareIdentity.EnsureCompatibleWith(_newFirmwareIdentity);
+            if (IsIpm && _oldFirmwareIdentity.OtaDeviceType != DeviceType.Sync)
+                throw new InvalidOperationException("IPM 网关与 MCU 使用完整固件，请直接选择已导入的镜像升级。");
             ApplyFirmwareIdentityDefaults();
             if (!byte.TryParse(OldVersion, out var oldVersion) ||
                 !byte.TryParse(NewVersion, out var newVersion) ||
@@ -3378,8 +3378,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         var engine = new NativeBsdiffEngine();
         var otaDeviceType = _oldFirmwareIdentity!.OtaDeviceType;
-        var forwardRequest = new DiffRequest(_oldImagePath, _newImagePath, forwardOutputPath, otaDeviceType, OldVersion, NewVersion);
-        var reverseRequest = new DiffRequest(_newImagePath, _oldImagePath, reverseOutputPath, otaDeviceType, NewVersion, OldVersion);
+        var forwardRequest = new DiffRequest(_oldImagePath, _newImagePath, forwardOutputPath, otaDeviceType, OldVersion, NewVersion, Mode: ActiveMode);
+        var reverseRequest = new DiffRequest(_newImagePath, _oldImagePath, reverseOutputPath, otaDeviceType, NewVersion, OldVersion, Mode: ActiveMode);
 
         PatchStatus = "正在制作正向和反向 Patch…";
         var forward = await engine.GenerateAsync(forwardRequest);
@@ -3714,20 +3714,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             TaskStatusMessage = $"任务未启动：请先选择一个可用的{directionText}升级 Patch。";
             return;
         }
-        if (mode == OtaMode.IPM && deviceType == DeviceType.Mcu && IsNoUbootValidation && !reverse)
-        {
-            try
-            {
-                if (!byte.TryParse(NewVersion, out var downloadVersion))
-                    throw new InvalidDataException("请填写 1～254 的联调目标版本。");
-                selectedPatch = await BindMcuDownloadTestVersionAsync(selectedPatch, downloadVersion);
-            }
-            catch (Exception exception)
-            {
-                TaskStatusMessage = $"任务未启动：{exception.Message}";
-                return;
-            }
-        }
         PatchMetadata selectedPatchMetadata;
         PackageManifest? selectedManifest = null;
         try
@@ -3735,7 +3721,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             selectedPatchMetadata = await PatchMetadata.FromFileAsync(selectedPatch.FilePath);
             if (SupportsModernOta && !selectedPatch.IsFullImage)
             {
-                selectedManifest = await PackageManifestImporter.LoadAndValidateAsync(selectedPatch.FilePath);
+                selectedManifest = await PackageManifestImporter.LoadAndValidateAsync(selectedPatch.FilePath, expectedMode: ActiveMode);
             }
         }
         catch (Exception exception)
@@ -3766,7 +3752,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             Mode = mode,
             DeviceType = deviceType,
-            IpmMcuUpgradeMode = SelectedIpmMcuUpgradeMode,
             PackageKind = selectedPatch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch,
             CapacityLimits = GetPatchCapacityLimits(),
             GatewayId = GatewayId,
@@ -4013,7 +3998,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var type = forward.DeviceType switch
         {
             DeviceType.Gateway => "网关升级",
-            DeviceType.Sync => "拓展器-同步升级",
+            DeviceType.Sync => forward.Mode == OtaMode.IPM ? "倾角定位-同步升级" : "拓展器-同步升级",
             DeviceType.Async => "拓展器-异步升级",
             DeviceType.Node => "节点升级",
             _ => forward.DeviceType.ToString(),
@@ -4089,6 +4074,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         await _mqtt.SubscribeAsync(newTopic, qualityOfService: 1);
         _subscribedGatewayTopic = newTopic;
         MqttMessages.Clear();
+        GatewayHeartbeatCount = 0;
         _observedGatewayIds.Clear();
         NotifyGatewaySubscriptionChanged();
         OnPropertyChanged(nameof(GatewayOnlineStatus));
@@ -5195,8 +5181,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             PackageManifest? reverseManifest = null;
             if (SupportsModernOta && !selectedForwardPatch.IsFullImage)
             {
-                forwardManifest = await PackageManifestImporter.LoadAndValidateAsync(_patchPath);
-                reverseManifest = await PackageManifestImporter.LoadAndValidateAsync(_reversePatchPath);
+                forwardManifest = await PackageManifestImporter.LoadAndValidateAsync(_patchPath, expectedMode: ActiveMode);
+                reverseManifest = await PackageManifestImporter.LoadAndValidateAsync(_reversePatchPath, expectedMode: ActiveMode);
                 if (ValidateUpgradePreflight(
                         deviceType,
                         ids,
@@ -5249,7 +5235,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         var forward = new OtaTask
         {
-            Mode = mode, DeviceType = deviceType, IpmMcuUpgradeMode = SelectedIpmMcuUpgradeMode, CapacityLimits = GetPatchCapacityLimits(), PackageKind = selectedForwardPatch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch, GatewayId = GatewayId, Target = target,
+            Mode = mode, DeviceType = deviceType, CapacityLimits = GetPatchCapacityLimits(), PackageKind = selectedForwardPatch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch, GatewayId = GatewayId, Target = target,
             ExtenderTargets = extenderTargets, NodeType = deviceType == DeviceType.Node ? NodeType : null,
             NodeRetryCount = deviceType == DeviceType.Node ? NodeRetryCount : 0,
             PackageMetadata = IsIpm ? IpmPackageMetadata.Read(_patchPath) : null,
@@ -5258,7 +5244,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         };
         var reverse = new OtaTask
         {
-            Mode = mode, DeviceType = deviceType, IpmMcuUpgradeMode = SelectedIpmMcuUpgradeMode, CapacityLimits = GetPatchCapacityLimits(), PackageKind = selectedReversePatch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch, GatewayId = GatewayId, Target = target,
+            Mode = mode, DeviceType = deviceType, CapacityLimits = GetPatchCapacityLimits(), PackageKind = selectedReversePatch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch, GatewayId = GatewayId, Target = target,
             ExtenderTargets = extenderTargets, NodeType = deviceType == DeviceType.Node ? NodeType : null,
             NodeRetryCount = deviceType == DeviceType.Node ? NodeRetryCount : 0,
             PackageMetadata = IsIpm ? IpmPackageMetadata.Read(_reversePatchPath) : null,
@@ -5628,32 +5614,22 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private void ValidatePatchForPublication(PatchSelection patch)
     {
         if (!File.Exists(patch.FilePath)) throw new FileNotFoundException("发布文件不存在，请重新导入。", patch.FilePath);
-        var allowUnknownMcu = IsNoUbootValidation && IsIpm &&
-            patch.IsFullImage && patch.OtaDeviceType == DeviceType.Mcu && patch.NewVersion is null;
-        if (!patch.ManifestVerified && !allowUnknownMcu)
-            throw new InvalidDataException($"{patch.FileName} 缺少有效差分包清单，请重新导入带同名 .json 清单的 Patch。");
+        if (!patch.ManifestVerified)
+            throw new InvalidDataException($"{patch.FileName} 缺少有效镜像信息或差分包清单，请重新导入。 ");
         if (!IsInCurrentPatchWorkspace(patch.FilePath))
             throw new InvalidDataException("发布包不属于当前模式工作区。");
         if (!IsIpm) return;
 
-        // 临时兼容仅适用于未知版本 MCU；已识别版本始终校验版本、地址和文件内容。
-        var metadata = allowUnknownMcu
-            ? IpmPackageMetadata.ValidateForCatalog(patch.FilePath)
-            : IpmPackageMetadata.Validate(patch.FilePath,
+        var metadata = IpmPackageMetadata.Validate(patch.FilePath,
                 patch.OtaDeviceType ?? throw new InvalidDataException("未识别发布包类型。"),
                 patch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch,
                 patch.NewVersion ?? throw new InvalidDataException("未识别发布包版本。"));
-        if (allowUnknownMcu && metadata.Version != 0)
-            throw new InvalidDataException("发布包的版本记录已变化，请重新导入后校验。");
         if (metadata.DeviceType != patch.OtaDeviceType ||
             metadata.PackageKind != (patch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch) ||
             metadata.Length != patch.Length ||
             !metadata.Md5.Equals(patch.Md5, StringComparison.OrdinalIgnoreCase) ||
             !metadata.Sha256.Equals(patch.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("发布文件与已选文件记录不一致，请重新导入。");
-        if (metadata.DeviceType == DeviceType.Mcu && metadata.Version != 0 &&
-            metadata.IsDownloadTest != IsNoUbootValidation)
-            throw new InvalidDataException("MCU 包与当前 IPM 验证模式不匹配。");
     }
 
     private async Task AnalyzeLogsAsync()
@@ -6364,7 +6340,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 {
                     try
                     {
-                        var identity = await FirmwareIdentityReader.ReadAsync(filePath);
+                        var identity = await FirmwareIdentityReader.ReadAsync(filePath, mode: ActiveMode);
                         if (identity.DeviceType != FirmwareDeviceType.Gateway || !identity.Version.HasValue) continue;
                         patchNewVersion = identity.Version.Value;
                     }
@@ -6377,7 +6353,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 {
                     if (!isFullImage)
                     {
-                        var manifest = await PackageManifestImporter.LoadAndValidateAsync(filePath);
+                        var manifest = await PackageManifestImporter.LoadAndValidateAsync(filePath, expectedMode: ActiveMode);
                         manifestVerified = true;
                         patchDeviceType = manifest.OtaDeviceType;
                         patchOldVersion = manifest.OldVersion;
@@ -6400,8 +6376,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                     isFullImage: isFullImage,
                     otaDeviceType: patchDeviceType,
                     oldVersion: patchOldVersion,
-                    newVersion: patchNewVersion,
-                    isMcuDownloadTest: project?.IsDownloadTest == true);
+                    newVersion: patchNewVersion);
             }
 
             if (ActiveMode != loadingMode) return;
@@ -6647,22 +6622,16 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             {
                 if (!string.Equals(Path.GetFullPath(source.FilePath), Path.GetFullPath(destination), StringComparison.OrdinalIgnoreCase) &&
                     File.Exists(source.FilePath + ".json"))
-                {
                     File.Copy(source.FilePath + ".json", destination + ".json", overwrite: true);
-                }
                 return destination;
             }
-
             var name = Path.GetFileNameWithoutExtension(source.FilePath);
             var extension = Path.GetExtension(source.FilePath);
             destination = Path.Combine(root, $"{name}-{source.Sha256[..8]}{extension}");
         }
-
         File.Copy(source.FilePath, destination, overwrite: true);
         if (File.Exists(source.FilePath + ".json"))
-        {
             File.Copy(source.FilePath + ".json", destination + ".json", overwrite: true);
-        }
         return destination;
     }
 
@@ -6677,8 +6646,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         bool isFullImage = false,
         DeviceType? otaDeviceType = null,
         byte? oldVersion = null,
-        byte? newVersion = null,
-        bool isMcuDownloadTest = false)
+        byte? newVersion = null)
     {
         if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return;
         if (_patchCatalog.TryGetValue(filePath, out var existing) &&
@@ -6697,8 +6665,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             isFullImage,
             otaDeviceType,
             oldVersion,
-            newVersion,
-            isMcuDownloadTest);
+            newVersion);
         NotifyPatchCatalogChanged();
     }
 
@@ -6736,9 +6703,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                      .Where(item => IsInCurrentPatchWorkspace(item.FilePath) &&
                                     File.Exists(item.FilePath) &&
                                     (selectedDeviceType != DeviceType.Mcu || !IsIpm ||
-                                     (IsNoUbootValidation
-                                         ? item.NewVersion is null || item.IsMcuDownloadTest
-                                         : item.NewVersion.HasValue && !item.IsMcuDownloadTest)) &&
+                                     item.NewVersion.HasValue && item.ManifestVerified) &&
                                     (item.IsFullImage
                                         ? selectedDeviceType == item.OtaDeviceType
                                         : (!SupportsModernOta || item.ManifestVerified) &&
@@ -6814,9 +6779,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         var deviceType = GetSelectedTaskDeviceType();
         if (patch.IsFullImage)
         {
-            if (!reverse && CanEditMcuVersions && patch.OtaDeviceType == DeviceType.Mcu)
-                return byte.TryParse(OldVersion, out var oldVersion) && oldVersion is >= 1 and <= 254 &&
-                    byte.TryParse(NewVersion, out var newVersion) && newVersion is >= 1 and <= 254 && oldVersion != newVersion;
             return deviceType is DeviceType.Gateway or DeviceType.Mcu && MatchesPatchDirection(patch, reverse);
         }
         if (!SupportsModernOta)
@@ -6895,7 +6857,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void ApplySuccessfulUpgradeVersion(OtaTask task)
     {
-        if (task.PackageMetadata?.IsDownloadTest == true) return;
         if (!byte.TryParse(task.NewVersion, out var newVersion))
         {
             return;
@@ -7094,6 +7055,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         }
         if (deviceType is DeviceType.Sync or DeviceType.Async)
         {
+            if (IsIpm && deviceType == DeviceType.Sync && !IsSpecifiedTarget) return null;
             // 鉴权列表使用 Gateway 端点类型 2；固件标识和 WIoTa 应用帧使用独立的 ExtenderS=3。
             var expectedType = OtaMessageCodec.GatewayAuthSyncDeviceType;
             var requestedIds = deviceIds
@@ -7235,6 +7197,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private void OnMqttMessageReceived(object? sender, MqttApplicationMessage message)
     {
+        var isGatewayHeartbeat = IsGatewayHeartbeat(message);
         RunOnUi(() =>
         {
             var segments = message.Topic.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
@@ -7243,9 +7206,37 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 _observedGatewayIds.Add(segments[3]);
                 OnPropertyChanged(nameof(GatewayOnlineStatus));
             }
-
+            if (isGatewayHeartbeat)
+            {
+                GatewayHeartbeatCount++;
+                GatewayHeartbeatReceived?.Invoke(this, EventArgs.Empty);
+                return;
+            }
+            AddMqttMessage("RX", message);
         });
-        AddMqttMessage("RX", message);
+    }
+
+    private static bool IsGatewayHeartbeat(MqttApplicationMessage message)
+    {
+        var segments = message.Topic.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (segments.Length != 5 || segments[0] != "ucchip" || segments[1] != "up" || segments[2] != "sgw" ||
+            !uint.TryParse(segments[3], out var gatewayId))
+            return false;
+
+        try
+        {
+            using var document = JsonDocument.Parse(message.Payload);
+            var payload = document.RootElement;
+            return payload.ValueKind == JsonValueKind.Object &&
+                payload.TryGetProperty("cmd", out var command) && command.ValueKind == JsonValueKind.Number &&
+                command.TryGetInt32(out var commandId) && commandId == 1 &&
+                payload.TryGetProperty("src", out var source) && source.ValueKind == JsonValueKind.Number &&
+                source.TryGetUInt32(out var sourceId) && sourceId == gatewayId;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
     }
 
     private void AddMqttMessage(string direction, MqttApplicationMessage message)
@@ -7262,6 +7253,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private void ClearMqttMessages()
     {
         MqttMessages.Clear();
+        GatewayHeartbeatCount = 0;
         OnPropertyChanged(nameof(VisibleMqttMessages));
         TaskStatusMessage = "MQTT 收发记录已清理。";
     }
@@ -7274,7 +7266,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     private async Task<string> ApplySidecarManifestAsync(string sourcePatchPath)
     {
         var basePath = Path.GetFullPath(sourcePatchPath);
-        var manifest = await PackageManifestImporter.LoadAndValidateAsync(basePath);
+        var manifest = await PackageManifestImporter.LoadAndValidateAsync(basePath, expectedMode: ActiveMode);
         ApplyManifestDetails(manifest, updateTaskType: true);
         return " · 已加载并校验强制 Package Manifest";
     }
@@ -7838,14 +7830,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             throw new InvalidOperationException("旧版本和新版本必须为不同的 1～254 整数。");
         }
-        if (mode == OtaMode.IPM && deviceType == DeviceType.Mcu &&
-            (primaryPatch.NewVersion is null || primaryPatch.IsMcuDownloadTest))
-        {
-            if (!IsNoUbootValidation) throw new InvalidOperationException("正式模式要求 MCU 镜像内嵌可识别版本，不能使用手填联调版本。");
-            if (kind != OtaTestPlanExecutionKind.Forward)
-                throw new InvalidOperationException("MCU 下载联调不改变运行版本，请使用正向单次任务，不支持自动反向或循环。");
-            primaryPatch = await BindMcuDownloadTestVersionAsync(primaryPatch, newVersionByte);
-        }
         if (deviceType == DeviceType.Node &&
             ValidateSelectedNodeTypesForPlanItem(targetRule.NodeType ?? NodeType) is { } selectedNodeError)
         {
@@ -7865,7 +7849,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             : null;
         if (interval?.Validate() is { } intervalError) throw new InvalidOperationException(intervalError);
         var typeName = GetTaskTypeName(deviceType).Replace("升级", string.Empty, StringComparison.Ordinal).Trim();
-        var directionName = primaryPatch.IsMcuDownloadTest ? "下载联调" : kind switch
+        var directionName = kind switch
         {
             OtaTestPlanExecutionKind.Reverse => "反向",
             OtaTestPlanExecutionKind.Cycle => "循环",
@@ -7877,7 +7861,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             Order = order,
             Mode = mode,
             GatewayId = gatewayId.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            IpmMcuUpgradeMode = SelectedIpmMcuUpgradeMode,
             DeviceType = deviceType,
             ExecutionKind = kind,
             OldVersion = oldVersion,
@@ -7917,21 +7900,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
         }
         return template;
-    }
-
-    private async Task<PatchSelection> BindMcuDownloadTestVersionAsync(PatchSelection patch, byte newVersion)
-    {
-        var oldVersionText = OldVersion;
-        var metadata = await IpmPackageMetadata.SetDownloadTestVersionAsync(patch.FilePath, newVersion);
-        RegisterPatch(patch.Source, patch.FilePath, metadata.Length, metadata.Md5, metadata.Sha256,
-            patch.IsSelectedForPublish, manifestVerified: true, isFullImage: true,
-            otaDeviceType: DeviceType.Mcu, newVersion: newVersion, isMcuDownloadTest: true);
-        RefreshUpgradePatchChoices();
-        var updated = _patchCatalog[patch.FilePath];
-        SelectedUpgradePatch = updated;
-        OldVersion = oldVersionText;
-        NewVersion = newVersion.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        return updated;
     }
 
     private string? ValidateSelectedNodeTypesForPlanItem(int expectedNodeType)
@@ -8056,6 +8024,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         byte expectedVersion)
     {
         if (!SupportsModernOta || deviceType == DeviceType.Mcu) return null;
+        if (IsIpm && deviceType == DeviceType.Sync && targetRule.Scope == TargetScope.Broadcast) return null;
         if (deviceType == DeviceType.Gateway)
         {
             if (!_gatewaySoftwareVersion.HasValue ||
@@ -8080,14 +8049,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 : DiscoveredExtenders.Where(item => configuredIds.Contains(item.ExtenderId)).ToArray();
             if (candidates.Length == 0)
             {
-                return "当前没有可用于任务的 Extender，请先刷新 Extender。";
+                return IsIpm ? "当前没有可用于任务的倾角定位同步端，请先刷新。"
+                    : "当前没有可用于任务的 Extender，请先刷新 Extender。";
             }
             if (candidates.Any(item => item.GetSoftwareVersion(deviceType) == expectedVersion)) return null;
 
             var first = candidates[0];
             var actual = first.GetSoftwareVersion(deviceType);
             var versionName = deviceType == DeviceType.Async ? "异步版本" : "同步版本";
-            return $"动态目标中没有起始版本匹配的 Extender；{ProtocolIdentifierFormatter.Format(first.ExtenderId)} 当前{versionName} " +
+            return $"动态目标中没有起始版本匹配的{(IsIpm ? "倾角定位同步端" : " Extender")}；{ProtocolIdentifierFormatter.Format(first.ExtenderId)} 当前{versionName} " +
                    $"{(actual.HasValue ? ProtocolVersionFormatter.FormatWithPrefix(actual.Value) : "未知")}，" +
                    $"所选 Patch 要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}。";
         }
@@ -8223,16 +8193,21 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
 
     private static async Task<OtaTestPlanPatchReference> CreatePlanPatchReferenceAsync(PatchSelection patch, OtaMode mode)
     {
+        if (mode == OtaMode.IPM)
+            IpmPackageMetadata.Validate(patch.FilePath,
+                patch.OtaDeviceType ?? throw new InvalidDataException("未识别 IPM 包类型。"),
+                patch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch,
+                patch.NewVersion ?? throw new InvalidDataException("未识别 IPM 包版本。"));
         var metadata = await PatchMetadata.FromFileAsync(patch.FilePath);
         PackageManifest? manifest = null;
         FirmwareIdentity? fullImageIdentity = null;
         if (mode != OtaMode.Traditional && !patch.IsFullImage)
         {
-            manifest = await PackageManifestImporter.LoadAndValidateAsync(patch.FilePath);
+            manifest = await PackageManifestImporter.LoadAndValidateAsync(patch.FilePath, expectedMode: mode);
         }
         if (patch.IsFullImage && patch.OtaDeviceType != DeviceType.Mcu)
         {
-            fullImageIdentity = await FirmwareIdentityReader.ReadAsync(patch.FilePath);
+            fullImageIdentity = await FirmwareIdentityReader.ReadAsync(patch.FilePath, mode: mode);
             if (fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway || !fullImageIdentity.Version.HasValue)
             {
                 throw new InvalidOperationException("Gateway 完整镜像没有有效的类型或目标版本。");
@@ -8249,7 +8224,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             FullImageTargetVersion = fullImageIdentity?.Version ?? patch.NewVersion,
             PackageKind = patch.IsFullImage ? PackageKind.FullImage : PackageKind.Patch,
             PackageTarget = patch.OtaDeviceType,
-            IsMcuDownloadTest = patch.IsMcuDownloadTest,
         };
     }
 
@@ -8374,7 +8348,9 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             gateway = await _deviceDiscovery.QueryGatewayBasicInfoAsync(GatewayId, cancellationToken);
         }
         IReadOnlyList<GatewayExtenderInfo> extenders = [];
-        if (items.Any(item => item.DeviceType != DeviceType.Gateway))
+        if (items.Any(item => item.DeviceType is DeviceType.Mcu or DeviceType.Async or DeviceType.Node ||
+                              (item.DeviceType == DeviceType.Sync &&
+                               (item.Mode != OtaMode.IPM || item.TargetRule.Scope != TargetScope.Broadcast))))
         {
             extenders = await _deviceDiscovery.DiscoverExtendersAsync(GatewayId, cancellationToken);
         }
@@ -8495,6 +8471,19 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
             return new PreparedPlanTargets(OtaTaskTarget.Broadcast(), [], null);
         }
+        if (item.Mode == OtaMode.IPM && item.DeviceType == DeviceType.Sync &&
+            item.TargetRule.Scope == TargetScope.Broadcast)
+        {
+            // IPM 同步广播不编码目标 ID。鉴权快照只用于可选的升级后版本复查，
+            // 网关未返回在线同步端时不能把广播误判为无目标。
+            var observedIds = snapshot.Extenders.Values
+                .Where(extender => extender.DeviceType == OtaMessageCodec.GatewayAuthSyncDeviceType &&
+                                   extender.SoftwareVersion == expectedVersion)
+                .Select(extender => extender.ExtenderId.ToString(System.Globalization.CultureInfo.InvariantCulture))
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            return new PreparedPlanTargets(OtaTaskTarget.Broadcast(), [], null, observedIds);
+        }
         if (item.DeviceType is DeviceType.Sync or DeviceType.Async)
         {
             var configuredIds = item.TargetRule.DeviceIds
@@ -8505,14 +8494,15 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             var candidateIds = item.TargetRule.ResolutionMode == OtaTargetResolutionMode.DynamicMatch && configuredIds.Length == 0
                 ? snapshot.Extenders.Keys.Order().ToArray()
                 : configuredIds;
-            if (candidateIds.Length == 0) throw new InvalidOperationException("任务没有可解析的 Extender 范围。 ");
+            if (candidateIds.Length == 0) throw new InvalidOperationException(item.Mode == OtaMode.IPM
+                ? "任务没有可解析的倾角定位同步端目标。" : "任务没有可解析的 Extender 范围。");
             var resolvedIds = new List<string>();
             var failures = new List<string>();
             foreach (var id in candidateIds)
             {
                 if (!snapshot.Extenders.TryGetValue(id, out var extender))
                 {
-                    failures.Add($"Extender {ProtocolIdentifierFormatter.Format(id)} 未在线");
+                    failures.Add($"{(item.Mode == OtaMode.IPM ? "倾角定位同步端" : "Extender")} {ProtocolIdentifierFormatter.Format(id)} 未在线");
                     continue;
                 }
                 byte? actualVersion = item.DeviceType == DeviceType.Sync ? extender.SoftwareVersion : null;
@@ -8529,7 +8519,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 {
                     if (item.TargetRule.ResolutionMode == OtaTargetResolutionMode.FixedIds)
                     {
-                        failures.Add($"Extender {ProtocolIdentifierFormatter.Format(id)} 当前版本 {(actualVersion.HasValue ? ProtocolVersionFormatter.FormatWithPrefix(actualVersion.Value) : "未知")}，任务要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}");
+                        failures.Add($"{(item.Mode == OtaMode.IPM ? "倾角定位同步端" : "Extender")} {ProtocolIdentifierFormatter.Format(id)} 当前版本 {(actualVersion.HasValue ? ProtocolVersionFormatter.FormatWithPrefix(actualVersion.Value) : "未知")}，任务要求 {ProtocolVersionFormatter.FormatWithPrefix(expectedVersion)}");
                     }
                     continue;
                 }
@@ -8539,12 +8529,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             {
                 throw new InvalidOperationException(string.Join("；", failures));
             }
-            if (resolvedIds.Count == 0) throw new InvalidOperationException("没有在线且版本匹配的 Extender。 ");
-            if (item.Mode == OtaMode.IPM && item.TargetRule.Scope == TargetScope.Broadcast)
-            {
-                if (resolvedIds.Count > 16) throw new InvalidOperationException("同步广播匹配超过 16 个目标，请改为定向分批升级。");
-                return new PreparedPlanTargets(OtaTaskTarget.Broadcast(), [], null, resolvedIds);
-            }
+            if (resolvedIds.Count == 0) throw new InvalidOperationException(item.Mode == OtaMode.IPM
+                ? "没有在线且版本匹配的倾角定位同步端。" : "没有在线且版本匹配的 Extender。");
             return new PreparedPlanTargets(OtaTaskTarget.Specified(resolvedIds.ToArray()), [], null);
         }
 
@@ -8649,7 +8635,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         {
             Mode = item.Mode,
             DeviceType = item.DeviceType,
-            IpmMcuUpgradeMode = item.IpmMcuUpgradeMode,
             CapacityLimits = GetPatchCapacityLimits(),
             PackageKind = item.Mode == OtaMode.IPM
                 ? IpmPackageMetadata.Read(patch.Path)!.PackageKind
@@ -8688,13 +8673,6 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
         if (item.Mode == OtaMode.IPM)
         {
             var metadata = IpmPackageMetadata.Validate(reference.FilePath, item.DeviceType, reference.PackageKind, newByte);
-            if (metadata.IsDownloadTest != reference.IsMcuDownloadTest)
-                throw new InvalidDataException("队列的 MCU 联调标记与包记录不一致。");
-            if (item.DeviceType == DeviceType.Mcu &&
-                metadata.IsDownloadTest != (item.IpmMcuUpgradeMode == IpmMcuUpgradeMode.NoUbootValidation))
-                throw new InvalidDataException("队列 MCU 升级包与保存的 IPM 验证模式不一致。");
-            if (metadata.IsDownloadTest && item.ExecutionKind != OtaTestPlanExecutionKind.Forward)
-                throw new InvalidDataException("临时 MCU 下载联调仅支持正向单次任务。");
             if (reference.PackageTarget != item.DeviceType ||
                 !metadata.Sha256.Equals(reference.Sha256, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidDataException("队列包的目标或哈希与 IPM 清单不一致。");
@@ -8835,9 +8813,12 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
     {
         if (task.Mode == OtaMode.IPM && task.DeviceType == DeviceType.Mcu)
         {
-            if (task.PackageMetadata?.IsDownloadTest == true)
-                return new(OtaTaskState.Failed, "MCU 下载联调不执行启动版本确认，不能判定实际升级成功；请核对同一会话的下载校验及取消日志。");
             return new(OtaTaskState.Succeeded, "MCU 由本次会话 cmd=9 最终成功状态确认；未执行独立 MCU 版本查询，不使用同步端版本。");
+        }
+        if (task.Mode == OtaMode.IPM && task.DeviceType == DeviceType.Sync &&
+            task.Target.Scope == TargetScope.Broadcast && task.BroadcastTargetSnapshot.Count == 0)
+        {
+            return new(OtaTaskState.Succeeded, "同步广播由本次会话 cmd=9 最终成功状态确认；预检时无在线目标快照，无法逐台复查版本。");
         }
         if (task.Mode == OtaMode.Traditional)
         {
@@ -9027,9 +9008,14 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 }
                 return OtaTestPlanPreparationResult.Success(
                     prepared,
-                    justInTime
-                        ? $"实时校验通过，已固化 {resolvedTargets.Count} 个目标。"
-                        : $"计划预检通过，匹配 {resolvedTargets.Count} 个目标。 ");
+                    item.Mode == OtaMode.IPM && item.DeviceType == DeviceType.Sync &&
+                    prepared.PrimaryTask.Target.Scope == TargetScope.Broadcast
+                        ? resolvedTargets.Count == 0
+                            ? "IPM 同步广播预检通过；无在线目标快照，执行后以网关最终状态确认。"
+                            : $"IPM 同步广播预检通过；记录 {resolvedTargets.Count} 个在线目标供升级后复查，广播请求不携带目标 ID。"
+                        : justInTime
+                            ? $"实时校验通过，已固化 {resolvedTargets.Count} 个目标。"
+                            : $"计划预检通过，匹配 {resolvedTargets.Count} 个目标。");
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
             {
@@ -9067,7 +9053,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
             else if (string.Equals(Path.GetExtension(reference.FilePath), ".bin", StringComparison.OrdinalIgnoreCase))
             {
-                fullImageIdentity = await FirmwareIdentityReader.ReadAsync(reference.FilePath, cancellationToken);
+                fullImageIdentity = await FirmwareIdentityReader.ReadAsync(reference.FilePath, cancellationToken, _plan.Mode);
                 if (fullImageIdentity.DeviceType != FirmwareDeviceType.Gateway || !fullImageIdentity.Version.HasValue)
                 {
                     throw new InvalidOperationException("Gateway 完整镜像没有有效的类型或目标版本。");
@@ -9075,7 +9061,7 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
             }
             else if (_plan.Mode != OtaMode.Traditional)
             {
-                manifest = await PackageManifestImporter.LoadAndValidateAsync(reference.FilePath, cancellationToken);
+                manifest = await PackageManifestImporter.LoadAndValidateAsync(reference.FilePath, cancellationToken, _plan.Mode);
             }
             var capacity = PatchCapacityPolicy.Check(
                 reference.PackageTarget ?? manifest?.OtaDeviceType ?? DeviceType.Gateway,
@@ -9100,6 +9086,8 @@ public sealed class MainWindowViewModel : ObservableObject, IAsyncDisposable
                 DeviceType.Gateway => [$"Gateway {item.PrimaryTask.GatewayId}"],
                 DeviceType.Node => item.PrimaryTask.ExtenderTargets.SelectMany(target => target.NodeIds.Select(node =>
                     $"{FormatIdentifier(target.ExtenderId)}/{FormatIdentifier(node)}")).ToArray(),
+                DeviceType.Sync when item.PrimaryTask.Target.Scope == TargetScope.Broadcast =>
+                    item.PrimaryTask.BroadcastTargetSnapshot.Select(FormatIdentifier).ToArray(),
                 _ => item.PrimaryTask.Target.DeviceIds.Select(FormatIdentifier).ToArray(),
             };
 
@@ -9193,8 +9181,7 @@ public sealed class PatchSelection : ObservableObject
         bool isFullImage = false,
         DeviceType? otaDeviceType = null,
         byte? oldVersion = null,
-        byte? newVersion = null,
-        bool isMcuDownloadTest = false)
+        byte? newVersion = null)
     {
         Source = source;
         FilePath = filePath;
@@ -9207,7 +9194,6 @@ public sealed class PatchSelection : ObservableObject
         OtaDeviceType = otaDeviceType;
         OldVersion = oldVersion;
         NewVersion = newVersion;
-        IsMcuDownloadTest = isMcuDownloadTest;
     }
 
     public string Source { get; }
@@ -9242,7 +9228,6 @@ public sealed class PatchSelection : ObservableObject
     public byte? OldVersion { get; }
 
     public byte? NewVersion { get; }
-    public bool IsMcuDownloadTest { get; }
 
     public string FileName => Path.GetFileName(FilePath);
 
@@ -10052,6 +10037,7 @@ internal sealed class UpgradeModeUiState
     public string SettingsStatus { get; set; } = "设置尚未保存";
     public IReadOnlyList<MqttMessageListItem> MqttMessages { get; set; } = [];
     public string MqttMessageFilter { get; set; } = string.Empty;
+    public long GatewayHeartbeatCount { get; set; }
     public string GatewaySubscriptionStatus { get; set; } = "填写 Gateway ID 后订阅固定上行主题。";
     public string SubscribedGatewayTopic { get; set; } = string.Empty;
     public IReadOnlyList<string> ObservedGatewayIds { get; set; } = [];

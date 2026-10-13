@@ -16,13 +16,20 @@ public enum FirmwareDeviceType : byte
     Slc = 7,
     Dtu = 8,
     LowPowerDtu = 9,
+    // 工具内部的 MCU 分类，不是 ECO 固件类型字节。
+    Mcu = 10,
 }
 
 public static class FirmwarePatchNaming
 {
     public const int MaxUserSuffixUtf8Bytes = 16;
 
-    public static string GetPrefix(FirmwareDeviceType deviceType) => deviceType switch
+    public static string GetPrefix(FirmwareDeviceType deviceType, OtaMode mode = OtaMode.EcoLink)
+        => mode == OtaMode.IPM ? deviceType switch
+    {
+        FirmwareDeviceType.ExtenderS => "ipm-wiota",
+        _ => throw new InvalidOperationException("IPM 仅为 WIoTa 同步端制作差分包。"),
+    } : deviceType switch
     {
         FirmwareDeviceType.Server => "server",
         FirmwareDeviceType.ExtenderA => "ext-a",
@@ -37,8 +44,10 @@ public static class FirmwarePatchNaming
         _ => throw new InvalidOperationException($"设备类型 {(byte)deviceType} 不支持制作 Patch。"),
     };
 
-    public static bool IsCompatiblePrefix(FirmwareDeviceType deviceType, string patchType)
-        => string.Equals(patchType, GetPrefix(deviceType), StringComparison.Ordinal);
+    public static bool IsCompatiblePrefix(FirmwareDeviceType deviceType, string patchType,
+        OtaMode mode = OtaMode.EcoLink)
+        => (mode != OtaMode.IPM || deviceType == FirmwareDeviceType.ExtenderS) &&
+           string.Equals(patchType, GetPrefix(deviceType, mode), StringComparison.Ordinal);
 
     public static string CreateName(
         string patchPrefix,
@@ -94,19 +103,23 @@ public sealed record FirmwareIdentity(
     bool IsLegacyEcoMarker,
     string SourcePath,
     long Length,
-    string Sha256)
+    string Sha256,
+    OtaMode Mode = OtaMode.EcoLink,
+    byte? ImageDeviceTypeCode = null,
+    string? DeviceId = null)
 {
     public byte DeviceTypeCode => (byte)DeviceType;
 
     public bool IsNode => DeviceType is >= FirmwareDeviceType.RoomLight and <= FirmwareDeviceType.LowPowerDtu;
 
-    public string PatchPrefix => FirmwarePatchNaming.GetPrefix(DeviceType);
+    public string PatchPrefix => FirmwarePatchNaming.GetPrefix(DeviceType, Mode);
 
     public OtaTool.Core.Models.DeviceType OtaDeviceType => DeviceType switch
     {
         FirmwareDeviceType.ExtenderA => OtaTool.Core.Models.DeviceType.Async,
         FirmwareDeviceType.ExtenderS => OtaTool.Core.Models.DeviceType.Sync,
         FirmwareDeviceType.Gateway => OtaTool.Core.Models.DeviceType.Gateway,
+        FirmwareDeviceType.Mcu => OtaTool.Core.Models.DeviceType.Mcu,
         _ when IsNode => OtaTool.Core.Models.DeviceType.Node,
         _ => throw new InvalidOperationException($"设备类型 {(byte)DeviceType} 不支持 OTA。"),
     };
@@ -115,7 +128,7 @@ public sealed record FirmwareIdentity(
     {
         FirmwareDeviceType.Server => "云平台服务器",
         FirmwareDeviceType.ExtenderA => "扩展器-异步",
-        FirmwareDeviceType.ExtenderS => "扩展器-同步",
+        FirmwareDeviceType.ExtenderS => Mode == OtaMode.IPM ? "倾角定位-WIoTa（同步端）" : "扩展器-同步",
         FirmwareDeviceType.RoomLight => "室内灯控",
         FirmwareDeviceType.Switch => "开关",
         FirmwareDeviceType.Socket => "电源插座",
@@ -123,6 +136,7 @@ public sealed record FirmwareIdentity(
         FirmwareDeviceType.Slc => "路灯控制器",
         FirmwareDeviceType.LowPowerDtu => "低功耗 DTU",
         FirmwareDeviceType.Gateway => "网关",
+        FirmwareDeviceType.Mcu => "倾角定位-MCU",
         _ => $"未知类型（{DeviceTypeCode}）",
     };
 
@@ -144,7 +158,7 @@ public sealed record FirmwareIdentity(
     public void EnsureCompatibleWith(FirmwareIdentity target)
     {
         ArgumentNullException.ThrowIfNull(target);
-        if (DeviceType != target.DeviceType)
+        if (Mode != target.Mode || DeviceType != target.DeviceType || DeviceId != target.DeviceId)
         {
             throw new InvalidOperationException(
                 $"A/B 镜像类型不一致：{DisplayName}（{DeviceTypeCode}）与 {target.DisplayName}（{target.DeviceTypeCode}）。");
@@ -165,11 +179,43 @@ public static class FirmwareIdentityReader
 
     public static async Task<FirmwareIdentity> ReadAsync(
         string imagePath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        OtaMode mode = OtaMode.EcoLink)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(imagePath);
         var fullPath = Path.GetFullPath(imagePath);
         await using var stream = File.OpenRead(fullPath);
+        if (mode == OtaMode.IPM)
+        {
+            if (!Path.GetExtension(fullPath).Equals(".bin", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("IPM 仅接受 .bin 固件镜像。");
+            if (stream.Length < IpmImageIdentity.Offset + IpmImageIdentity.Length)
+                throw new InvalidDataException("IPM 镜像长度不足，未覆盖统一标识偏移 0x9F00。");
+            stream.Position = IpmImageIdentity.Offset;
+            var marker = new byte[IpmImageIdentity.Length];
+            await stream.ReadExactlyAsync(marker, cancellationToken);
+            var ipm = IpmImageIdentity.ParseMarker(marker);
+            var ipmType = ipm.DeviceTypeCode switch
+            {
+                IpmImageIdentity.Gateway => FirmwareDeviceType.Gateway,
+                IpmImageIdentity.Wiota => FirmwareDeviceType.ExtenderS,
+                _ => FirmwareDeviceType.Mcu,
+            };
+            var deviceId = ipmType == FirmwareDeviceType.Mcu ? McuAppImageReader.Read(fullPath).DeviceId : null;
+            stream.Position = 0;
+            var ipmHash = await SHA256.HashDataAsync(stream, cancellationToken);
+            return new FirmwareIdentity(ipmType, ipm.Version, false, fullPath, stream.Length,
+                Convert.ToHexString(ipmHash).ToLowerInvariant(), mode, ipm.DeviceTypeCode, deviceId);
+        }
+        // IPM 即使保留 SDK 内部兼容字段，也不能按其他模式导入。
+        if (stream.Length >= IpmImageIdentity.Offset + IpmImageIdentity.Length)
+        {
+            stream.Position = IpmImageIdentity.Offset;
+            var marker = new byte[3];
+            await stream.ReadExactlyAsync(marker, cancellationToken);
+            if (marker.AsSpan().SequenceEqual("IPM"u8))
+                throw new InvalidDataException("当前文件是 IPM 固件，请切换到 IPM 模式。");
+        }
         if (stream.Length < IdentityOffset + IdentityLength)
         {
             throw new InvalidDataException("镜像长度不足，未覆盖 ECO 固件标识地址 0x6FFF。");
@@ -182,7 +228,8 @@ public static class FirmwareIdentityReader
         {
             throw new InvalidDataException("未识别到有效 ECO 固件标识。");
         }
-        if (!Enum.IsDefined(typeof(FirmwareDeviceType), identity[4]))
+        var deviceType = (FirmwareDeviceType)identity[4];
+        if (identity[4] > (byte)FirmwareDeviceType.LowPowerDtu)
         {
             throw new InvalidDataException($"ECO 固件设备类型 {identity[4]} 未定义。");
         }
@@ -191,11 +238,11 @@ public static class FirmwareIdentityReader
         var sha256 = await SHA256.HashDataAsync(stream, cancellationToken);
         var version = identity[0] is >= 1 and <= 254 ? identity[0] : (byte?)null;
         return new FirmwareIdentity(
-            (FirmwareDeviceType)identity[4],
+            deviceType,
             version,
             !version.HasValue,
             fullPath,
             stream.Length,
-            Convert.ToHexString(sha256).ToLowerInvariant());
+            Convert.ToHexString(sha256).ToLowerInvariant(), mode, identity[4]);
     }
 }

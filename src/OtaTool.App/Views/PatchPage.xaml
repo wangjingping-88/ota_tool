@@ -29,7 +29,7 @@
                                    Text="{Binding PatchOperationStatusText, Mode=OneWay}" />
                     </Border>
                 </Grid>
-                <TextBlock Margin="0,5,0,12" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="导入 A/B 固件后生成 Patch 正向和 Patch 反向；导入的 Patch 与制作结果分别保存和显示。" />
+                <TextBlock Margin="0,5,0,12" FontSize="12" Foreground="{StaticResource MutedInkBrush}" Text="{Binding FirmwareImportDescription}" TextWrapping="Wrap" />
                 <Grid>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                     <StackPanel Margin="0,0,8,0">
@@ -45,8 +45,8 @@
                         <TextBlock Margin="0,3,0,0" FontSize="11" Foreground="{StaticResource MutedInkBrush}" Text="{Binding NewImageIdentityDetail}" TextWrapping="Wrap" />
                     </StackPanel>
                     <StackPanel Grid.Column="2">
-                        <TextBlock Style="{StaticResource FieldLabel}" Text="已有 Patch" />
-                        <Button Margin="0,5,0,0" HorizontalAlignment="Left" Style="{StaticResource QuietButton}" Content="导入已有 Patch" Command="{Binding SelectPatchCommand}" />
+                        <TextBlock Style="{StaticResource FieldLabel}" Text="已有升级文件" />
+                        <Button Margin="0,5,0,0" HorizontalAlignment="Left" Style="{StaticResource QuietButton}" Content="导入升级文件" Command="{Binding SelectPatchCommand}" />
                         <TextBlock Margin="0,5,0,0" FontFamily="Cascadia Mono" FontSize="11" Text="{Binding ImportedPatchFileName}" TextTrimming="CharacterEllipsis" />
                     </StackPanel>
                 </Grid>

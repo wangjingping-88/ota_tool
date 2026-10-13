@@ -1,6 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <Compile Include="../McuImageFixture.cs" Link="McuImageFixture.cs" />
     <ProjectReference Include="..\..\src\OtaTool.Core\OtaTool.Core.csproj" />
     <None Include="..\..\src\OtaTool.App\App.xaml"
           Link="TestAssets\App.xaml"

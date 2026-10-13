@@ -14,7 +14,8 @@ public sealed record DiffRequest(
     string OldVersion,
     string NewVersion,
     bool UpdateFirstBlock = false,
-    int RomIndex = 0);
+    int RomIndex = 0,
+    OtaMode Mode = OtaMode.EcoLink);
 
 public sealed record DiffResult(bool IsSuccess, string Message, PatchMetadata? Patch = null);
 
@@ -64,7 +65,15 @@ public sealed record PackageManifest(
     [property: JsonPropertyName("restore_verified")] bool PatchVerified,
     [property: JsonPropertyName("created_at")] DateTimeOffset GeneratedAt)
 {
-    public DeviceType OtaDeviceType => ((FirmwareDeviceType)DeviceTypeCode) switch
+    // 缺省保留历史清单兼容；新产物明确记录所属模式。
+    [JsonPropertyName("mode")]
+    public OtaMode? Mode { get; init; }
+
+    public DeviceType OtaDeviceType => Mode == OtaMode.IPM ? DeviceTypeCode switch
+    {
+        IpmImageIdentity.Wiota => DeviceType.Sync,
+        _ => throw new InvalidDataException("IPM 差分清单仅支持 WIoTa 类型 2。"),
+    } : ((FirmwareDeviceType)DeviceTypeCode) switch
     {
         FirmwareDeviceType.ExtenderA => DeviceType.Async,
         FirmwareDeviceType.ExtenderS => DeviceType.Sync,
@@ -78,9 +87,12 @@ public static class PackageManifestFactory
 {
     public static async Task<PackageManifest> CreateAsync(DiffEngineInfo engine, DiffRequest request, PatchMetadata patch, bool patchVerified, CancellationToken cancellationToken = default)
     {
-        var oldIdentity = await FirmwareIdentityReader.ReadAsync(request.OldImagePath, cancellationToken);
-        var newIdentity = await FirmwareIdentityReader.ReadAsync(request.NewImagePath, cancellationToken);
+        var oldIdentity = await FirmwareIdentityReader.ReadAsync(request.OldImagePath, cancellationToken, request.Mode);
+        var newIdentity = await FirmwareIdentityReader.ReadAsync(request.NewImagePath, cancellationToken, request.Mode);
         oldIdentity.EnsureCompatibleWith(newIdentity);
+        if (oldIdentity.OtaDeviceType != request.DeviceType ||
+            request.Mode == OtaMode.IPM && request.DeviceType != DeviceType.Sync)
+            throw new InvalidOperationException("差分包目标与镜像不一致；IPM 仅支持 WIoTa 同步端差分包。");
         if (!byte.TryParse(request.OldVersion, out var oldVersion) ||
             !byte.TryParse(request.NewVersion, out var newVersion) ||
             oldVersion is < 1 or > 254 || newVersion is < 1 or > 254 ||
@@ -93,7 +105,7 @@ public static class PackageManifestFactory
         return new PackageManifest(
             2,
             oldIdentity.PatchPrefix,
-            oldIdentity.DeviceTypeCode,
+            request.Mode == OtaMode.IPM ? oldIdentity.ImageDeviceTypeCode!.Value : oldIdentity.DeviceTypeCode,
             oldVersion,
             newVersion,
             patch.Length,
@@ -106,7 +118,7 @@ public static class PackageManifestFactory
             engine.Id,
             engine.Version,
             patchVerified,
-            DateTimeOffset.Now);
+            DateTimeOffset.Now) { Mode = request.Mode };
     }
 }
 
@@ -144,7 +156,8 @@ public static class PackageManifestImporter
 
     public static async Task<PackageManifest> LoadAndValidateAsync(
         string patchPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        OtaMode? expectedMode = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(patchPath);
         var fullPatchPath = Path.GetFullPath(patchPath);
@@ -152,8 +165,9 @@ public static class PackageManifestImporter
         var manifest = await TryLoadAsync(manifestPath, cancellationToken)
             ?? throw new InvalidDataException($"Patch 缺少强制侧车元数据：{Path.GetFileName(manifestPath)}");
         if (manifest.SchemaVersion != 2 ||
+            manifest.Mode.HasValue && !Enum.IsDefined(manifest.Mode.Value) ||
             string.IsNullOrWhiteSpace(manifest.PatchType) ||
-            !Enum.IsDefined(typeof(FirmwareDeviceType), manifest.DeviceTypeCode) ||
+            manifest.DeviceTypeCode > (byte)FirmwareDeviceType.LowPowerDtu ||
             manifest.OldVersion is < 1 or > 254 ||
             manifest.NewVersion is < 1 or > 254 ||
             manifest.OldVersion == manifest.NewVersion ||
@@ -161,6 +175,10 @@ public static class PackageManifestImporter
         {
             throw new InvalidDataException("Patch 侧车元数据字段非法或还原测试未通过。");
         }
+        if (manifest.Mode.HasValue && expectedMode.HasValue && manifest.Mode != expectedMode)
+            throw new InvalidDataException($"Patch 属于 {manifest.Mode} 模式，不能在 {expectedMode} 模式导入或升级。");
+        if (expectedMode == OtaMode.IPM && manifest.Mode != OtaMode.IPM)
+            throw new InvalidDataException("IPM 差分包必须明确记录 IPM 模式，请按新规则重新制作。");
         var metadata = await PatchMetadata.FromFileAsync(fullPatchPath, cancellationToken);
         if (metadata.Length != manifest.PatchLength ||
             !metadata.Md5.Equals(manifest.PatchMd5, StringComparison.OrdinalIgnoreCase) ||
@@ -168,8 +186,12 @@ public static class PackageManifestImporter
         {
             throw new InvalidDataException("Patch 文件与侧车元数据的大小或哈希不一致。");
         }
-        var firmwareDeviceType = (FirmwareDeviceType)manifest.DeviceTypeCode;
-        if (!FirmwarePatchNaming.IsCompatiblePrefix(firmwareDeviceType, manifest.PatchType))
+        if (manifest.Mode == OtaMode.IPM && manifest.DeviceTypeCode != IpmImageIdentity.Wiota)
+            throw new InvalidDataException("IPM 差分清单类型必须与源 BIN 一致，为 WIoTa 类型 2。请重新制作旧规则的包。");
+        var firmwareDeviceType = manifest.Mode == OtaMode.IPM
+            ? FirmwareDeviceType.ExtenderS : (FirmwareDeviceType)manifest.DeviceTypeCode;
+        if (!FirmwarePatchNaming.IsCompatiblePrefix(firmwareDeviceType, manifest.PatchType,
+                manifest.Mode ?? OtaMode.EcoLink))
         {
             throw new InvalidDataException("Patch 类型与设备类型不一致。");
         }

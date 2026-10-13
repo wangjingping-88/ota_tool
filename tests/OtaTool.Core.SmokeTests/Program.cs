@@ -1030,9 +1030,9 @@ static void VerifyGeneratedMetadataPresentation()
     Assert(mainWindow.Contains("ToolTip=\"由所选 Patch 自动识别\"", StringComparison.Ordinal)
         && mainWindow.Contains("Text=\"{Binding OldVersionDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
         && mainWindow.Contains("Text=\"{Binding NewVersionDisplay, Mode=OneWay}\"", StringComparison.Ordinal)
-        && mainWindow.Contains("Visibility=\"{Binding AutomaticVersionVisibility}\"", StringComparison.Ordinal)
-        && mainWindow.Contains("Visibility=\"{Binding ManualMcuVersionVisibility}\"", StringComparison.Ordinal),
-        "普通升级版本应只读展示，临时 MCU 下载联调在原版本位置受控录入。");
+        && !mainWindow.Contains("ManualMcuVersionVisibility", StringComparison.Ordinal)
+        && !mainWindow.Contains("IpmMcuUpgradeMode", StringComparison.Ordinal),
+        "升级版本应只读展示，MCU 固定正式升级且不能手填版本。");
 }
 
 static async Task VerifyPatchAndTaskRulesAsync(string workspace)

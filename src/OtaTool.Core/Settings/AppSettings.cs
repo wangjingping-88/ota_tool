@@ -122,7 +122,6 @@ public sealed class AppSettings
 /// </summary>
 public sealed class ModeWorkspaceSettings
 {
-    public IpmMcuUpgradeMode IpmMcuUpgradeMode { get; set; } = IpmMcuUpgradeMode.NoUbootValidation;
     public string SelectedPageName { get; set; } = "MQTT 配置";
     public string MqttHost { get; set; } = "117.172.29.2";
     public int MqttPort { get; set; } = 36106;

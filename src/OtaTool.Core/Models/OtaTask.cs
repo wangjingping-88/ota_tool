@@ -7,12 +7,6 @@ public enum OtaMode
     IPM,
 }
 
-public enum IpmMcuUpgradeMode
-{
-    NoUbootValidation,
-    Formal,
-}
-
 public enum DeviceType
 {
     Gateway,
@@ -69,7 +63,6 @@ public sealed class OtaTask
 
     public IpmPackageMetadata? PackageMetadata { get; init; }
 
-    public IpmMcuUpgradeMode IpmMcuUpgradeMode { get; init; } = IpmMcuUpgradeMode.NoUbootValidation;
 
     public PatchCapacityLimits? CapacityLimits { get; init; }
 
@@ -106,6 +99,7 @@ public sealed class OtaTask
 
     public string ProtocolProfileVersion { get; init; } = string.Empty;
 
+    /// <summary>Gateway 的下游执行预算；IPM MCU 本地按无进度窗口使用，其他任务按总时限使用。</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromMinutes(30);
 
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.Now;

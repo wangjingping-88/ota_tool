@@ -4,6 +4,7 @@ using OtaTool.Core.Models;
 using OtaTool.Core.Protocols;
 using OtaTool.Core.Execution;
 using OtaTool.Core.Settings;
+using OtaTool.Core.Diff;
 
 static class IpmTests
 {
@@ -17,32 +18,67 @@ static class IpmTests
         Check((int)OtaMode.EcoLink == 1 && (int)OtaMode.IPM == 2 && (int)DeviceType.Node == 3 && (int)DeviceType.Mcu == 4,
             "枚举必须追加，旧值不可改变。");
         var profile = new IpmProtocolProfile();
+        await CheckFirmwareIdentitiesAsync(root);
+        await IpmMcuProgressTimeoutTests.RunAsync(root);
         Check(!profile.SupportsStartAck && profile.SupportsGatewayStatusPolling &&
             profile.SupportedDeviceTypes.SetEquals([DeviceType.Gateway, DeviceType.Sync, DeviceType.Mcu]), "协议能力错误。");
         var file = Path.Combine(root, "ipm_mcu.bin");
-        static byte[] Image(int length, uint stack = 0x20008000, uint reset = 0x08008009)
+        var valid = McuImageFixture.Factory(McuImageFixture.App(229376));
+        foreach (var invalid in new[] { McuImageFixture.App(0), McuImageFixture.App(519), McuImageFixture.App(229377),
+            McuImageFixture.App(stack: 0x20000000), McuImageFixture.App(stack: 0x20008008),
+            McuImageFixture.App(stack: 0x20007FFF), McuImageFixture.App(reset: 0x08008208),
+            McuImageFixture.App(reset: 0x08008009), McuImageFixture.App(reset: 0x0800A201),
+            McuImageFixture.App(version: 0), McuImageFixture.App(version: 255) })
         {
-            var bytes = new byte[length];
-            if (length >= 8)
-            {
-                BinaryPrimitives.WriteUInt32LittleEndian(bytes, stack);
-                BinaryPrimitives.WriteUInt32LittleEndian(bytes.AsSpan(4), reset);
-            }
-            return bytes;
-        }
-        foreach (var sample in new[] { Image(0), Image(7), Image(229377), Image(32, 0x20000000),
-            Image(32, 0x20008008), Image(32, 0x20007FFF), Image(32, reset: 0x08008008),
-            Image(32, reset: 0x08000009), Image(32, reset: 0x08008021) })
-        {
-            await File.WriteAllBytesAsync(file, sample);
-            try { IpmPackageMetadata.ValidateMcuVectors(file, IpmPackageMetadata.AppAddress); throw new Exception("非法向量未拒绝。"); }
+            try { McuAppImageReader.Parse(McuImageFixture.Factory(invalid)); throw new Exception("非法 MCU 镜像未拒绝。"); }
             catch (InvalidDataException) { }
         }
-        await File.WriteAllBytesAsync(file, Image(229376));
-        IpmPackageMetadata.ValidateMcuVectors(file, IpmPackageMetadata.AppAddress);
-        try { IpmPackageMetadata.ValidateMcuVectors(file, 0x08000000); throw new Exception("错误链接地址未拒绝。"); }
+        foreach (var (offset, value) in new (int, uint)[] { (8, 0), (10, 32), (16, 0), (28, 1),
+            (32, 0x08000000), (36, 0), (40, 1000), (48, 2), (50, 0), (50, 3), (52, 1), (56, 1), (64, 0) })
+        {
+            var corrupt = McuImageFixture.App();
+            McuImageFixture.Put(corrupt, offset, value);
+            McuImageFixture.Seal(corrupt);
+            try { McuAppImageReader.Parse(McuImageFixture.Factory(corrupt)); throw new Exception($"非法头字段 {offset} 未拒绝。"); }
+            catch (InvalidDataException) { }
+        }
+        foreach (var offset in new[] { 12, 60, 1000 })
+        {
+            var corrupt = McuImageFixture.App(); corrupt[offset] ^= 1;
+            try { McuAppImageReader.Parse(McuImageFixture.Factory(corrupt)); throw new Exception("CRC 错误未拒绝。"); }
+            catch (InvalidDataException) { }
+        }
+        Check(McuAppImageReader.Parse(McuImageFixture.Factory(McuImageFixture.App(8192, reset: 0x08008201))).AppBytes.Length == 8192 &&
+            McuAppImageReader.Parse(McuImageFixture.Factory(McuImageFixture.App(version: 254))).Version == 254, "最小长度或版本上界未通过。");
+        var parsed = McuAppImageReader.Parse(valid);
+        Check(parsed.Version == 2 && parsed.DeviceId == "IPM_GD32L233" && parsed.LinkAddress == 0x08000000 &&
+            parsed.AppBytes.SequenceEqual(valid.AsSpan(0x8000).ToArray()), "完整固件识别错误。");
+        try { McuAppImageReader.Parse(parsed.AppBytes); throw new Exception("仅 APP 包不应作为统一全包。"); }
         catch (InvalidDataException) { }
-        var metadata = await IpmPackageMetadata.CreateAsync(file, DeviceType.Mcu, PackageKind.FullImage, 2, IpmPackageMetadata.AppAddress);
+        var badBoot = valid.ToArray(); McuImageFixture.Put(badBoot, 4, 0x08008001);
+        try { McuAppImageReader.Parse(badBoot); throw new Exception("非法 UBoot 向量未拒绝。"); }
+        catch (InvalidDataException) { }
+        var validationRoot = Environment.GetEnvironmentVariable("IPM_MCU_VALIDATION_DIR");
+        if (!string.IsNullOrEmpty(validationRoot))
+        {
+            using var validation = JsonDocument.Parse(File.ReadAllText(Path.Combine(validationRoot, "validation.json")));
+            foreach (byte version in new byte[] { 1, 2 })
+            {
+                var filePath = Path.Combine(validationRoot, $"v0.{version}", "rtthread.bin");
+                var actual = McuAppImageReader.Read(filePath);
+                var actualHash = await PatchMetadata.FromFileAsync(filePath);
+                var expected = validation.RootElement.GetProperty(version == 1 ? "baseline" : "target");
+                Check(actual.Version == version && actualHash.Length == expected.GetProperty("image_size").GetInt64() &&
+                    actualHash.Md5 == expected.GetProperty("md5").GetString() &&
+                    actual.PackageCrc32.ToString("x8") == expected.GetProperty("package_crc32").GetString(),
+                    "真实整包版本、长度、MD5 或 CRC32 与独立构建器不一致。");
+            }
+        }
+        await File.WriteAllBytesAsync(file, valid);
+        IpmPackageMetadata.ValidateMcuVectors(file, IpmPackageMetadata.FirmwareAddress);
+        try { IpmPackageMetadata.ValidateMcuVectors(file, 0x08008000); throw new Exception("错误链接地址未拒绝。"); }
+        catch (InvalidDataException) { }
+        var metadata = await IpmPackageMetadata.CreateAsync(file, DeviceType.Mcu, PackageKind.FullImage, 2, IpmPackageMetadata.FirmwareAddress);
         Check(IpmPackageMetadata.ValidateForCatalog(file) == metadata,
             "已识别 MCU 包的本地记录未正确恢复。");
         foreach (var invalidMetadata in new[]
@@ -52,7 +88,7 @@ static class IpmTests
             metadata with { PackageKind = PackageKind.Patch },
             metadata with { Version = 0 },
             metadata with { Version = 255 },
-            metadata with { LinkAddress = 0x08000000 },
+            metadata with { LinkAddress = 0x08008000 },
             metadata with { Sha256 = new string('0', 64) },
         })
         {
@@ -64,30 +100,8 @@ static class IpmTests
         try { IpmPackageMetadata.Validate(file, DeviceType.Mcu, PackageKind.FullImage, metadata.Version); throw new Exception("无本地记录的 MCU 镜像不应执行升级。"); }
         catch (InvalidDataException) { }
         await File.WriteAllTextAsync(IpmPackageMetadata.SidecarPath(file), JsonSerializer.Serialize(metadata));
-        var pendingFile = Path.Combine(root, "mcu_without_version.bin");
-        await File.WriteAllBytesAsync(pendingFile, Image(64, reset: 0x08000009));
-        var pending = await IpmPackageMetadata.CreatePendingMcuImageAsync(pendingFile);
-        Check(pending.Version == 0 && pending.LinkAddress == 0 &&
-            IpmPackageMetadata.ValidateForCatalog(pendingFile) == pending, "未知 MCU 镜像未按待识别状态保存和恢复。");
-        try { IpmPackageMetadata.Validate(pendingFile, DeviceType.Mcu, PackageKind.FullImage, 0); throw new Exception("未知版本包不应执行升级。"); }
-        catch (InvalidDataException) { }
-        var downloadTest = await IpmPackageMetadata.SetDownloadTestVersionAsync(pendingFile, 2);
-        Check(downloadTest.IsDownloadTest && downloadTest.Version == 2 &&
-            IpmPackageMetadata.Validate(pendingFile, DeviceType.Mcu, PackageKind.FullImage, 2) == downloadTest,
-            "直启镜像不能用于明确标记的下载联调。");
-        try { IpmPackageMetadata.ValidateMcuVectors(pendingFile, IpmPackageMetadata.AppAddress); throw new Exception("正式升级错误放行直启镜像。"); }
-        catch (InvalidDataException) { }
-        try { await IpmPackageMetadata.SetDownloadTestVersionAsync(pendingFile, 255); throw new Exception("非法联调版本未拒绝。"); }
-        catch (InvalidDataException) { }
-        try { await IpmPackageMetadata.SetDownloadTestVersionAsync(file, 3); throw new Exception("已识别版本不应被手填参数覆盖。"); }
-        catch (InvalidDataException) { }
-        await File.WriteAllBytesAsync(pendingFile, Image(65));
-        try { IpmPackageMetadata.ValidateForCatalog(pendingFile); throw new Exception("未知版本包也必须检查导入后的内容变化。"); }
-        catch (InvalidDataException) { }
-        await File.WriteAllBytesAsync(pendingFile, Image(64, reset: 0x08000009));
         OtaTask TaskFor(DeviceType type = DeviceType.Mcu, TargetScope scope = TargetScope.SpecifiedIds,
             string[]? ids = null, PackageKind kind = PackageKind.FullImage, int? nodeType = null,
-            IpmMcuUpgradeMode mcuMode = IpmMcuUpgradeMode.Formal,
             string? packagePath = null, IpmPackageMetadata? packageMetadata = null) => new()
         {
             Mode = OtaMode.IPM, DeviceType = type, GatewayId = "123456", OldVersion = "1", NewVersion = "2",
@@ -95,19 +109,25 @@ static class IpmTests
             PatchPath = packagePath ?? file, PatchUrl = "http://127.0.0.1:8080/ipm_mcu.bin",
             PatchMd5 = (packageMetadata ?? metadata).Md5,
             PatchSha256 = (packageMetadata ?? metadata).Sha256, PackageMetadata = packageMetadata ?? metadata, NodeType = nodeType,
-            IpmMcuUpgradeMode = mcuMode,
             ProtocolProfileId = OtaProtocolProfiles.Id(OtaMode.IPM), Timeout = TimeSpan.FromSeconds(5),
         };
+        await File.WriteAllTextAsync(IpmPackageMetadata.SidecarPath(file), JsonSerializer.Serialize(metadata with { Version = 3 }));
+        try { IpmPackageMetadata.Validate(file, DeviceType.Mcu, PackageKind.FullImage, 3); throw new Exception("清单伪造版本未拒绝。"); }
+        catch (InvalidDataException) { }
+        try { await IpmPackageMetadata.CreateAsync(file, DeviceType.Mcu, PackageKind.FullImage, 3, IpmPackageMetadata.FirmwareAddress); throw new Exception("导入不能覆盖内嵌版本。"); }
+        catch (InvalidDataException) { }
+        await File.WriteAllTextAsync(IpmPackageMetadata.SidecarPath(file), JsonSerializer.Serialize(metadata));
+        var legacyFile = Path.Combine(root, "legacy_mcu.bin");
+        var legacyBytes = new byte[1024];
+        McuImageFixture.Put(legacyBytes, 0, 0x20008000); McuImageFixture.Put(legacyBytes, 4, 0x08000009);
+        await File.WriteAllBytesAsync(legacyFile, legacyBytes);
+        var legacyHash = await PatchMetadata.FromFileAsync(legacyFile);
+        var legacyMetadata = metadata with { Length = legacyHash.Length, Md5 = legacyHash.Md5, Sha256 = legacyHash.Sha256 };
+        await File.WriteAllTextAsync(IpmPackageMetadata.SidecarPath(legacyFile), JsonSerializer.Serialize(legacyMetadata));
+        Check(!OtaTaskValidator.Validate(TaskFor(packagePath: legacyFile, packageMetadata: legacyMetadata), profile).IsValid,
+            "历史无 UBoot 镜像不应进入正式升级。");
         var task = TaskFor();
         Check(OtaTaskValidator.Validate(task, profile).IsValid, "合法 MCU 包未通过。");
-        Check(!OtaTaskValidator.Validate(TaskFor(mcuMode: IpmMcuUpgradeMode.NoUbootValidation), profile).IsValid,
-            "无 uboot 验证模式不应接受正式 MCU 包。");
-        Check(OtaTaskValidator.Validate(TaskFor(mcuMode: IpmMcuUpgradeMode.NoUbootValidation,
-            packagePath: pendingFile, packageMetadata: downloadTest), profile).IsValid,
-            "无 uboot 验证模式应接受明确标记的下载联调包。");
-        Check(!OtaTaskValidator.Validate(TaskFor(packagePath: pendingFile,
-            packageMetadata: downloadTest), profile).IsValid,
-            "正式模式不应接受下载联调包。");
         foreach (var invalid in new[] { TaskFor(ids: []), TaskFor(ids: ["1", "01"]), TaskFor(ids: ["0"]),
             TaskFor(ids: ["abc"]), TaskFor(ids: Enumerable.Range(1, 17).Select(x => x.ToString()).ToArray()),
             TaskFor(scope: TargetScope.Broadcast, ids: []), TaskFor(kind: PackageKind.Patch), TaskFor(nodeType: 2),
@@ -137,10 +157,10 @@ static class IpmTests
         }
         Check(PatchCapacityPolicy.Check(DeviceType.Async, 0x2F001).IsAllowed == false &&
             PatchCapacityPolicy.Check(DeviceType.Sync, 0xD001).IsAllowed == false &&
-            PatchCapacityPolicy.Check(DeviceType.Mcu, 0x38000).IsAllowed, "容量门限串扰。");
-        await File.WriteAllBytesAsync(file, Image(32));
+            PatchCapacityPolicy.Check(DeviceType.Mcu, 0x40000).IsAllowed && !PatchCapacityPolicy.Check(DeviceType.Mcu, 0x40001).IsAllowed, "容量门限串扰。");
+        await File.WriteAllBytesAsync(file, new byte[32]);
         Check(!OtaTaskValidator.Validate(task, profile).IsValid, "已替换镜像未被哈希校验拒绝。");
-        await File.WriteAllBytesAsync(file, Image(229376));
+        await File.WriteAllBytesAsync(file, valid);
 
         // 无 cmd=10：直接查询；先超时、再明确不存在，重发保持同序号同参数。
         var transport = new FakeMqttTransport();
@@ -236,5 +256,93 @@ static class IpmTests
         Check(settings.ActiveMode == "IPM" && settings.ModeWorkspaces["IPM"].TargetIdList == "10001" &&
             settings.ModeWorkspaces["EcoLink"].OldVersion == "8", "模式持久化不独立。");
         Console.WriteLine("IPM 完整镜像、协议约束、受理重试、状态隔离与工作区测试通过。");
+    }
+
+    private static async Task CheckFirmwareIdentitiesAsync(string root)
+    {
+        foreach (var (code, expected, ecoExpected) in new[]
+        {
+            ((byte)2, DeviceType.Sync, FirmwareDeviceType.ExtenderA),
+            ((byte)8, DeviceType.Gateway, FirmwareDeviceType.Dtu),
+        })
+        {
+            var paths = new List<string>();
+            foreach (byte version in new byte[] { 1, 2 })
+            {
+                var path = Path.Combine(root, $"ipm_type{code}_v{version}.bin");
+                var data = new byte[64 * 1024];
+                new byte[] { version, (byte)'e', (byte)'c', (byte)'o', code }.CopyTo(data, FirmwareIdentityReader.IdentityOffset);
+                new byte[] { (byte)'I', (byte)'P', (byte)'M', code, version }.CopyTo(data, IpmImageIdentity.Offset);
+                await File.WriteAllBytesAsync(path, data);
+                paths.Add(path);
+                var ipm = await FirmwareIdentityReader.ReadAsync(path, mode: OtaMode.IPM);
+                foreach (var otherMode in new[] { OtaMode.EcoLink, OtaMode.Traditional })
+                {
+                    try { await FirmwareIdentityReader.ReadAsync(path, mode: otherMode); throw new Exception("其他模式接受了新 IPM 固件。"); }
+                    catch (InvalidDataException) { }
+                }
+                var ecoPath = Path.Combine(root, $"eco_type{code}_v{version}.bin");
+                data.AsSpan(IpmImageIdentity.Offset, IpmImageIdentity.Length).Clear();
+                await File.WriteAllBytesAsync(ecoPath, data);
+                var eco = await FirmwareIdentityReader.ReadAsync(ecoPath);
+                Check(ipm.OtaDeviceType == expected && ipm.Version == version && ipm.ImageDeviceTypeCode == code,
+                    "IPM 类型或版本识别错误。");
+                Check(eco.DeviceType == ecoExpected, "IPM 修复改变了 EcoLink 类型表。");
+                try { ipm.EnsureCompatibleWith(eco); throw new Exception("跨模式镜像未拒绝。"); }
+                catch (InvalidOperationException) { }
+            }
+            if (code == 2)
+            {
+                var patch = await PatchMetadata.FromFileAsync(paths[0]);
+                var request = new DiffRequest(paths[0], paths[1], Path.Combine(root, "sync.patch"), DeviceType.Sync,
+                    "1", "2", Mode: OtaMode.IPM);
+                var manifest = await PackageManifestFactory.CreateAsync(new("test", "1", "", true, ""), request, patch, true);
+                Check(manifest.OtaDeviceType == DeviceType.Sync && manifest.DeviceTypeCode == 2 &&
+                    manifest.PatchType == "ipm-wiota" && manifest.Mode == OtaMode.IPM,
+                    "WIoTa 差分清单仍按异步类型生成。");
+                Check(FirmwarePatchNaming.GetPrefix(FirmwareDeviceType.ExtenderS) == "ext-s" &&
+                    FirmwarePatchNaming.GetPrefix(FirmwareDeviceType.ExtenderS, OtaMode.Traditional) == "ext-s" &&
+                    FirmwarePatchNaming.CreateName(manifest.PatchType, 1, 2, "jpwang") == "ipm-wiota-v1-to-v2-jpwang.patch",
+                    "IPM 命名改变了其他模式的前缀。");
+                await PackageManifestExporter.ExportAsync(manifest, paths[0] + ".json");
+                await PackageManifestImporter.LoadAndValidateAsync(paths[0], expectedMode: OtaMode.IPM);
+                foreach (var otherMode in new[] { OtaMode.EcoLink, OtaMode.Traditional })
+                {
+                    try { await PackageManifestImporter.LoadAndValidateAsync(paths[0], expectedMode: otherMode); throw new Exception("其他模式接受了 IPM 差分包。"); }
+                    catch (InvalidDataException) { }
+                    var original = manifest with { PatchType = "ext-s", DeviceTypeCode = 3, Mode = otherMode };
+                    await PackageManifestExporter.ExportAsync(original, paths[0] + ".json");
+                    await PackageManifestImporter.LoadAndValidateAsync(paths[0], expectedMode: otherMode);
+                    try { await PackageManifestImporter.LoadAndValidateAsync(paths[0], expectedMode: OtaMode.IPM); throw new Exception("IPM 接受了其他模式的新清单。"); }
+                    catch (InvalidDataException) { }
+                    await PackageManifestExporter.ExportAsync(manifest, paths[0] + ".json");
+                }
+                await PackageManifestExporter.ExportAsync(manifest with { PatchType = "ext-s", DeviceTypeCode = 3, Mode = null }, paths[0] + ".json");
+                await PackageManifestImporter.LoadAndValidateAsync(paths[0], expectedMode: OtaMode.EcoLink);
+                await PackageManifestImporter.LoadAndValidateAsync(paths[0], expectedMode: OtaMode.Traditional);
+                try { await PackageManifestImporter.LoadAndValidateAsync(paths[0], expectedMode: OtaMode.IPM); throw new Exception("IPM 接受了没有模式标识的旧差分包。"); }
+                catch (InvalidDataException) { }
+            }
+        }
+        var mcuPath = Path.Combine(root, "ipm_identity_mcu.bin");
+        await File.WriteAllBytesAsync(mcuPath, McuImageFixture.Factory(McuImageFixture.App(version: 1)));
+        var mcu = await FirmwareIdentityReader.ReadAsync(mcuPath, mode: OtaMode.IPM);
+        Check(mcu.OtaDeviceType == DeviceType.Mcu && mcu.Version == 1 && mcu.DeviceId == "IPM_GD32L233",
+            "统一导入入口未识别 MCU 信息头。");
+        var invalidPath = Path.Combine(root, "ipm_invalid_type.bin");
+        foreach (var (version, code) in new (byte, byte)[] { (1, 3), (1, 1), (0, 2), (255, 8), (1, 10) })
+        {
+            var bytes = new byte[64 * 1024];
+            new byte[] { version, (byte)'e', (byte)'c', (byte)'o', code }.CopyTo(bytes, FirmwareIdentityReader.IdentityOffset);
+            new byte[] { (byte)'I', (byte)'P', (byte)'M', code, version }.CopyTo(bytes, IpmImageIdentity.Offset);
+            await File.WriteAllBytesAsync(invalidPath, bytes);
+            try { await FirmwareIdentityReader.ReadAsync(invalidPath, mode: OtaMode.IPM); throw new Exception("IPM 非法类型或版本未拒绝。"); }
+            catch (InvalidDataException) { }
+        }
+        var mismatch = McuImageFixture.App();
+        mismatch[IpmImageIdentity.Offset - 0x8000 + 4] = 1;
+        McuImageFixture.Seal(mismatch);
+        try { McuAppImageReader.Parse(McuImageFixture.Factory(mismatch)); throw new Exception("两个 MCU 版本字段不一致未拒绝。"); }
+        catch (InvalidDataException) { }
     }
 }

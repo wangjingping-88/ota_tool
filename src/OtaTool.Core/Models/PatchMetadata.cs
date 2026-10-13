@@ -53,7 +53,8 @@ public sealed record PatchCapacityLimits(
 
 public static class PatchCapacityPolicy
 {
-    public const long McuImageLimit = 0x38000;
+    public const long McuImageLimit = 0x40000;
+    public const long McuAppImageLimit = 0x38000;
     public const long NodePatchLimit = 124 * 1024;
     public const long RoadLightNodePatchLimit = 112 * 1024;
     public const long AsyncPatchLimit = 0x2F000;

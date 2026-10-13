@@ -70,11 +70,10 @@ public sealed record OtaTestPlanPatchReference
 
     public byte? ManifestNewVersion { get; init; }
 
-    /// <summary>Gateway 完整镜像内嵌的目标版本；旧模板缺少该字段时在预检阶段重新读取镜像。</summary>
+    /// <summary>Gateway 或 MCU 完整镜像内嵌的目标版本；预检仍校验实际镜像。</summary>
     public byte? FullImageTargetVersion { get; init; }
     public PackageKind PackageKind { get; init; }
     public DeviceType? PackageTarget { get; init; }
-    public bool IsMcuDownloadTest { get; init; }
 }
 
 public sealed record OtaTestPlanItemTemplate
@@ -86,8 +85,6 @@ public sealed record OtaTestPlanItemTemplate
     public int Order { get; init; }
 
     public OtaMode Mode { get; init; }
-
-    public IpmMcuUpgradeMode IpmMcuUpgradeMode { get; init; } = IpmMcuUpgradeMode.NoUbootValidation;
 
     public string GatewayId { get; init; } = string.Empty;
 

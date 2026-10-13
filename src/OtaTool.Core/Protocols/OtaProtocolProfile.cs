@@ -217,13 +217,8 @@ public static class OtaTaskValidator
         {
             try
             {
-                if (task.DeviceType == DeviceType.Mcu && !Enum.IsDefined(task.IpmMcuUpgradeMode))
-                    return OtaTaskValidationResult.Failure("未知的 IPM MCU 验证模式。");
                 var package = IpmPackageMetadata.Validate(task.PatchPath, task.DeviceType, task.PackageKind, newVersion);
-                if (task.DeviceType == DeviceType.Mcu &&
-                    package.IsDownloadTest != (task.IpmMcuUpgradeMode == IpmMcuUpgradeMode.NoUbootValidation))
-                    return OtaTaskValidationResult.Failure("MCU 升级包与当前 IPM 验证模式不匹配，请切换模式或重新导入固件。");
-                if (task.PackageMetadata is null || task.PackageMetadata.IsDownloadTest != package.IsDownloadTest ||
+                if (task.PackageMetadata is null ||
                     !task.PackageMetadata.Sha256.Equals(package.Sha256, StringComparison.OrdinalIgnoreCase))
                     return OtaTaskValidationResult.Failure("任务包记录与当前导入文件不一致。");
                 if (!package.Md5.Equals(task.PatchMd5, StringComparison.OrdinalIgnoreCase) ||

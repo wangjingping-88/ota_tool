@@ -22,7 +22,7 @@ public static class OtaTestPlanVersionProjection
     public static byte GetProjectedEndVersion(OtaTestPlanItemTemplate item)
     {
         ArgumentNullException.ThrowIfNull(item);
-        var value = item.ExecutionKind == OtaTestPlanExecutionKind.Cycle || item.ForwardPatch.IsMcuDownloadTest
+        var value = item.ExecutionKind == OtaTestPlanExecutionKind.Cycle
             ? item.OldVersion
             : item.NewVersion;
         if (!byte.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var version))

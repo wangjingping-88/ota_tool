@@ -6,6 +6,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using OtaTool.App.ViewModels;
 
@@ -37,6 +38,7 @@ public partial class MainWindow : Window
         var viewModel = new MainWindowViewModel();
         viewModel.ApplicationUpdate.UpdateAvailable += OnUpdateAvailable;
         viewModel.CloseApplicationRequested += OnCloseApplicationRequested;
+        viewModel.GatewayHeartbeatReceived += OnGatewayHeartbeatReceived;
         DataContext = viewModel;
     }
 
@@ -266,6 +268,7 @@ public partial class MainWindow : Window
         {
             viewModel.ApplicationUpdate.UpdateAvailable -= OnUpdateAvailable;
             viewModel.CloseApplicationRequested -= OnCloseApplicationRequested;
+            viewModel.GatewayHeartbeatReceived -= OnGatewayHeartbeatReceived;
         }
 
         if (DataContext is IAsyncDisposable disposable)
@@ -335,6 +338,20 @@ public partial class MainWindow : Window
     {
         if (!_followMqttMessages) return;
         Dispatcher.BeginInvoke(MqttMessagesScrollViewer.ScrollToEnd, DispatcherPriority.Background);
+    }
+
+    private void OnGatewayHeartbeatReceived(object? sender, EventArgs eventArgs)
+    {
+        var beat = new DoubleAnimationUsingKeyFrames { Duration = TimeSpan.FromMilliseconds(520) };
+        beat.KeyFrames.Add(new DiscreteDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+        beat.KeyFrames.Add(new EasingDoubleKeyFrame(1.35, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(130))));
+        beat.KeyFrames.Add(new EasingDoubleKeyFrame(0.92, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(260))));
+        beat.KeyFrames.Add(new EasingDoubleKeyFrame(1.12, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(380))));
+        beat.KeyFrames.Add(new EasingDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(520))));
+        GatewayHeartbeatScale.BeginAnimation(ScaleTransform.ScaleXProperty, beat);
+        GatewayHeartbeatScale.BeginAnimation(ScaleTransform.ScaleYProperty, beat);
+        GatewayHeartbeatIncrement.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(1, 0, TimeSpan.FromMilliseconds(650)) { FillBehavior = FillBehavior.Stop });
     }
 
     private void OnNodeListPreviewMouseWheel(object sender, MouseWheelEventArgs eventArgs)
